@@ -1,0 +1,15 @@
+[package]
+name = "twinner-gui"
+description = "Graphical frontend (toolkit to be chosen by the GUI spike)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+twinner-ui-api.workspace = true
+
+[lints]
+workspace = true

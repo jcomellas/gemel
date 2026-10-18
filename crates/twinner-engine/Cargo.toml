@@ -1,0 +1,18 @@
+[package]
+name = "twinner-engine"
+description = "Synchronization engine: update detection, reconciliation, propagation, archives"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+twinner-compat.workspace = true
+twinner-base.workspace = true
+twinner-fs.workspace = true
+twinner-rpc.workspace = true
+
+[lints]
+workspace = true
