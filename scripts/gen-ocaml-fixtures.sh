@@ -9,6 +9,8 @@
 # - gen_fixtures.ml (umarshal.ml, bytearray_stubs.c, hash_compat.c) and
 #   gen_unicode.ml (unicode.ml, unicode_tables.ml) write the golden vectors
 #   in crates/gemel-compat/tests/fixtures/;
+# - gen_names.ml (rx.ml) writes the vectors for Name and Path's regular
+#   expressions to the same directory;
 # - gen_unicode.ml also writes Unison's Unicode tables as Rust source, to
 #   crates/gemel-compat/src/unicode/tables.rs.
 # With an output directory, everything goes there instead (for comparing
@@ -35,11 +37,14 @@ docker run --rm \
         cp /unison/ubase/umarshal.mli /unison/ubase/umarshal.ml \
            /unison/bytearray_stubs.c /unison/hash_compat.c \
            /unison/unicode.ml /unison/unicode_tables.ml \
-           /gen/gen_fixtures.ml /gen/gen_unicode.ml . &&
+           /unison/ubase/rx.mli /unison/ubase/rx.ml \
+           /gen/gen_fixtures.ml /gen/gen_unicode.ml /gen/gen_names.ml . &&
         ocamlopt -o gen_fixtures bytearray_stubs.c hash_compat.c \
             umarshal.mli umarshal.ml gen_fixtures.ml &&
         ocamlopt -o gen_unicode hash_compat.c \
             unicode_tables.ml unicode.ml gen_unicode.ml &&
+        ocamlopt -o gen_names rx.mli rx.ml gen_names.ml &&
         ./gen_fixtures /out &&
+        ./gen_names /out &&
         ./gen_unicode /out /tables'
 echo "wrote $out and $tables"
