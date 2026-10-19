@@ -26,3 +26,20 @@ jobs:
       - run: cargo test --workspace
       - run: ./scripts/check-no-gui-deps.sh
         shell: bash
+
+  oracle:
+    # Self-test of the differential harness (tools/oracle) against OCaml
+    # Unison built from the pinned source that the fixtures also come from.
+    # Once gemel can sync, this job runs it as the candidate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: bcpierce00/unison
+          ref: 8772d26a2eb77cfd0cb6da81807e81f24f51044c
+          path: unison-src
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ocaml make
+      - run: make -C unison-src tui
+      - run: cargo run --locked -p gemel-oracle -- --reference unison-src/src/unison --count 20
