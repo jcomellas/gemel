@@ -12,3 +12,6 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+md-5.workspace = true
