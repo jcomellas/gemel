@@ -3,8 +3,8 @@
 # repository mounted at /work. With no arguments it runs the CI checks.
 #
 #   scripts/linux-docker.sh                      # fmt, clippy, tests, GUI-deps check
-#   scripts/linux-docker.sh cargo build -p twinner
-#   TWINNER_PLATFORM=linux/amd64 scripts/linux-docker.sh   # emulated x86_64
+#   scripts/linux-docker.sh cargo build -p gemel
+#   GEMEL_PLATFORM=linux/amd64 scripts/linux-docker.sh   # emulated x86_64
 #
 # Build output and the Cargo registry live in named Docker volumes, so they
 # don't mix with the host's target/ and survive between runs. The container
@@ -12,9 +12,9 @@
 # should be none, given --locked) would be root-owned.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
-platform=${TWINNER_PLATFORM:-}
+platform=${GEMEL_PLATFORM:-}
 arch=${platform#linux/}
-image=twinner-linux${arch:+-$arch}
+image=gemel-linux${arch:+-$arch}
 
 docker build ${platform:+--platform "$platform"} -t "$image" \
     -f "$root/docker/linux/Dockerfile" "$root/docker/linux"

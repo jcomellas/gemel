@@ -1,4 +1,4 @@
-# Linux build and test environment for twinner.
+# Linux build and test environment for gemel.
 #
 # Has what the workspace needs on Linux, including the Slint GUI frontend:
 # the Rust toolchain with clippy and rustfmt, fontconfig headers (Slint's
@@ -8,7 +8,7 @@
 # The source tree is bind-mounted, not copied; see scripts/linux-docker.sh.
 # Build from this directory so the build context stays small:
 #
-#   docker build -t twinner-linux -f docker/linux/Dockerfile docker/linux
+#   docker build -t gemel-linux -f docker/linux/Dockerfile docker/linux
 
 ARG RUST_VERSION=1.99.1
 FROM rust:${RUST_VERSION}-slim-trixie

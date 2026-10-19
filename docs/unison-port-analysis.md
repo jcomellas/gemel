@@ -1,14 +1,14 @@
-# Twinner: Porting Unison to Rust — Analysis and Recommendation
+# Gemel: Porting Unison to Rust — Analysis and Recommendation
 
 *Status: Tier A adopted (2026-10-18) · Slint adopted for the GUI under its GPL-3.0-only licence (2026-10-19), VoiceOver check pending (§6) · Source analysed: `bcpierce00/unison` at `8772d26` (post-2.54.0) · Date: 2026-10-17*
 
 ## 1. Summary
 
 - **Most of the work is the sync engine, not the GUI.** About 30k lines of OCaml and C are the engine. The GUIs are about 9k lines: GTK3 plus Cocoa.
-- **The first decision is compatibility, before the GUI library.** Either twinner talks to and shares archives with existing Unison installations, or it is a clean-room tool with the same semantics. We recommend **wire- and archive-compatibility with Unison ≥ 2.52** as the v1 target. It is cheaper than it looks (§3), and it gives us the OCaml binary as a test oracle and a way for users to migrate gradually.
+- **The first decision is compatibility, before the GUI library.** Either gemel talks to and shares archives with existing Unison installations, or it is a clean-room tool with the same semantics. We recommend **wire- and archive-compatibility with Unison ≥ 2.52** as the v1 target. It is cheaper than it looks (§3), and it gives us the OCaml binary as a test oracle and a way for users to migrate gradually.
 - **Build the engine as a GUI-free library**, with a text UI and headless `-server` mode first and the GUI as a separate frontend. Unison's own macOS bridge (`uimacbridge.ml`) already defines a clean engine↔GUI contract we can copy.
 - **GUI recommendation: Slint**, with **egui** as the fallback. **Tauri 2** is the alternative if the team prefers a web frontend. The §6 spike of the main recon table (50k rows) in both Slint and egui confirmed Slint; a manual VoiceOver check is still pending (§6, "Spike results").
-- **Licensing:** a translation is a derivative work, so **twinner must be GPLv3** and must keep Unison's copyright notices (§7).
+- **Licensing:** a translation is a derivative work, so **gemel must be GPLv3** and must keep Unison's copyright notices (§7).
 
 ## 2. What Unison is, structurally
 
@@ -68,35 +68,35 @@ Why A/B is more tractable than it first appears:
   So we only need to emulate the old algorithm's traversal (block tags, sizes, the 10/100 count limits, int64 custom blocks) for those shapes. We do not need a general OCaml-heap emulation. Golden vectors from the OCaml binary make this a small, testable job.
 - **Archive filenames** are `MD5("<thisRoot>;<roots>;<format>")` (`update.ml: archiveHash`), so finding existing archives is trivial.
 - **Unicode and case folding** use Unison's own tables (`unicode_tables.ml`, `unicode.ml`). Port these tables as data instead of using the `unicode-normalization` crate. That crate may follow a different Unicode version, which would silently break case-insensitive mode and archive checksums.
-- **Feature negotiation** (`features.ml`) lets twinner advertise only the features it implements.
+- **Feature negotiation** (`features.ml`) lets gemel advertise only the features it implements.
 
-**Recommendation:** target **Tier A for v1**. Keep the bit-exact compatibility code (the Umarshal codec, legacy hash, OCaml-compatible Unicode tables) in `twinner-compat`, and the RPC v1 mechanism in `twinner-rpc`. A native protocol v2 (e.g. stronger hashes, serde) can then be negotiated later without touching the engine.
+**Recommendation:** target **Tier A for v1**. Keep the bit-exact compatibility code (the Umarshal codec, legacy hash, OCaml-compatible Unicode tables) in `gemel-compat`, and the RPC v1 mechanism in `gemel-rpc`. A native protocol v2 (e.g. stronger hashes, serde) can then be negotiated later without touching the engine.
 
-> **Decision (2026-10-18): Tier A adopted.** twinner v1 is wire- and archive-compatible with Unison ≥ 2.52 (RPC version 1, archive format 23).
+> **Decision (2026-10-18): Tier A adopted.** gemel v1 is wire- and archive-compatible with Unison ≥ 2.52 (RPC version 1, archive format 23).
 
 ## 4. Architecture recommendation
 
 This layout is implemented in the workspace scaffold. Each crate depends only on the ones listed above it:
 
 ```
-twinner/
+gemel/
   crates/
-    twinner-compat   # bit-exact formats: umarshal codec, legacy OCaml hash, Unicode tables, fsmonitor protocol
-    twinner-base     # prefs/.prf profiles, uarg flags, glob (rx.ml), features registry, case, name, path, clroot
-    twinner-fs       # OS layer: system, fspath, os, props (xattr/ACL), macOS metadata, reflink, fingerprints
-    twinner-rpc      # RPC framing + version handshake, command registry/dispatch, ssh/socket connections, PTY
-    twinner-engine   # update detection + archives, recon, transport, transfer (rsync), stasher, moves, negotiate
-    twinner-ui-api   # the engine<->frontend contract (commands + event stream), uicommon, sortri, exit codes
+    gemel-compat   # bit-exact formats: umarshal codec, legacy OCaml hash, Unicode tables, fsmonitor protocol
+    gemel-base     # prefs/.prf profiles, uarg flags, glob (rx.ml), features registry, case, name, path, clroot
+    gemel-fs       # OS layer: system, fspath, os, props (xattr/ACL), macOS metadata, reflink, fingerprints
+    gemel-rpc      # RPC framing + version handshake, command registry/dispatch, ssh/socket connections, PTY
+    gemel-engine   # update detection + archives, recon, transport, transfer (rsync), stasher, moves, negotiate
+    gemel-ui-api   # the engine<->frontend contract (commands + event stream), uicommon, sortri, exit codes
   bins/
-    twinner          # text UI + `-server` mode. MUST have zero GUI deps (runs on headless servers; checked in CI)
-    twinner-gui      # GUI frontend, built with Slint (chosen by the §6 spike)
-    twinner-fsmonitor# watcher helper, same line protocol as unison-fsmonitor (uses the `notify` crate)
+    gemel          # text UI + `-server` mode. MUST have zero GUI deps (runs on headless servers; checked in CI)
+    gemel-gui      # GUI frontend, built with Slint (chosen by the §6 spike)
+    gemel-fsmonitor# watcher helper, same line protocol as unison-fsmonitor (uses the `notify` crate)
 ```
 
 Three constraints from the Unison sources shaped this layering:
 
-- **RPC sits below the engine.** Engine modules register their own remote commands (`Remote.registerRootCmd` in `update.ml`, `files.ml`, `copy.ml`, `stasher.ml`, ...), and the server loop dispatches whatever was registered. So `twinner-engine` depends on `twinner-rpc`, not the other way round.
-- **Case and Unicode handling sit in the foundation.** `Name.compare`/`Name.hash` and `Path.compare` go through `Case`, which uses the Unicode tables and the legacy hash. These feed the sorted archive maps and `checkArchive`, so they live in `twinner-compat`/`twinner-base` rather than in `twinner-fs`.
+- **RPC sits below the engine.** Engine modules register their own remote commands (`Remote.registerRootCmd` in `update.ml`, `files.ml`, `copy.ml`, `stasher.ml`, ...), and the server loop dispatches whatever was registered. So `gemel-engine` depends on `gemel-rpc`, not the other way round.
+- **Case and Unicode handling sit in the foundation.** `Name.compare`/`Name.hash` and `Path.compare` go through `Case`, which uses the Unicode tables and the legacy hash. These feed the sorted archive maps and `checkArchive`, so they live in `gemel-compat`/`gemel-base` rather than in `gemel-fs`.
 - **The CLI uses Unison's single-dash flags** (`-server`, `-batch`), parsed by a port of `uarg.ml`, because OCaml clients start the server as `<servercmd> -server`.
 
 - **Concurrency.** Replace the vendored Lwt with **tokio**: async process I/O for ssh, plus `spawn_blocking`/rayon for filesystem scanning and MD5. The GUI talks to the engine only through channels (commands in, events out). No shared mutable state across the UI thread.
@@ -151,14 +151,14 @@ Versions were checked against upstream changelogs in Oct 2026.
 | Native macOS menu bar | ✅ `MenuBar` (1.10), native on macOS via muda (1.16) | ❌ (add `muda` separately) | ✅ | Partial | ❌ | ✅ |
 | Accessibility | ✅ AccessKit, actively improved (1.17–1.19) | ✅ AccessKit always on (since 0.34) | ✅ via the browser engine | ✅ (AT-SPI, weaker elsewhere) | ⚠ not listed in the 0.14 changelog | ✅ |
 | API stability | **1.x, stable** | 0.x, frequent but manageable breaks | 2.x stable | Stable bindings | 0.x, large breaks between releases | Stable Qt, younger bindings |
-| Licence | Tri-licence incl. **GPLv3** (fits twinner) or royalty-free | MIT/Apache | MIT/Apache | MIT (gtk-rs), LGPL GTK | MIT | LGPL Qt / MIT-Apache bindings |
+| Licence | Tri-licence incl. **GPLv3** (fits gemel) or royalty-free | MIT/Apache | MIT/Apache | MIT (gtk-rs), LGPL GTK | MIT | LGPL Qt / MIT-Apache bindings |
 | Build/ship burden | Low (pure Rust, no runtime) | Lowest | Medium (JS toolchain. WebKitGTK dependency on Linux) | High on macOS/Windows | Low | **High** (Qt SDK, C++ toolchain) |
 | Team cost | One new DSL (`.slint`), live-preview tooling | Pure Rust. Immediate-mode mental model | Second language stack (TS/HTML) | GTK idioms. Closest to the existing `uigtk3` | Elm architecture | C++/QML knowledge |
 
 ### Assessment
 
 - **Slint (recommended).**
-  - It is the only pure-Rust option that combines a stable 1.x API, native macOS menus, real accessibility work and a low shipping burden on all three platforms. Its GPLv3 option matches the licence twinner must use anyway.
+  - It is the only pure-Rust option that combines a stable 1.x API, native macOS menus, real accessibility work and a low shipping burden on all three platforms. Its GPLv3 option matches the licence gemel must use anyway.
   - The declarative `.slint` files keep UI layout separate from engine glue, which suits a port where the dialogs (profile editor, wizard, SSH prompt) are mostly forms.
   - **Main risk:** `StandardTableView` sorts but is single-select with text-only cells, so the recon table (multi-select, status icons, per-row progress) probably has to be built ourselves on `ListView` with a Rust-side selection model. The spike must prove this.
 - **egui (fallback).**
@@ -197,7 +197,7 @@ Decide on: effort for (1), smoothness of (2), and friction in (5).
 
 **Recommendation: Slint, as §5 proposed.** The main risk is retired. A custom table on `ListView` does everything the recon table needs: multi-select, sorting, status icons, live progress and screen-reader semantics. egui starts faster, uses less CPU per frame and makes a smaller binary. But its gaps are structural: it has no menu bar of its own, row semantics for screen readers need patching through egui internals, and it is non-native everywhere. Slint's gaps are small and local: there is no in-window modal and no built-in multi-select table. Before committing, do a real VoiceOver pass (steps below), since that could not be run here.
 
-**What was built.** The slice was built twice, as throwaway crates. They were committed in `d33970e` and removed in the next commit, which started the real `bins/twinner-gui` from the Slint spike (see "Afterwards" below). To reproduce the numbers in this section, `git checkout d33970e` first:
+**What was built.** The slice was built twice, as throwaway crates. They were committed in `d33970e` and removed in the next commit, which started the real `bins/gemel-gui` from the Slint spike (see "Afterwards" below). To reproduce the numbers in this section, `git checkout d33970e` first. That commit predates the rename to gemel, so its crates still carry the old project name, twinner:
 
 - `bins/twinner-gui-spike-slint`, on Slint 1.18.1;
 - `bins/twinner-gui-spike-egui`, on egui/eframe 0.36.2 (0.37.0 shipped on 2026-10-15, too late for the spike);
@@ -238,7 +238,7 @@ or `-p twinner-gui-spike-egui`. Options: `--rows N`, `--rate N`, `--bench SECS [
 | SSH-password modal | No in-window modal (`Dialog` is a separate window). Built a scrim with a card instead (~50 lines). The password field takes focus, so the table never sees keys | `egui::Modal` is built in. Table keys had to be suppressed by hand while it is open |
 | **4. Screen reader** (AccessKit tree, checked by the tests) | Correct by default: `ListView` is a `ListBox` with an item count of 50k, and each row is a `ListBoxOption` with label, selected state and index. Set declaratively on the row | Wrong by default: selection becomes "toggled" (a button state) and rows aren't items of a list. Fixed by patching AccessKit nodes and tagging the rows' parent `Ui`, found through the cell's `ui.stack()`. That depends on `TableBuilder` internals. The other five cells per row also had to be hidden, or a screen reader would step through ~140 cell containers between the 28 visible rows |
 | VoiceOver / Narrator | **Not run.** Needs an unlocked session and a person (manual steps below). Narrator needs Windows | **Not run** (same) |
-| **5. Release binary** (arm64, default features) | 17.5 MB; 10.5 MB stripped with fat LTO, 1 codegen unit and `panic=abort` | 14.4 MB; 8.3 MB with the same settings (for scale: headless `twinner` is 0.4 MB) |
+| **5. Release binary** (arm64, default features) | 17.5 MB; 10.5 MB stripped with fat LTO, 1 codegen unit and `panic=abort` | 14.4 MB; 8.3 MB with the same settings (for scale: headless `gemel` is 0.4 MB) |
 | Startup, median of 5 warm runs | 195 ms to first rendered frame; 251 ms process wall time to exit | 109 ms to first `ui()` call (before painting); 166 ms process wall time |
 | Build friction | One build script (`slint-build`). Generated code needs `#![allow(missing_docs, unsafe_code, clippy::all, clippy::todo)]`. Element IDs must not shadow enum names (`table`, `password`). Tests need `with_debug_info(true)` | None beyond Cargo |
 
@@ -268,10 +268,10 @@ The sort frame is mostly the shared Rust sort of 50k rows: the same code in both
   - **Linux build image:** `docker/linux/Dockerfile` (Rust 1.99.1 on Debian trixie) has those build dependencies plus X11, Mesa and Xvfb for headless smoke runs. `scripts/linux-docker.sh` builds it and runs the CI checks with the checkout mounted; extra arguments run any other command instead. Build output and the Cargo registry live in named Docker volumes. The container runs as root.
   - egui loads X11, Wayland and xkbcommon at runtime and needs no build-time system packages.
   - Verified on 2026-10-19 in that image on **arm64** Linux (Docker on Apple silicon): `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` (including both spikes' input and accessibility tests) and `check-no-gui-deps.sh` pass. Under `xvfb-run`, both spikes start on X11 with Mesa and render a first frame: Slint after 453 ms, egui after 79 ms.
-  - The image is for reproducing Linux builds locally. CI keeps the GitHub Ubuntu runner, adding one `apt-get` step, and is the first x86_64 Linux run. `TWINNER_PLATFORM=linux/amd64 scripts/linux-docker.sh` emulates x86_64 if one is ever needed locally (slow).
+  - The image is for reproducing Linux builds locally. CI keeps the GitHub Ubuntu runner, adding one `apt-get` step, and is the first x86_64 Linux run. `GEMEL_PLATFORM=linux/amd64 scripts/linux-docker.sh` emulates x86_64 if one is ever needed locally (slow).
   - Both spikes pass `clippy -D warnings` for `x86_64-pc-windows-msvc`, cross-checked from macOS. Neither was linked or run on Windows.
 - **Licence:**
-  - **Decided 2026-10-19: use Slint under its GPL-3.0-only option.** twinner's sources stay GPL-3.0-or-later. The GUI binary, which links Slint, is distributed under GPLv3 only. The headless `twinner` binary doesn't link Slint and is unaffected.
+  - **Decided 2026-10-19: use Slint under its GPL-3.0-only option.** gemel's sources stay GPL-3.0-or-later. The GUI binary, which links Slint, is distributed under GPLv3 only. The headless `gemel` binary doesn't link Slint and is unaffected.
   - Slint's royalty-free desktop licence was considered and not needed.
   - egui is MIT/Apache.
 
@@ -291,11 +291,11 @@ The sort frame is mostly the shared Rust sort of 50k rows: the same code in both
   6. Open the SSH dialog (⌘K). The password field should be focused and announced as a secure text field.
 - Without VoiceOver: `swift scripts/macos-ax-dump.swift PID` prints a running app's accessibility tree, the same API VoiceOver reads. It shows list rows and selection counts, and each menu item's key equivalent. It needs the Accessibility permission for the app that runs it.
 
-**Afterwards (2026-10-19).** The Slint spike became `bins/twinner-gui`:
+**Afterwards (2026-10-19).** The Slint spike became `bins/gemel-gui`:
 
-- `ui/app.slint` is the spike's window, titled "twinner".
-- `src/recon_view.rs` holds the recon view model: rows, sorting and the multi-selection. Selection stays in the GUI. The item types are placeholders until `twinner-ui-api` defines the reconciliation items, and sorting is due to move to `twinner_ui_api::sortri`.
-- `src/fake_engine.rs` holds the spike's fake feed. It is the GUI's only data source until the engine exists, and must not depend on `twinner-engine` directly.
+- `ui/app.slint` is the spike's window, titled "gemel".
+- `src/recon_view.rs` holds the recon view model: rows, sorting and the multi-selection. Selection stays in the GUI. The item types are placeholders until `gemel-ui-api` defines the reconciliation items, and sorting is due to move to `gemel_ui_api::sortri`.
+- `src/fake_engine.rs` holds the spike's fake feed. It is the GUI's only data source until the engine exists, and must not depend on `gemel-engine` directly.
 - The bench and startup-timing flags were dropped. `--rows` and `--rate` remain as development flags.
 - The input and accessibility test came across unchanged.
 - The egui spike and the shared spike crate were deleted; they remain in `d33970e`.
@@ -303,10 +303,10 @@ The sort frame is mostly the shared Rust sort of 50k rows: the same code in both
 
 ## 7. Licensing and provenance
 
-- Unison is **GPLv3**. A translation is a derivative work, so **twinner must be distributed under GPLv3**, keep the original copyright and attribution notices, and say it is derived from Unison. Every GUI option above is compatible with this; for Slint, use its GPLv3 licence option. That option is GPL-3.0-only, so the GUI binary is GPLv3-only (§6, decided 2026-10-19).
-- Unison's `CONTRIBUTING.md` (since 2.54.0) rejects LLM-generated contributions, and the maintainer regards LLM output as a derived work of its training data. That policy covers contributions *to Unison*, not an independent fork. Still, if twinner is written with LLM assistance:
+- Unison is **GPLv3**. A translation is a derivative work, so **gemel must be distributed under GPLv3**, keep the original copyright and attribution notices, and say it is derived from Unison. Every GUI option above is compatible with this; for Slint, use its GPLv3 licence option. That option is GPL-3.0-only, so the GUI binary is GPLv3-only (§6, decided 2026-10-19).
+- Unison's `CONTRIBUTING.md` (since 2.54.0) rejects LLM-generated contributions, and the maintainer regards LLM output as a derived work of its training data. That policy covers contributions *to Unison*, not an independent fork. Still, if gemel is written with LLM assistance:
   - plan on **no upstreaming** of code;
-  - keep a **distinct name and branding** (twinner already is), and don't present it as an official Unison project;
+  - keep a **distinct name and branding** (gemel already is), and don't present it as an official Unison project;
   - form your own view on the provenance question. This document is not legal advice.
 
 ## 8. Risks

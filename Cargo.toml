@@ -12,15 +12,15 @@ description = "A Rust port of the Unison file synchronizer"
 publish = false
 
 [workspace.dependencies]
-twinner-compat = { path = "crates/twinner-compat" }
-twinner-base = { path = "crates/twinner-base" }
-twinner-fs = { path = "crates/twinner-fs" }
-twinner-rpc = { path = "crates/twinner-rpc" }
-twinner-engine = { path = "crates/twinner-engine" }
-twinner-ui-api = { path = "crates/twinner-ui-api" }
+gemel-compat = { path = "crates/gemel-compat" }
+gemel-base = { path = "crates/gemel-base" }
+gemel-fs = { path = "crates/gemel-fs" }
+gemel-rpc = { path = "crates/gemel-rpc" }
+gemel-engine = { path = "crates/gemel-engine" }
+gemel-ui-api = { path = "crates/gemel-ui-api" }
 
 [workspace.lints.rust]
-# `deny` rather than `forbid` so that twinner-fs can opt in for FFI
+# `deny` rather than `forbid` so that gemel-fs can opt in for FFI
 # (xattr/ACL/clonefile) with a crate-level `#![allow(unsafe_code)]`.
 unsafe_code = "deny"
 missing_docs = "warn"

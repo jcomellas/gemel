@@ -1,0 +1,15 @@
+[package]
+name = "gemel-base"
+description = "Foundation: preferences and profiles, CLI flags, names and paths, case handling, feature registry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+gemel-compat.workspace = true
+
+[lints]
+workspace = true

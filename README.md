@@ -1,4 +1,4 @@
-# twinner
+# gemel
 
 A Rust port of the [Unison](https://github.com/bcpierce00/unison) file
 synchronizer, with a portable GUI for macOS, Linux and Windows.
@@ -9,16 +9,16 @@ Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.m
 
 ## Compatibility goal (Tier A)
 
-twinner aims to be wire- and archive-compatible with Unison 2.52 and later
-(RPC version 1, archive format 23). A twinner client should work with an
+gemel aims to be wire- and archive-compatible with Unison 2.52 and later
+(RPC version 1, archive format 23). A gemel client should work with an
 OCaml `unison -server` and the reverse, and both should share the archives
 in `~/.unison` and the `.prf` profiles.
 
 To mix the two:
 
-- OCaml client → twinner server: set `servercmd = twinner` in the profile,
-  or install twinner on the server under the name `unison`.
-- OCaml Unison using the twinner file watcher: install `twinner-fsmonitor`
+- OCaml client → gemel server: set `servercmd = gemel` in the profile,
+  or install gemel on the server under the name `unison`.
+- OCaml Unison using the gemel file watcher: install `gemel-fsmonitor`
   as `unison-fsmonitor`.
 
 ## Layout
@@ -27,30 +27,30 @@ Crates are layered; each depends only on the ones above it:
 
 | Crate | Role |
 |---|---|
-| `crates/twinner-compat` | Bit-exact formats shared with OCaml Unison (Umarshal, legacy hash, Unicode tables, fsmonitor protocol) |
-| `crates/twinner-base` | Preferences/profiles, CLI flags, names, paths, case handling, feature registry |
-| `crates/twinner-fs` | OS layer: filesystem, properties, xattrs, ACLs, macOS metadata, fingerprints |
-| `crates/twinner-rpc` | RPC framing, version handshake, command registry, ssh/socket connections |
-| `crates/twinner-engine` | Update detection, reconciliation, propagation, archives |
-| `crates/twinner-ui-api` | The engine/frontend contract |
-| `bins/twinner` | Text UI and `-server` mode (no GUI dependencies, enforced in CI) |
-| `bins/twinner-gui` | Slint GUI frontend (no engine yet: shows fake data) |
-| `bins/twinner-fsmonitor` | File-watcher helper |
+| `crates/gemel-compat` | Bit-exact formats shared with OCaml Unison (Umarshal, legacy hash, Unicode tables, fsmonitor protocol) |
+| `crates/gemel-base` | Preferences/profiles, CLI flags, names, paths, case handling, feature registry |
+| `crates/gemel-fs` | OS layer: filesystem, properties, xattrs, ACLs, macOS metadata, fingerprints |
+| `crates/gemel-rpc` | RPC framing, version handshake, command registry, ssh/socket connections |
+| `crates/gemel-engine` | Update detection, reconciliation, propagation, archives |
+| `crates/gemel-ui-api` | The engine/frontend contract |
+| `bins/gemel` | Text UI and `-server` mode (no GUI dependencies, enforced in CI) |
+| `bins/gemel-gui` | Slint GUI frontend (no engine yet: shows fake data) |
+| `bins/gemel-fsmonitor` | File-watcher helper |
 
 Each module's doc comment names the Unison source files it ports.
 
 ## Licence and provenance
 
-twinner is derived from Unison and is distributed under the GNU General
+gemel is derived from Unison and is distributed under the GNU General
 Public License, version 3 or (at your option) any later version. See
 [LICENSE](LICENSE).
 
-The GUI binary (`twinner-gui`) links [Slint](https://slint.dev) under
+The GUI binary (`gemel-gui`) links [Slint](https://slint.dev) under
 its GPL-3.0-only licence, so that binary is distributed under GPLv3 only.
 The other binaries keep the "or any later version" option.
 
 Unison is Copyright Benjamin C. Pierce and other contributors; each ported
-module keeps the copyright lines of its source. twinner is an independent
+module keeps the copyright lines of its source. gemel is an independent
 project and is not affiliated with or endorsed by the Unison project.
 
 When porting a module, keep the copyright lines of the Unison source file
