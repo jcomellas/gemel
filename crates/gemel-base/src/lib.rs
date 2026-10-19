@@ -16,3 +16,17 @@ pub mod rx;
 pub mod trace;
 pub mod uarg;
 pub mod util;
+
+#[cfg(test)]
+mod test_util {
+    /// Decodes the hex used in the OCaml fixtures (`-` for empty).
+    pub fn unhex(s: &str) -> Vec<u8> {
+        if s == "-" {
+            return vec![];
+        }
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+}
