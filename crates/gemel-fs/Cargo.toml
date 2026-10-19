@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 gemel-compat.workspace = true
 gemel-base.workspace = true
+md-5.workspace = true
 
 [lints]
 workspace = true

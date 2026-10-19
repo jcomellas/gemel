@@ -1494,6 +1494,7 @@ version = "0.1.0"
 dependencies = [
  "gemel-base",
  "gemel-compat",
+ "md-5",
 ]
 
 [[package]]
