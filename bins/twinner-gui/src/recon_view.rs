@@ -1,10 +1,15 @@
-//! The recon table model: rows, sort order and a multi-selection.
+//! The recon table's view model: rows, sort order and a multi-selection.
 //!
 //! Rows are addressed two ways. The *id* is the row's index in
 //! [`ReconTable::rows`] and never changes. The *view index* is its position
 //! in the current sort order. The selection is keyed by id, so sorting keeps
 //! it. Methods that change visible state return the view indices that
-//! changed, so a retained-mode toolkit (Slint) can notify only those rows.
+//! changed, so the Slint model can notify only those rows.
+//!
+//! Selection is a frontend concern and stays here. The item types
+//! ([`ReplicaStatus`], [`Direction`], [`Row`]) are placeholders: the real
+//! ones will come from the reconciliation items in `twinner-ui-api`, and
+//! sorting will move to `twinner_ui_api::sortri` (the port of `sortri.ml`).
 
 use std::cmp::Ordering;
 
@@ -200,19 +205,9 @@ impl ReconTable {
         self.rows.len()
     }
 
-    /// True if there are no rows.
-    pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-    }
-
     /// The row shown at `view`.
     pub fn row_at(&self, view: usize) -> &Row {
         &self.rows[self.order[view] as usize]
-    }
-
-    /// The id of the row shown at `view`.
-    pub fn id_at(&self, view: usize) -> u32 {
-        self.order[view]
     }
 
     /// Where the row with `id` is shown.

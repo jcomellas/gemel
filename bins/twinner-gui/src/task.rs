@@ -1,8 +1,8 @@
 //! Runs a future to completion on a helper thread.
 //!
 //! `rfd`'s async dialogs present as window-modal sheets on macOS and leave
-//! the UI event loop running; the spikes wait for the result here instead of
-//! blocking a frame.
+//! the UI event loop running; the GUI waits for the result here instead of
+//! blocking the event loop.
 
 use std::future::Future;
 use std::pin::pin;

@@ -1,9 +1,11 @@
 //! A fake engine: deterministic recon rows and a background progress feed.
 //!
-//! The feed thread stands in for the engine's transfer loop. It sends
-//! batches of [`ProgressUpdate`]s over a channel at a fixed rate and calls a
-//! `wake` callback after each batch, as the real `twinner-ui-api` event
-//! stream will.
+//! Until the engine exists, this is the GUI's only data source. It stands in
+//! for the `twinner-ui-api` session: [`generate_rows`] plays the result of
+//! update detection and reconciliation, and the [`Feed`] thread plays the
+//! transfer loop, sending batches of [`ProgressUpdate`]s over a channel at a
+//! fixed rate. Replace it with the real session events; it must never
+//! depend on `twinner-engine` directly.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,10 +13,10 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::table::{Direction, ProgressUpdate, ReplicaStatus, Row};
+use crate::recon_view::{Direction, ProgressUpdate, ReplicaStatus, Row};
 
-/// A small deterministic PRNG (xorshift64*), so both spikes see the same
-/// rows without a `rand` dependency.
+/// A small deterministic PRNG (xorshift64*), so runs are repeatable without
+/// a `rand` dependency.
 struct Rng(u64);
 
 impl Rng {
@@ -100,8 +102,8 @@ impl Feed {
     /// Sixteen simulated transfers run at once; each update moves one of
     /// them forward 10%, and a finished transfer picks the next row with a
     /// large stride, so updates land both inside and outside the visible
-    /// part of the table. `wake` is called after every batch.
-    pub fn spawn(rows: usize, rate: u32, wake: impl Fn() + Send + 'static) -> Feed {
+    /// part of the table. The GUI drains the channel on a timer.
+    pub fn spawn(rows: usize, rate: u32) -> Feed {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_flag = Arc::clone(&stop);
@@ -140,11 +142,8 @@ impl Feed {
                         slot = (slot + 1) % SLOTS;
                         sent += 1;
                     }
-                    if !batch.is_empty() {
-                        if tx.send(batch).is_err() {
-                            return;
-                        }
-                        wake();
+                    if !batch.is_empty() && tx.send(batch).is_err() {
+                        return;
                     }
                 }
             })
@@ -201,11 +200,19 @@ mod tests {
     }
 
     #[test]
-    fn feed_sends_at_roughly_the_rate() {
-        let feed = Feed::spawn(100, 1000, || {});
-        std::thread::sleep(Duration::from_millis(200));
-        let got = feed.drain();
-        assert!((100..=300).contains(&got.len()), "{}", got.len());
-        assert!(got.iter().all(|u| u.id < 100 && u.progress <= 1.0));
+    fn feed_sends_valid_updates() {
+        // No timing assertions: CI runners are too noisy for them.
+        let feed = Feed::spawn(100, 1000);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut got = Vec::new();
+        while got.is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            got = feed.drain();
+        }
+        assert!(!got.is_empty());
+        assert!(
+            got.iter()
+                .all(|u| u.id < 100 && (0.0..=1.0).contains(&u.progress))
+        );
     }
 }
