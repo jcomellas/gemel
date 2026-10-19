@@ -184,8 +184,36 @@ pub trait PrefValue: Clone + PartialEq + Send + Sync + 'static {
     /// Umarshal encoding, for the dump sent to the server.
     fn marshal(&self, w: &mut Writer);
     /// Umarshal decoding.
-    fn unmarshal(r: &mut Reader<'_>) -> umarshal::Result<Self>;
+    fn unmarshal(r: &mut Reader<'_>) -> Result<Self, DecodeError>;
 }
+
+/// Why a preference value received from the client couldn't be decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeError {
+    /// Malformed Umarshal data.
+    Umarshal(umarshal::Error),
+    /// A string that isn't UTF-8. OCaml strings are bytes, but gemel keeps
+    /// preference values as text; such a value is rejected rather than
+    /// altered, since it may be a path.
+    NotUtf8,
+}
+
+impl From<umarshal::Error> for DecodeError {
+    fn from(e: umarshal::Error) -> Self {
+        DecodeError::Umarshal(e)
+    }
+}
+
+impl std::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecodeError::Umarshal(e) => e.fmt(f),
+            DecodeError::NotUtf8 => f.write_str("a string value is not valid UTF-8"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
 
 impl PrefValue for bool {
     const KIND: Kind = Kind::Bool;
@@ -201,8 +229,8 @@ impl PrefValue for bool {
     fn marshal(&self, w: &mut Writer) {
         w.bool(*self);
     }
-    fn unmarshal(r: &mut Reader<'_>) -> umarshal::Result<Self> {
-        r.bool()
+    fn unmarshal(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        Ok(r.bool()?)
     }
 }
 
@@ -220,8 +248,8 @@ impl PrefValue for i64 {
     fn marshal(&self, w: &mut Writer) {
         w.int(*self);
     }
-    fn unmarshal(r: &mut Reader<'_>) -> umarshal::Result<Self> {
-        r.int()
+    fn unmarshal(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        Ok(r.int()?)
     }
 }
 
@@ -232,10 +260,9 @@ fn str_input(input: Input<'_>) -> Result<&str, String> {
     }
 }
 
-fn read_utf8(r: &mut Reader<'_>) -> umarshal::Result<String> {
-    // Preference values are text here; a non-UTF-8 value from an OCaml peer
-    // is replaced rather than rejected.
-    Ok(String::from_utf8_lossy(r.string_slice()?).into_owned())
+/// A string value, which must be UTF-8 (see [`DecodeError::NotUtf8`]).
+fn read_string(r: &mut Reader<'_>) -> Result<String, DecodeError> {
+    String::from_utf8(r.string()?).map_err(|_| DecodeError::NotUtf8)
 }
 
 impl PrefValue for String {
@@ -249,8 +276,8 @@ impl PrefValue for String {
     fn marshal(&self, w: &mut Writer) {
         w.string(self.as_bytes());
     }
-    fn unmarshal(r: &mut Reader<'_>) -> umarshal::Result<Self> {
-        read_utf8(r)
+    fn unmarshal(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        read_string(r)
     }
 }
 
@@ -269,8 +296,11 @@ impl PrefValue for Vec<String> {
     fn marshal(&self, w: &mut Writer) {
         w.list(self, |w, s| w.string(s.as_bytes()));
     }
-    fn unmarshal(r: &mut Reader<'_>) -> umarshal::Result<Self> {
-        r.list(read_utf8)
+    fn unmarshal(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        r.list(Reader::string)?
+            .into_iter()
+            .map(|s| String::from_utf8(s).map_err(|_| DecodeError::NotUtf8))
+            .collect()
     }
 }
 
@@ -298,7 +328,7 @@ impl PrefValue for BoolWithDefault {
             BoolWithDefault::Default => 2,
         });
     }
-    fn unmarshal(r: &mut Reader<'_>) -> umarshal::Result<Self> {
+    fn unmarshal(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
         Ok(match r.tag(3)? {
             0 => BoolWithDefault::True,
             1 => BoolWithDefault::False,
@@ -317,7 +347,7 @@ impl PrefValue for () {
         Vec::new()
     }
     fn marshal(&self, _: &mut Writer) {}
-    fn unmarshal(_: &mut Reader<'_>) -> umarshal::Result<Self> {
+    fn unmarshal(_: &mut Reader<'_>) -> Result<Self, DecodeError> {
         Ok(())
     }
 }
@@ -433,7 +463,7 @@ trait AnyPref: Sync {
     fn apply(&self, v: &BoxedValue, input: Input<'_>) -> Result<BoxedValue, String>;
     fn print(&self, v: &BoxedValue) -> Vec<String>;
     fn dump(&self, v: &BoxedValue, names: &[String]) -> Vec<u8>;
-    fn load(&self, bytes: &[u8]) -> umarshal::Result<BoxedValue>;
+    fn load(&self, bytes: &[u8]) -> Result<BoxedValue, DecodeError>;
 }
 
 fn downcast<T: 'static>(v: &BoxedValue) -> &T {
@@ -506,12 +536,13 @@ impl<T: PrefValue> AnyPref for PrefDef<T> {
             w.list(names, |w, n| w.string(n.as_bytes()));
         })
     }
-    fn load(&self, bytes: &[u8]) -> umarshal::Result<BoxedValue> {
+    fn load(&self, bytes: &[u8]) -> Result<BoxedValue, DecodeError> {
         let v = umarshal::from_bytes(bytes, |r| {
-            let v = T::unmarshal(r)?;
-            r.list(read_utf8)?;
+            let v = T::unmarshal(r);
+            // The names are sent too, but only the value is used.
+            r.list(Reader::string)?;
             Ok(v)
-        })?;
+        })??;
         Ok(Box::new(v))
     }
 }
@@ -1298,7 +1329,12 @@ pub fn marshal_dumped(w: &mut Writer, dumped: &[DumpedPref]) {
 
 /// `Prefs.mdumpedPrefs`: unmarshals a dump.
 pub fn unmarshal_dumped(r: &mut Reader<'_>) -> umarshal::Result<Vec<DumpedPref>> {
-    r.list(|r| Ok((read_utf8(r)?, r.bool()?, r.string()?)))
+    // Preference names are ASCII identifiers; a mangled one is reported as
+    // unknown by `Prefs::load`.
+    r.list(|r| {
+        let name = String::from_utf8_lossy(r.string_slice()?).into_owned();
+        Ok((name, r.bool()?, r.string()?))
+    })
 }
 
 #[cfg(test)]

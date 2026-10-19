@@ -149,6 +149,36 @@ let ocaml_hash oc =
   fs "filesize_2p40" 0x100_0000_0000L;
   fs "filesize_max" Int64.max_int
 
+(* The preference dump the client sends the server (src/ubase/prefs.ml):
+   mdumpedPrefs, createPrefInternal's dumper for RPC version 1, and
+   createBoolWithDefault's marshaller, repeated verbatim. *)
+let mdumpedPrefs = Umarshal.(list (prod3 string bool string id id))
+let dumper m = let m = Umarshal.(prod2 m (list string) id id) in
+  fun value names -> Umarshal.to_string m (value, names)
+let mbooldef = Umarshal.(sum3 unit unit unit
+                (function
+                 | `True -> I31 ()
+                 | `False -> I32 ()
+                 | `Default -> I33 ())
+                (function
+                 | I31 () -> `True
+                 | I32 () -> `False
+                 | I33 () -> `Default))
+
+let prefs_dump oc =
+  header oc "Preference dump";
+  Printf.fprintf oc
+    "# One case: Umarshal.to_string mdumpedPrefs of a dump with one\n\
+     # preference of each built-in kind (see crates/gemel-base/tests/).\n";
+  let dump = [
+    ("batch", false, dumper Umarshal.bool true ["batch"]);
+    ("retry", false, dumper Umarshal.int 7 ["retries"; "retry"]);
+    ("sshcmd", true, dumper Umarshal.string "ssh -x" ["sshcmd"]);
+    ("root", false, dumper Umarshal.(list string) ["b"; "a"] ["root"]);
+    ("ignorecase", false, dumper mbooldef `False ["ignorecase"]);
+    ("unicode", false, dumper mbooldef `Default ["unicode"]) ] in
+  Printf.fprintf oc "dump %s\n" (hex (Umarshal.to_string mdumpedPrefs dump))
+
 let () =
   let dir = Sys.argv.(1) in
   let with_file name f =
@@ -157,4 +187,5 @@ let () =
     close_out oc
   in
   with_file "umarshal.txt" umarshal;
-  with_file "ocaml_hash.txt" ocaml_hash
+  with_file "ocaml_hash.txt" ocaml_hash;
+  with_file "prefs_dump.txt" prefs_dump
