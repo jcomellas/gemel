@@ -115,7 +115,7 @@ Three constraints from the Unison sources shaped this layering:
   4. GUI
   5. platform polish
 
-  The text UI is the first frontend *and* the test harness.
+  The text UI is the first frontend *and* the test harness. Milestone 1 is done; milestone 2 is planned in [milestone-2-plan.md](milestone-2-plan.md).
 - **Verification:**
   - Differential testing against the OCaml binary on identical replica trees: same recon result, same final trees, byte-identical or semantically equal archives.
   - Mixed-version client/server matrices (Tier A).
@@ -136,7 +136,7 @@ Three constraints from the Unison sources shaped this layering:
 | `system_win*` (wide-char APIs) | Rust `std` (`OsString`/UTF-16 is native). Long-path handling still needs care |
 | `osxsupport.c` (resource forks, Finder info) | `xattr` (`com.apple.ResourceFork`, `com.apple.FinderInfo`) plus a little `libc` |
 | inotify / Windows watchers | `notify` (also covers FSEvents on macOS, which Unison lacked) |
-| `rx.ml` glob/regex | **Port semantics.** The `regex` crate's syntax differs, so write a translator to `regex` and test it against OCaml |
+| `rx.ml` glob/regex | **Ported as is** (milestone 1): the derivative-based DFA, not a translation to the `regex` crate, tested against OCaml |
 | `hash_compat.c` | Hand port of the pre-4.00 hash for the specific value shapes Unison hashes (§3), with golden tests generated from the OCaml binary |
 
 ## 5. Rust GUI options, scored against Unison's needs
