@@ -3,8 +3,12 @@
 A Rust port of the [Unison](https://github.com/bcpierce00/unison) file
 synchronizer, with a portable GUI for macOS, Linux and Windows.
 
-**Status:** early port. The Umarshal codec and the legacy OCaml hash
-(`gemel-compat`) are done; everything else is a skeleton.
+**Status:** early port. Done:
+- `gemel-compat`: the Umarshal codec, the legacy OCaml hash and Unison's
+  Unicode handling;
+- `gemel-base`: case modes.
+
+Everything else is a skeleton.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 
@@ -44,17 +48,19 @@ Each module's doc comment names the Unison source files it ports.
 
 Code that must match OCaml Unison bit for bit is tested against vectors
 produced by Unison's own code, in `crates/gemel-compat/tests/fixtures/`.
-They are committed, so tests don't need OCaml. To regenerate them (needs
-Docker and a Unison checkout):
+Unison's Unicode tables are extracted the same way, into
+`crates/gemel-compat/src/unicode/tables.rs`. Both are committed, so builds
+and tests don't need OCaml. To regenerate them (needs Docker and a Unison
+checkout):
 
 ```sh
 scripts/gen-ocaml-fixtures.sh /path/to/unison
 ```
 
-The generator is `tools/ocaml-fixtures/gen_fixtures.ml`. Each fixture
-file records the Unison commit and OCaml version it came from. The
-committed vectors come from OCaml 5.3.0; OCaml 4.13.1
-(`OCAML_BASE=debian:bookworm-slim`) produces identical ones.
+The generators are in `tools/ocaml-fixtures/`. Each generated file records
+the Unison commit and OCaml version it came from. The committed files come
+from OCaml 5.3.0; OCaml 4.13.1 (`OCAML_BASE=debian:bookworm-slim`)
+produces identical ones.
 
 ## Licence and provenance
 

@@ -1,0 +1,4 @@
+# Generated from OCaml Unison by scripts/gen-ocaml-fixtures.sh. Keep the bytes
+# exactly as generated (no end-of-line conversion) and collapse them in diffs.
+crates/gemel-compat/tests/fixtures/*.txt -text linguist-generated
+crates/gemel-compat/src/unicode/tables.rs -text linguist-generated
