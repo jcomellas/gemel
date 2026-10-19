@@ -3,7 +3,8 @@
 A Rust port of the [Unison](https://github.com/bcpierce00/unison) file
 synchronizer, with a portable GUI for macOS, Linux and Windows.
 
-**Status:** workspace skeleton only. Nothing is implemented yet.
+**Status:** early port. The Umarshal codec and the legacy OCaml hash
+(`gemel-compat`) are done; everything else is a skeleton.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 
@@ -38,6 +39,22 @@ Crates are layered; each depends only on the ones above it:
 | `bins/gemel-fsmonitor` | File-watcher helper |
 
 Each module's doc comment names the Unison source files it ports.
+
+## Golden test vectors
+
+Code that must match OCaml Unison bit for bit is tested against vectors
+produced by Unison's own code, in `crates/gemel-compat/tests/fixtures/`.
+They are committed, so tests don't need OCaml. To regenerate them (needs
+Docker and a Unison checkout):
+
+```sh
+scripts/gen-ocaml-fixtures.sh /path/to/unison
+```
+
+The generator is `tools/ocaml-fixtures/gen_fixtures.ml`. Each fixture
+file records the Unison commit and OCaml version it came from. The
+committed vectors come from OCaml 5.3.0; OCaml 4.13.1
+(`OCAML_BASE=debian:bookworm-slim`) produces identical ones.
 
 ## Licence and provenance
 
