@@ -11,6 +11,8 @@
 #   in crates/gemel-compat/tests/fixtures/;
 # - gen_base.ml (clroot.ml, with tools/ocaml-fixtures/stubs/ standing in for
 #   Util and Prefs) writes the vectors for gemel-base's clroot and util;
+# - gen_rx.ml (rx.ml) writes the vectors for gemel-base's rx, running each
+#   anchored pattern in its own process (see the comment in gen_rx.ml);
 # - gen_names.ml (rx.ml) writes the vectors for Name and Path's regular
 #   expressions to the same directory;
 # - gen_unicode.ml also writes Unison's Unicode tables as Rust source, to
@@ -42,7 +44,7 @@ docker run --rm \
            /unison/ubase/rx.mli /unison/ubase/rx.ml \
            /unison/clroot.mli /unison/clroot.ml \
            /gen/gen_fixtures.ml /gen/gen_unicode.ml /gen/gen_names.ml \
-           /gen/gen_base.ml /gen/stubs/*.ml . &&
+           /gen/gen_base.ml /gen/gen_rx.ml /gen/stubs/*.ml . &&
         ocamlopt -o gen_fixtures bytearray_stubs.c hash_compat.c \
             umarshal.mli umarshal.ml gen_fixtures.ml &&
         ocamlopt -o gen_unicode hash_compat.c \
@@ -50,6 +52,9 @@ docker run --rm \
         ocamlopt -o gen_names rx.mli rx.ml gen_names.ml &&
         ocamlopt -I +str -o gen_base str.cmxa safelist.ml util.ml prefs.ml \
             rx.mli rx.ml clroot.mli clroot.ml gen_base.ml &&
+        ocamlopt -o gen_rx rx.mli rx.ml gen_rx.ml &&
+        ./gen_rx /out &&
+        for p in $(./gen_rx --anchors); do ./gen_rx --anchor "$p" >> /out/rx.txt; done &&
         ./gen_fixtures /out &&
         ./gen_base /out &&
         ./gen_names /out &&
