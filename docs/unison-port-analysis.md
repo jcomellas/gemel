@@ -1,13 +1,13 @@
 # Twinner: Porting Unison to Rust — Analysis and Recommendation
 
-*Status: Tier A adopted (2026-10-18), GUI spike pending · Source analysed: `bcpierce00/unison` at `8772d26` (post-2.54.0) · Date: 2026-10-17*
+*Status: Tier A adopted (2026-10-18) · Slint adopted for the GUI under its GPL-3.0-only licence (2026-10-19), VoiceOver check pending (§6) · Source analysed: `bcpierce00/unison` at `8772d26` (post-2.54.0) · Date: 2026-10-17*
 
 ## 1. Summary
 
 - **Most of the work is the sync engine, not the GUI.** About 30k lines of OCaml and C are the engine. The GUIs are about 9k lines: GTK3 plus Cocoa.
 - **The first decision is compatibility, before the GUI library.** Either twinner talks to and shares archives with existing Unison installations, or it is a clean-room tool with the same semantics. We recommend **wire- and archive-compatibility with Unison ≥ 2.52** as the v1 target. It is cheaper than it looks (§3), and it gives us the OCaml binary as a test oracle and a way for users to migrate gradually.
 - **Build the engine as a GUI-free library**, with a text UI and headless `-server` mode first and the GUI as a separate frontend. Unison's own macOS bridge (`uimacbridge.ml`) already defines a clean engine↔GUI contract we can copy.
-- **GUI recommendation: Slint**, with **egui** as the fallback. **Tauri 2** is the alternative if the team prefers a web frontend. Validate the choice with a 1–2 day spike of the main recon table (50k rows) in the top two candidates before committing (§6).
+- **GUI recommendation: Slint**, with **egui** as the fallback. **Tauri 2** is the alternative if the team prefers a web frontend. The §6 spike of the main recon table (50k rows) in both Slint and egui confirmed Slint; a manual VoiceOver check is still pending (§6, "Spike results").
 - **Licensing:** a translation is a derivative work, so **twinner must be GPLv3** and must keep Unison's copyright notices (§7).
 
 ## 2. What Unison is, structurally
@@ -193,9 +193,107 @@ Implement the same slice in **Slint** and **egui** (or **Tauri**, if the web pat
 
 Decide on: effort for (1), smoothness of (2), and friction in (5).
 
+### Spike results (2026-10-18)
+
+**Recommendation: Slint, as §5 proposed.** The main risk is retired. A custom table on `ListView` does everything the recon table needs: multi-select, sorting, status icons, live progress and screen-reader semantics. egui starts faster, uses less CPU per frame and makes a smaller binary. But its gaps are structural: it has no menu bar of its own, row semantics for screen readers need patching through egui internals, and it is non-native everywhere. Slint's gaps are small and local: there is no in-window modal and no built-in multi-select table. Before committing, do a real VoiceOver pass (steps below), since that could not be run here.
+
+**What was built.** The slice was built twice, as throwaway crates to delete once the decision is made:
+
+- `bins/twinner-gui-spike-slint`, on Slint 1.18.1;
+- `bins/twinner-gui-spike-egui`, on egui/eframe 0.36.2 (0.37.0 shipped on 2026-10-15, too late for the spike);
+- `crates/twinner-gui-spike-model`, shared by both. It has no toolkit dependencies and holds the fake engine feed, the row model, sorting, and a selection keyed by stable row id (so it survives sorting). Each UI only renders this state and forwards input, so the comparison measures the toolkits rather than two different models.
+
+Each spike has a test that drives the real UI with synthetic input and checks the screen-reader tree. The egui test runs a bare `egui::Context` and reads AccessKit output. The Slint test uses Slint's headless testing backend. Both tests do the same steps: click, shift-click, cmd-click, then `>`. They check:
+
+- the selection;
+- the directions;
+- the per-row label, selected state and position;
+- that `>` `<` `/` are ignored while the SSH modal is open.
+
+Run the spikes with:
+
+```bash
+cargo run --release -p twinner-gui-spike-slint
+```
+
+or `-p twinner-gui-spike-egui`. Options: `--rows N`, `--rate N`, `--bench SECS [--headless]`, `--exit-after-first-frame`.
+
+**Test conditions.** The machine was an Apple-silicon Mac on macOS 27, with Rust 1.99. **The screen was locked and the display asleep for the whole run.** This has three consequences:
+
+- Nothing was checked by eye.
+- Windowed frame rates are not meaningful: Slint stops rendering an occluded window, while egui keeps calling its UI code.
+- Smoothness (criterion 2) was therefore measured headless: the main-thread work per frame, at 60 Hz, while auto-scrolling 7 rows a frame through 50k rows, with the feed running.
+
+| Criterion | Slint 1.18.1 | egui 0.36.2 |
+|---|---|---|
+| **1. Table (50k rows)** | Custom table on `ListView` (virtualised: about 30 rows exist at a time). A Rust `Model` builds rows on demand and calls `row_changed` per changed row. Modifier clicks via `TouchArea.pointer-event` (⌘ arrives as `control`). Keys go through a `FocusScope`. Icons and progress bars are plain elements. Sort is done in Rust, then `reset()`. | `egui_extras::TableBuilder` virtualises out of the box. Selection, icons (painted) and progress (`ProgressBar`) are a few lines each. Keys come from `Event::Text`. |
+| Code size | 455 lines of Rust plus 458 of `.slint` | 663 lines of Rust (both counts include the headless bench and exclude tests and the ~840-line shared model) |
+| **2. Main-thread work per frame** (headless, 500 updates/s) | p50 3.9–4.0 ms, p99 6.8–6.9 ms, max 7–11 ms. Includes **software** rendering of the whole 1000×700 frame, so it is an upper bound: the real app renders on the GPU with femtovg. | p50 2.2 ms, p99 2.6–3.0 ms, max 3.5–4.4 ms. Layout and tessellation only, no rasterisation. |
+| At 5,000 updates/s (10×) | p50 3.9 ms, p99 6.9 ms (unchanged) | p50 2.3 ms, p99 3.0 ms (unchanged) |
+| One-off frames: select all 50k / sort / `>` on 50k | 4–8 ms / 19–20 ms / 5–6 ms | 2.5–2.7 ms / 16–19 ms / 2.5–3 ms |
+| Windowed, visible (`--bench 10`, 3 runs, 2026-10-19) | 59.4–59.5 fps; frame interval p50 16.7 ms, p99 18–23 ms. One ≈56 ms frame per run (cause not yet found) | 52–60 fps; p50 16.7 ms, p99 19–21 ms, max 47–48 ms. One run had a single 1.35 s stall that didn't recur |
+| While occluded | Stops rendering (the winit backend skips drawing an occluded window) | Keeps repainting on every feed wake-up (≈100/s). Long syncs would need repaint throttling |
+| **3. Menu bar** | Built-in `MenuBar` with `@keys(...)` shortcuts, native on macOS. On Windows and Linux Slint draws it in the window | None in eframe. Added `muda`: create it after NSApp exists, then forward events. macOS only: Windows needs accelerator translation in winit's message loop, and on Linux `muda` pulls in GTK3 |
+| Directory picker | `rfd::AsyncFileDialog` with the window as parent, so it opens as a sheet and the feed keeps running. Same code in both | Same |
+| SSH-password modal | No in-window modal (`Dialog` is a separate window). Built a scrim with a card instead (~50 lines). The password field takes focus, so the table never sees keys | `egui::Modal` is built in. Table keys had to be suppressed by hand while it is open |
+| **4. Screen reader** (AccessKit tree, checked by the tests) | Correct by default: `ListView` is a `ListBox` with an item count of 50k, and each row is a `ListBoxOption` with label, selected state and index. Set declaratively on the row | Wrong by default: selection becomes "toggled" (a button state) and rows aren't items of a list. Fixed by patching AccessKit nodes and tagging the rows' parent `Ui`, found through the cell's `ui.stack()`. That depends on `TableBuilder` internals. The other five cells per row also had to be hidden, or a screen reader would step through ~140 cell containers between the 28 visible rows |
+| VoiceOver / Narrator | **Not run.** Needs an unlocked session and a person (manual steps below). Narrator needs Windows | **Not run** (same) |
+| **5. Release binary** (arm64, default features) | 17.5 MB; 10.5 MB stripped with fat LTO, 1 codegen unit and `panic=abort` | 14.4 MB; 8.3 MB with the same settings (for scale: headless `twinner` is 0.4 MB) |
+| Startup, median of 5 warm runs | 195 ms to first rendered frame; 251 ms process wall time to exit | 109 ms to first `ui()` call (before painting); 166 ms process wall time |
+| Build friction | One build script (`slint-build`). Generated code needs `#![allow(missing_docs, unsafe_code, clippy::all, clippy::todo)]`. Element IDs must not shadow enum names (`table`, `password`). Tests need `with_debug_info(true)` | None beyond Cargo |
+
+The sort frame is mostly the shared Rust sort of 50k rows: the same code in both toolkits, costing one dropped frame in either. The fix belongs in the model: precomputed sort keys, or sorting in the background. The same sort takes 4–5 ms when timed at startup. The in-loop figure is higher, probably because the bench thread sleeps between frames and runs at lower clocks.
+
+**Effort notes.**
+
+- **egui** was quicker to get on screen: the whole UI compiled on the first attempt, and the table itself was the easy part. The time went on what egui doesn't have:
+  - a native menu (`muda`, macOS-only glue);
+  - list-box semantics for screen readers. That needed reading egui's AccessKit mapping and AccessKit's macOS adapter. The fix relies on how `TableBuilder` nests `Ui`s.
+- **Slint** took longer up front: a new DSL, the custom table, a `Model` adapter and a modal. But each step was declarative and local, and the menu bar and screen-reader semantics were correct as soon as they were written.
+- Neither toolkit was a dead end. The single-select, text-only `StandardTableView` was not needed.
+
+**Packaging notes** (not built here; the brief narrowed §6 item 5 to notes):
+
+- **Both:** a single self-contained binary, with no runtime to ship.
+- **macOS:**
+  - A `.app` via `cargo-packager` or `cargo-bundle`. The bundle's `Info.plist` sets the menu-bar app name, which is currently the binary name.
+  - Signing and notarisation work the same for both toolkits, and need a Developer ID.
+- **Windows:**
+  - An `.msi` via `cargo-wix`, or NSIS via `cargo-packager`. Both toolkits use the windows-sys crates; there are no C build dependencies.
+  - Slint's default renderer is OpenGL (femtovg), with the software renderer compiled in as a fallback for VMs and RDP. eframe defaults to wgpu (DX12/Vulkan).
+  - The egui menu bar would need extra work.
+- **Linux:**
+  - AppImage or Flatpak. The default `rfd` backend is the XDG portal (`zbus`, no GTK), which suits Flatpak.
+  - **Slint needs `pkg-config` and `libfontconfig-dev` at build time**, via `fontique` → `yeslogic-fontconfig-sys`. Debian trixie only has `libfontconfig-dev`; some older releases call it `libfontconfig1-dev`. `RUST_FONTCONFIG_DLOPEN` doesn't avoid it: `fontique` 0.11 fails to compile with it. CI installs both on the Ubuntu runner (decided 2026-10-19). Ubuntu 24.04 also has `libfontconfig-dev`; there, `libfontconfig1-dev` is a dummy package.
+  - **Linux build image:** `docker/linux/Dockerfile` (Rust 1.99.1 on Debian trixie) has those build dependencies plus X11, Mesa and Xvfb for headless smoke runs. `scripts/linux-docker.sh` builds it and runs the CI checks with the checkout mounted; extra arguments run any other command instead. Build output and the Cargo registry live in named Docker volumes. The container runs as root.
+  - egui loads X11, Wayland and xkbcommon at runtime and needs no build-time system packages.
+  - Verified on 2026-10-19 in that image on **arm64** Linux (Docker on Apple silicon): `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` (including both spikes' input and accessibility tests) and `check-no-gui-deps.sh` pass. Under `xvfb-run`, both spikes start on X11 with Mesa and render a first frame: Slint after 453 ms, egui after 79 ms.
+  - The image is for reproducing Linux builds locally. CI keeps the GitHub Ubuntu runner, adding one `apt-get` step, and is the first x86_64 Linux run. `TWINNER_PLATFORM=linux/amd64 scripts/linux-docker.sh` emulates x86_64 if one is ever needed locally (slow).
+  - Both spikes pass `clippy -D warnings` for `x86_64-pc-windows-msvc`, cross-checked from macOS. Neither was linked or run on Windows.
+- **Licence:**
+  - **Decided 2026-10-19: use Slint under its GPL-3.0-only option.** twinner's sources stay GPL-3.0-or-later. The GUI binary, which links Slint, is distributed under GPLv3 only. The headless `twinner` binary doesn't link Slint and is unaffected.
+  - Slint's royalty-free desktop licence was considered and not needed.
+  - egui is MIT/Apache.
+
+**Not verified.** These need an unlocked session. The screen was unlocked on 2026-10-19 for the windowed bench in the table above; the items below are still open:
+
+- Screenshots of both windows (2026-10-19) show the tables render as intended. Getting there took two egui fixes:
+  - Status icons wrapped above their labels until the cell got an explicit horizontal layout.
+  - egui's bundled fonts have no `▲`/`▼` or `↑`/`↓`, so the sort indicator rendered as a missing-glyph box. It now uses `⬆`/`⬇` from egui's emoji font. A real egui app would need to bundle a fuller font.
+  - Slint rendered correctly first time, using the system font.
+- The native menus and the `rfd` sheet were built but never opened. The SSH modal was only driven in tests.
+- The **VoiceOver smoke test**. For each spike:
+  1. Run the spike.
+  2. Turn on VoiceOver with ⌘F5.
+  3. Move into the table with VO-arrows. The list should be announced as having 50,000 items, and a row as "*path*, left …, *direction*, right …, *size*, N% done".
+  4. Shift-click and ⌘-click a few rows. VoiceOver should report them as selected.
+  5. Press `>`. The focused row's label should change to "left to right".
+  6. Open the SSH dialog (⌘K). The password field should be focused and announced as a secure text field.
+- Without VoiceOver: `swift scripts/macos-ax-dump.swift PID` prints a running app's accessibility tree, the same API VoiceOver reads. It shows list rows and selection counts, and each menu item's key equivalent. It needs the Accessibility permission for the app that runs it.
+
 ## 7. Licensing and provenance
 
-- Unison is **GPLv3**. A translation is a derivative work, so **twinner must be distributed under GPLv3**, keep the original copyright and attribution notices, and say it is derived from Unison. Every GUI option above is compatible with this; for Slint, use its GPLv3 licence option.
+- Unison is **GPLv3**. A translation is a derivative work, so **twinner must be distributed under GPLv3**, keep the original copyright and attribution notices, and say it is derived from Unison. Every GUI option above is compatible with this; for Slint, use its GPLv3 licence option. That option is GPL-3.0-only, so the GUI binary is GPLv3-only (§6, decided 2026-10-19).
 - Unison's `CONTRIBUTING.md` (since 2.54.0) rejects LLM-generated contributions, and the maintainer regards LLM output as a derived work of its training data. That policy covers contributions *to Unison*, not an independent fork. Still, if twinner is written with LLM assistance:
   - plan on **no upstreaming** of code;
   - keep a **distinct name and branding** (twinner already is), and don't present it as an official Unison project;
