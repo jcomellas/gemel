@@ -21,7 +21,10 @@ Out of scope, and how each behaves until it is done:
 |---|---|---|
 | Remote roots (ssh, socket) | `parse_root` accepts them; connecting fails with a clear error | M3 |
 | `transfer.ml` (rsync deltas) | Not needed: local copies go through `Copy.localFile` and cloning | M3 |
-| xattr, ACL and move detection (features `Sync: xattr`, `Sync: ACL`, `Sync: Moves`) | The features are not registered. An archive whose features line needs them is refused with OCaml's message | Later in M2 if time allows, else M5 |
+| Synchronising xattrs and ACLs | The features `Sync: xattr` and `Sync: ACL` **are** registered, for their archive format (see below), but the `xattrs` and `acl` preferences are not, so nothing is synchronised | Later in M2 if time allows, else M5 |
+| Move detection (feature `Sync: Moves`) | The feature is not registered | Later in M2 if time allows, else M5 |
+
+**Correction (phase 1a, 2026-10-19):** this plan first said not to register the xattr and ACL features. Real archives showed that OCaml Unison 2.54 enables both whenever the two sides support them, even with the `xattrs` and `acl` preferences off. Its archives therefore always record the change time, xattr and ACL fields, and name both features in their header. If gemel left the features unregistered, it would refuse every archive OCaml writes.
 | Watch mode / `gemel-fsmonitor` | `-repeat watch` is rejected | Last phase, optional |
 | GUI | Untouched (fake engine) | M4 |
 
@@ -90,7 +93,7 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 ### Phase 1a: `gemel-fs` value types (~1.2k)
 
 The `Props`, `Fileinfo`, `Osx` and fingerprint types, with their Umarshal codecs and `Uutil.hash`-based hashes. No OS calls yet.
-- **Props:** permissions, uid/gid (numeric and named), modification time with Unison's one-second and DST tolerance, type/creator, and the xattr/ACL shapes (codec and hash only).
+- **Props:** permissions, uid/gid (numeric and named), modification time with Unison's one-second and DST tolerance, type/creator, and the xattr/ACL shapes (codec and hash; their fields are in every OCaml 2.54 archive, see the correction above).
 - **Others:** `Fileinfo` stamps, `Osx` resource-fork stamps, and `Os.fullfingerprint`.
 - **Tests:** OCaml golden vectors (extending `gen_fixtures.ml`).
 - **First vertical slice:** decode real OCaml archives from phase 0 down to the props.
