@@ -1423,6 +1423,78 @@ dependencies = [
 ]
 
 [[package]]
+name = "gemel"
+version = "0.1.0"
+dependencies = [
+ "gemel-ui-api",
+]
+
+[[package]]
+name = "gemel-base"
+version = "0.1.0"
+dependencies = [
+ "gemel-compat",
+]
+
+[[package]]
+name = "gemel-compat"
+version = "0.1.0"
+
+[[package]]
+name = "gemel-engine"
+version = "0.1.0"
+dependencies = [
+ "gemel-base",
+ "gemel-compat",
+ "gemel-fs",
+ "gemel-rpc",
+]
+
+[[package]]
+name = "gemel-fs"
+version = "0.1.0"
+dependencies = [
+ "gemel-base",
+ "gemel-compat",
+]
+
+[[package]]
+name = "gemel-fsmonitor"
+version = "0.1.0"
+dependencies = [
+ "gemel-compat",
+]
+
+[[package]]
+name = "gemel-gui"
+version = "0.1.0"
+dependencies = [
+ "gemel-ui-api",
+ "i-slint-backend-testing",
+ "rfd",
+ "slint",
+ "slint-build",
+]
+
+[[package]]
+name = "gemel-rpc"
+version = "0.1.0"
+dependencies = [
+ "gemel-base",
+ "gemel-compat",
+ "gemel-fs",
+]
+
+[[package]]
+name = "gemel-ui-api"
+version = "0.1.0"
+dependencies = [
+ "gemel-base",
+ "gemel-engine",
+ "gemel-rpc",
+]
+
+[[package]]
 name = "gethostname"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4574,78 +4646,6 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
-
-[[package]]
-name = "twinner"
-version = "0.1.0"
-dependencies = [
- "twinner-ui-api",
-]
-
-[[package]]
-name = "twinner-base"
-version = "0.1.0"
-dependencies = [
- "twinner-compat",
-]
-
-[[package]]
-name = "twinner-compat"
-version = "0.1.0"
-
-[[package]]
-name = "twinner-engine"
-version = "0.1.0"
-dependencies = [
- "twinner-base",
- "twinner-compat",
- "twinner-fs",
- "twinner-rpc",
-]
-
-[[package]]
-name = "twinner-fs"
-version = "0.1.0"
-dependencies = [
- "twinner-base",
- "twinner-compat",
-]
-
-[[package]]
-name = "twinner-fsmonitor"
-version = "0.1.0"
-dependencies = [
- "twinner-compat",
-]
-
-[[package]]
-name = "twinner-gui"
-version = "0.1.0"
-dependencies = [
- "i-slint-backend-testing",
- "rfd",
- "slint",
- "slint-build",
- "twinner-ui-api",
-]
-
-[[package]]
-name = "twinner-rpc"
-version = "0.1.0"
-dependencies = [
- "twinner-base",
- "twinner-compat",
- "twinner-fs",
-]
-
-[[package]]
-name = "twinner-ui-api"
-version = "0.1.0"
-dependencies = [
- "twinner-base",
- "twinner-engine",
- "twinner-rpc",
-]
 
 [[package]]
 name = "typed-index-collections"
