@@ -6,7 +6,9 @@ synchronizer, with a portable GUI for macOS, Linux and Windows.
 **Status:** early port. Done:
 - `gemel-compat`: the Umarshal codec, the legacy OCaml hash and Unison's
   Unicode handling;
-- `gemel-base`: case modes, names and paths.
+- `gemel-base`: case modes, names, paths, preferences and profiles, the
+  command line, root specifications, the feature registry and the Rx
+  pattern engine (`trace` and `proplist` remain).
 
 Everything else is a skeleton.
 
