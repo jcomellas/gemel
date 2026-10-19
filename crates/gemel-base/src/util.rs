@@ -5,6 +5,26 @@
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 
 use std::cmp::Ordering;
+use std::fmt;
+
+/// Unison's two kinds of failure (`Util.Fatal` and `Util.Transient`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// Stops the whole run.
+    Fatal(String),
+    /// Fails one item (or one operation); the rest of the run continues.
+    Transient(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Fatal(m) | Error::Transient(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 /// Lowercases a Latin-1 (ISO 8859-1) byte: `A`–`Z`, `À`–`Ö` and `Ø`–`Þ`.
 pub fn lowercase_latin1(c: u8) -> u8 {
