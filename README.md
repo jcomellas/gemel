@@ -3,14 +3,15 @@
 A Rust port of the [Unison](https://github.com/bcpierce00/unison) file
 synchronizer, with a portable GUI for macOS, Linux and Windows.
 
-**Status:** early port. Done:
-- `gemel-compat`: the Umarshal codec, the legacy OCaml hash and Unison's
-  Unicode handling;
+**Status:** early port. The foundation crates are done and tested against
+OCaml Unison:
+- `gemel-compat`: the Umarshal codec, the legacy OCaml hash, Unison's
+  Unicode handling and the file-watcher protocol;
 - `gemel-base`: case modes, names, paths, preferences and profiles, the
-  command line, root specifications, the feature registry and the Rx
-  pattern engine (`trace` and `proplist` remain).
+  command line, root specifications, the feature registry, property lists,
+  tracing and logging, and the Rx pattern engine.
 
-Everything else is a skeleton.
+The filesystem layer, RPC, the engine and the frontends are skeletons.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 

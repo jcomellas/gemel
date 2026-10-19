@@ -5,6 +5,76 @@
    Usage: gen_base <fixtures-dir>
    Writes base.txt: tab-separated lines; inputs are hex ("-" when empty). *)
 
+(* split_on_space, disallowed_char, quote and unquote from Unison's
+   src/fswatch.ml, verbatim (watchercommon.ml has the same code):
+   Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce. *)
+let split_on_space s =
+  try
+    let i = String.index s ' ' in
+    (String.sub s 0 i,
+     String.sub s (i + 1) (String.length s - i - 1))
+  with Not_found ->
+    (s, "")
+
+let disallowed_char c =
+  match c with
+    'A'..'Z' | 'a'..'z' | '0'..'9' | '-' | '_' | '.' | '~'
+  | '!' | '*' | '\'' | '(' | ')' | ';' | ':' | '@' | '&'
+  | '=' | '+' | '$' | ',' | '/' | '?' | '#' | '[' | ']' ->
+    false
+  | _ ->
+    true
+
+let quote s =
+  let l = String.length s in
+  let n = ref 0 in
+  for i = 0 to l - 1 do if disallowed_char s.[i] then incr n done;
+  if !n = 0 then s else begin
+    let q = Bytes.create (l + 2 * !n) in
+    let j = ref 0 in
+    let hex = "0123456789ABCDEF" in
+    for i = 0 to l - 1 do
+      let c = s.[i] in
+      if disallowed_char s.[i] then begin
+        Bytes.set q !j '%';
+        Bytes.set q (!j + 1) hex.[Char.code c lsr 4];
+        Bytes.set q (!j + 2) hex.[Char.code c land 15];
+        j := !j + 3
+      end else begin
+        Bytes.set q !j c;
+        incr j
+      end
+    done;
+    Bytes.to_string q
+  end
+
+let unquote s =
+  let l = String.length s in
+  let n = ref 0 in
+  for i = 0 to l - 1 do if s.[i] = '%' then incr n done;
+  if !n = 0 then s else begin
+    let hex_char c =
+      match c with
+        '0'..'9' -> Char.code c - Char.code '0'
+      | 'a'..'f' -> Char.code c - Char.code 'a' + 10
+      | 'A'..'F' -> Char.code c - Char.code 'A' + 10
+      | _        -> invalid_arg "unquote"
+    in
+    let u = Bytes.create (l - 2 * !n) in
+    let j = ref 0 in
+    for i = 0 to l - 2 * !n - 1 do
+      let c = s.[!j] in
+      if c = '%' then begin
+        Bytes.set u i (Char.chr ((hex_char s.[!j + 1]) lsl 4 + hex_char s.[!j + 2]));
+        j := !j + 3
+      end else begin
+        Bytes.set u i c;
+        incr j
+      end
+    done;
+    Bytes.to_string u
+  end
+
 let hex s =
   if s = "" then "-" else
   String.concat ""
@@ -75,6 +145,17 @@ let words = [
 
 let trims = [ " a "; "\t\r\n a b \n"; ""; "   "; "a"; "\x0ba\x0b" ]
 
+let quotes = [
+  ""; "abc"; "a b"; "a\nb"; "%"; "/home/me/My Docs"; "caf\xc3\xa9";
+  "-_.~!*'();:@&=+$,/?#[]"; "\x00\x01\x7f\x80\xff"; "\"<>\\^`{|}";
+  String.init 256 Char.chr ]
+
+let unquotes = [
+  ""; "abc"; "a%20b"; "%41"; "%4a%4A"; "%e9"; "%"; "%4"; "a%4"; "a%"; "%%";
+  "%zz"; "%4g"; "%41%"; "%4%41"; "x%2"; "100%25"; "%0A%0D" ]
+
+let splits = [ ""; "OK"; "DIR a%20b"; "START h /r p"; "CHANGES "; " x"; "a  b" ]
+
 let () =
   let oc = open_out_bin (Filename.concat Sys.argv.(1) "base.txt") in
   Printf.fprintf oc
@@ -86,7 +167,10 @@ let () =
      # fix <fixHost input> <fixHost>\n\
      # int <in> <int_of_string, or !>\n\
      # words <in> <splitIntoWords on ' ', as hex joined by ','>\n\
-     # trim <in> <trimWhitespace, hex>\n"
+     # trim <in> <trimWhitespace, hex>\n\
+     # quote <in> <fswatch quote, hex>\n\
+     # unquote <in> <fswatch unquote, hex, or !>\n\
+     # split <in> <split_on_space: first, hex> <rest, hex>\n"
     (Option.value (Sys.getenv_opt "UNISON_COMMIT") ~default:"unknown")
     Sys.ocaml_version Sys.word_size;
   List.iter (fun s ->
@@ -112,4 +196,12 @@ let () =
   List.iter (fun s ->
       Printf.fprintf oc "trim\t%s\t%s\n" (hex s) (hex (Util.trimWhitespace s)))
     trims;
+  List.iter (fun s ->
+      Printf.fprintf oc "quote\t%s\t%s\n" (hex s) (hex (quote s))) quotes;
+  List.iter (fun s ->
+      Printf.fprintf oc "unquote\t%s\t%s\n" (hex s)
+        (try hex (unquote s) with Invalid_argument _ -> "!")) unquotes;
+  List.iter (fun s ->
+      let (a, b) = split_on_space s in
+      Printf.fprintf oc "split\t%s\t%s\t%s\n" (hex s) (hex a) (hex b)) splits;
   close_out oc
