@@ -1,10 +1,11 @@
-// Throwaway GUI spike: the recon-table slice in Slint 1.18.
-// See §6 of docs/unison-port-analysis.md.
+// The twinner main window: the recon table, toolbar, status line, menu bar
+// and SSH-password prompt. Started from the GUI spike (§6 of
+// docs/unison-port-analysis.md).
 //
 // StandardTableView is single-select with text-only cells, so the recon
 // table is a custom one on ListView. Selection, sorting and directions live
-// in Rust (twinner-gui-spike-model); this file only renders rows and
-// forwards input.
+// in Rust (src/recon_view.rs); this file only renders rows and forwards
+// input.
 
 import { Button, ListView, LineEdit, Palette } from "std-widgets.slint";
 
@@ -85,10 +86,9 @@ component HeaderCell inherits TouchArea {
 }
 
 export component AppWindow inherits Window {
-    title: "twinner GUI spike — Slint";
+    title: "twinner";
     preferred-width: 1000px;
     preferred-height: 700px;
-    always-on-top: root.on-top;
 
     in property <[RowData]> rows;
     in property <string> status-text;
@@ -96,9 +96,6 @@ export component AppWindow inherits Window {
     // "path", "status" or "size"
     in property <string> sort-key;
     in property <bool> sort-ascending;
-    // Set by --bench to keep the window in front: Slint skips rendering while
-    // the window is occluded (a locked screen still occludes it).
-    in property <bool> on-top;
     in-out property <bool> ssh-open;
     in-out property <string> ssh-password;
 
@@ -118,11 +115,6 @@ export component AppWindow inherits Window {
         } else if (index + 1) * Theme.row-height > -list.content-y + list.visible-height {
             list.content-y = -((index + 1) * Theme.row-height - list.visible-height);
         }
-    }
-
-    // Scrolls row `index` to the top (used by --bench).
-    public function scroll-to(index: int) {
-        list.content-y = -index * Theme.row-height;
     }
 
     public function focus-table() {

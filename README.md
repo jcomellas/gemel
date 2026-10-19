@@ -34,7 +34,7 @@ Crates are layered; each depends only on the ones above it:
 | `crates/twinner-engine` | Update detection, reconciliation, propagation, archives |
 | `crates/twinner-ui-api` | The engine/frontend contract |
 | `bins/twinner` | Text UI and `-server` mode (no GUI dependencies, enforced in CI) |
-| `bins/twinner-gui` | GUI frontend (toolkit decided by the spike) |
+| `bins/twinner-gui` | Slint GUI frontend (no engine yet: shows fake data) |
 | `bins/twinner-fsmonitor` | File-watcher helper |
 
 Each module's doc comment names the Unison source files it ports.
@@ -44,6 +44,10 @@ Each module's doc comment names the Unison source files it ports.
 twinner is derived from Unison and is distributed under the GNU General
 Public License, version 3 or (at your option) any later version. See
 [LICENSE](LICENSE).
+
+The GUI binary (`twinner-gui`) links [Slint](https://slint.dev) under
+its GPL-3.0-only licence, so that binary is distributed under GPLv3 only.
+The other binaries keep the "or any later version" option.
 
 Unison is Copyright Benjamin C. Pierce and other contributors; each ported
 module keeps the copyright lines of its source. twinner is an independent

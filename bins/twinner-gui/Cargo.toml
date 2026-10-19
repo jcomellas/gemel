@@ -1,15 +1,28 @@
 [package]
 name = "twinner-gui"
-description = "Graphical frontend (toolkit to be chosen by the GUI spike)"
+description = "Graphical frontend, built with Slint"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# Slint 1.18 needs 1.92.
+rust-version = "1.92"
+# The sources are GPL-3.0-or-later like the rest of twinner, but Slint is
+# used under its GPL-3.0-only option, so the binary is GPLv3-only.
 license.workspace = true
 authors.workspace = true
 publish.workspace = true
 
 [dependencies]
 twinner-ui-api.workspace = true
+slint = { version = "=1.18.1", features = ["raw-window-handle-06"] }
+rfd = "0.17.2"
+
+[dev-dependencies]
+# Slint's headless testing backend: element queries by accessible role.
+# Must match the slint version exactly.
+i-slint-backend-testing = "=1.18.1"
+
+[build-dependencies]
+slint-build = "=1.18.1"
 
 [lints]
 workspace = true

@@ -89,7 +89,7 @@ twinner/
     twinner-ui-api   # the engine<->frontend contract (commands + event stream), uicommon, sortri, exit codes
   bins/
     twinner          # text UI + `-server` mode. MUST have zero GUI deps (runs on headless servers; checked in CI)
-    twinner-gui      # GUI frontend (no toolkit dependency until the §6 spike decides)
+    twinner-gui      # GUI frontend, built with Slint (chosen by the §6 spike)
     twinner-fsmonitor# watcher helper, same line protocol as unison-fsmonitor (uses the `notify` crate)
 ```
 
@@ -197,7 +197,7 @@ Decide on: effort for (1), smoothness of (2), and friction in (5).
 
 **Recommendation: Slint, as §5 proposed.** The main risk is retired. A custom table on `ListView` does everything the recon table needs: multi-select, sorting, status icons, live progress and screen-reader semantics. egui starts faster, uses less CPU per frame and makes a smaller binary. But its gaps are structural: it has no menu bar of its own, row semantics for screen readers need patching through egui internals, and it is non-native everywhere. Slint's gaps are small and local: there is no in-window modal and no built-in multi-select table. Before committing, do a real VoiceOver pass (steps below), since that could not be run here.
 
-**What was built.** The slice was built twice, as throwaway crates to delete once the decision is made:
+**What was built.** The slice was built twice, as throwaway crates. They were committed in `d33970e` and removed in the next commit, which started the real `bins/twinner-gui` from the Slint spike (see "Afterwards" below). To reproduce the numbers in this section, `git checkout d33970e` first:
 
 - `bins/twinner-gui-spike-slint`, on Slint 1.18.1;
 - `bins/twinner-gui-spike-egui`, on egui/eframe 0.36.2 (0.37.0 shipped on 2026-10-15, too late for the spike);
@@ -210,7 +210,7 @@ Each spike has a test that drives the real UI with synthetic input and checks th
 - the per-row label, selected state and position;
 - that `>` `<` `/` are ignored while the SSH modal is open.
 
-Run the spikes with:
+At `d33970e`, run the spikes with:
 
 ```bash
 cargo run --release -p twinner-gui-spike-slint
@@ -290,6 +290,16 @@ The sort frame is mostly the shared Rust sort of 50k rows: the same code in both
   5. Press `>`. The focused row's label should change to "left to right".
   6. Open the SSH dialog (⌘K). The password field should be focused and announced as a secure text field.
 - Without VoiceOver: `swift scripts/macos-ax-dump.swift PID` prints a running app's accessibility tree, the same API VoiceOver reads. It shows list rows and selection counts, and each menu item's key equivalent. It needs the Accessibility permission for the app that runs it.
+
+**Afterwards (2026-10-19).** The Slint spike became `bins/twinner-gui`:
+
+- `ui/app.slint` is the spike's window, titled "twinner".
+- `src/recon_view.rs` holds the recon view model: rows, sorting and the multi-selection. Selection stays in the GUI. The item types are placeholders until `twinner-ui-api` defines the reconciliation items, and sorting is due to move to `twinner_ui_api::sortri`.
+- `src/fake_engine.rs` holds the spike's fake feed. It is the GUI's only data source until the engine exists, and must not depend on `twinner-engine` directly.
+- The bench and startup-timing flags were dropped. `--rows` and `--rate` remain as development flags.
+- The input and accessibility test came across unchanged.
+- The egui spike and the shared spike crate were deleted; they remain in `d33970e`.
+- Verified on macOS and in the Linux image (arm64): fmt, workspace clippy `-D warnings`, tests and `check-no-gui-deps.sh` pass. Clippy also passes for `x86_64-pc-windows-msvc`. The window renders as in the spike, both on macOS (checked from a screenshot) and under Xvfb.
 
 ## 7. Licensing and provenance
 
