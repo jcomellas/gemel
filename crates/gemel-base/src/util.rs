@@ -41,9 +41,128 @@ pub fn nocase_cmp(a: &[u8], b: &[u8]) -> Ordering {
         .cmp(b.iter().map(|&c| lowercase_latin1(c)))
 }
 
+/// `Util.trimWhitespace`: strips spaces, tabs, CRs and LFs from both ends.
+pub fn trim_whitespace(s: &str) -> &str {
+    s.trim_matches([' ', '\t', '\n', '\r'])
+}
+
+/// `Util.removeTrailingCR`.
+pub fn remove_trailing_cr(s: &str) -> &str {
+    s.strip_suffix('\r').unwrap_or(s)
+}
+
+/// `Util.splitAtChar`: splits at the first `c`.
+pub fn split_at_char(s: &str, c: char) -> (&str, Option<&str>) {
+    match s.split_once(c) {
+        Some((a, b)) => (a, Some(b)),
+        None => (s, None),
+    }
+}
+
+/// `Util.splitIntoWords`: splits at runs of `c`, with `\\` escaping the
+/// next character (a final lone `\\` is dropped).
+pub fn split_into_words(s: &str, c: char) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut chars = s.chars().peekable();
+    loop {
+        while chars.next_if_eq(&c).is_some() {}
+        if chars.peek().is_none() {
+            return words;
+        }
+        let mut word = String::new();
+        while let Some(ch) = chars.next_if(|&ch| ch != c) {
+            if ch == '\\' {
+                if let Some(escaped) = chars.next() {
+                    word.push(escaped);
+                }
+            } else {
+                word.push(ch);
+            }
+        }
+        words.push(word);
+    }
+}
+
+/// OCaml's `int_of_string` for the 63-bit `int`: an optional sign, an
+/// optional `0x`/`0o`/`0b`/`0u` prefix, and digits with `_` allowed after
+/// the first. Hexadecimal, octal and binary literals may use the full 63
+/// bits and wrap to negative, as in OCaml.
+pub fn int_of_string(s: &str) -> Option<i64> {
+    const BITS: u32 = 63;
+    let (neg, rest) = match s.as_bytes().first() {
+        Some(b'-') => (true, &s[1..]),
+        Some(b'+') => (false, &s[1..]),
+        _ => (false, s),
+    };
+    let lower = rest.get(..2).map(str::to_ascii_lowercase);
+    let (radix, digits) = match lower.as_deref() {
+        Some("0x") => (16, &rest[2..]),
+        Some("0o") => (8, &rest[2..]),
+        Some("0b") => (2, &rest[2..]),
+        Some("0u") => (10, &rest[2..]),
+        _ => (10, rest),
+    };
+    if digits.is_empty() || digits.starts_with('_') {
+        return None;
+    }
+    let mut n: u64 = 0;
+    for ch in digits.chars().filter(|&ch| ch != '_') {
+        let d = ch.to_digit(radix)?;
+        n = n.checked_mul(radix.into())?.checked_add(d.into())?;
+        if n >= 1 << BITS {
+            return None;
+        }
+    }
+    let max = (1u64 << (BITS - 1)) - 1;
+    let n = if radix == 10 && !rest.starts_with("0u") && !rest.starts_with("0U") {
+        if n > max + u64::from(neg) {
+            return None;
+        }
+        n as i64
+    } else if n > max {
+        // Wrap into the negative half, as OCaml does for non-decimal input.
+        (n as i64).wrapping_add(i64::MIN)
+    } else {
+        n as i64
+    };
+    Some(if neg { n.wrapping_neg() } else { n })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn string_helpers_match_util_ml() {
+        assert_eq!(trim_whitespace(" \t a b \r\n"), "a b");
+        assert_eq!(remove_trailing_cr("a\r"), "a");
+        assert_eq!(split_at_char("a=b=c", '='), ("a", Some("b=c")));
+        assert_eq!(split_at_char("a", '='), ("a", None));
+        assert_eq!(
+            split_into_words("  include  my\\ file ", ' '),
+            ["include", "my file"]
+        );
+        assert_eq!(split_into_words("a\\", ' '), ["a"]);
+        assert!(split_into_words("   ", ' ').is_empty());
+    }
+
+    #[test]
+    fn int_of_string_follows_ocaml() {
+        let max = (1i64 << 62) - 1;
+        assert_eq!(int_of_string("42"), Some(42));
+        assert_eq!(int_of_string("-1_000"), Some(-1000));
+        assert_eq!(int_of_string("+7"), Some(7));
+        assert_eq!(int_of_string("0x1F"), Some(31));
+        assert_eq!(int_of_string("0o17"), Some(15));
+        assert_eq!(int_of_string("0b101"), Some(5));
+        assert_eq!(int_of_string(&max.to_string()), Some(max));
+        assert_eq!(int_of_string(&(max + 1).to_string()), None);
+        assert_eq!(int_of_string(&format!("-{}", max + 1)), Some(-max - 1));
+        assert_eq!(int_of_string("0x7fffffffffffffff"), Some(-1));
+        for bad in ["", "-", "_1", "1a", "0x", "0xg", " 1", "1 "] {
+            assert_eq!(int_of_string(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn latin1_case_folding_skips_multiplication_sign() {
