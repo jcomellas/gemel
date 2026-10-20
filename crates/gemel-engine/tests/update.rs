@@ -417,7 +417,7 @@ fn scans_find_changes_against_the_archive() {
         let expected: &[&str] = if cfg!(unix) {
             &["README", "link", "new", "src"]
         } else {
-            &["README", "new"]
+            &["README", "new", "src"]
         };
         assert_eq!(names(&fa.1), expected, "{:?}", fa.1);
         assert!(matches!(
