@@ -10,14 +10,14 @@
 //! - storing it again gives the same bytes, apart from the time it was
 //!   written.
 
+mod support;
+
 use std::cell::RefCell;
 use std::path::{Path as StdPath, PathBuf};
 use std::rc::Rc;
 
-use gemel_base::case::{self, Mode, Settings};
-use gemel_base::features::Features;
+use gemel_base::case::Mode;
 use gemel_base::name::Name;
-use gemel_base::prefs::Prefs;
 use gemel_base::proplist::Proplist;
 use gemel_base::util::Error;
 use gemel_engine::archive::{self, Archive, ArchiveData, ArchiveProps, ArchiveVersion};
@@ -32,53 +32,10 @@ use gemel_fs::props::{Perm, Props, PropsConfig};
 use gemel_fs::system;
 use gemel_rpc::host::Host;
 use gemel_rpc::registry::{Dispatch, Rpc};
+use support::*;
 
 fn fixtures() -> PathBuf {
     StdPath::new(env!("CARGO_MANIFEST_DIR")).join("tests/archives")
-}
-
-fn new_prefs() -> Prefs {
-    let mut p = Prefs::new();
-    case::register_prefs(&mut p).unwrap();
-    os::register_prefs(&mut p).unwrap();
-    gemel_fs::fileinfo::register_prefs(&mut p).unwrap();
-    gemel_engine::register_prefs(&mut p).unwrap();
-    p
-}
-
-fn new_features() -> Features {
-    let mut f = Features::new();
-    gemel_engine::register_features(&mut f).unwrap();
-    f
-}
-
-/// Features with xattr and ACL support enabled, as both sides of an OCaml
-/// 2.54 sync negotiate them.
-fn enabled_features() -> Features {
-    let mut f = new_features();
-    let all = f.all();
-    f.set_enabled(&all);
-    f
-}
-
-fn settings(mode: Mode) -> Settings {
-    Settings {
-        some_host_is_insensitive: matches!(mode, Mode::Insensitive | Mode::UnicodeInsensitive),
-        unicode_encoding: mode == Mode::UnicodeInsensitive,
-        unicode_case_sensitive: mode == Mode::UnicodeSensitive,
-    }
-}
-
-fn mode_of_desc(desc: &str) -> Mode {
-    [
-        Mode::Sensitive,
-        Mode::Insensitive,
-        Mode::UnicodeSensitive,
-        Mode::UnicodeInsensitive,
-    ]
-    .into_iter()
-    .find(|m| m.desc() == desc)
-    .unwrap_or_else(|| panic!("unknown case mode {desc:?}"))
 }
 
 fn lines(bytes: &[u8]) -> [String; 3] {
@@ -452,33 +409,6 @@ fn root_aliases_and_names() {
 }
 
 // ---- Commands on both roots ----
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> TempDir {
-        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let d =
-            std::env::temp_dir().join(format!("gemel-archives-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        TempDir(d)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    tokio::task::LocalSet::new().block_on(&rt, f)
-}
 
 /// A client with two local roots in `dir`, its archives in `dir/u`, and
 /// warnings collected.

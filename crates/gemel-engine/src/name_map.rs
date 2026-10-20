@@ -16,7 +16,7 @@ use std::cmp::Ordering;
 
 use gemel_base::case::Mode;
 use gemel_base::name::Name;
-use gemel_base::path::{Local, Path};
+use gemel_base::path::{Global, Path};
 use gemel_compat::umarshal::{self, Reader, Writer};
 
 /// A key ordered by the case mode.
@@ -41,7 +41,7 @@ impl ModeKey for Name {
     }
 }
 
-impl ModeKey for Path<Local> {
+impl<S> ModeKey for Path<S> {
     /// `Path.compare`.
     fn compare_in(&self, other: &Self, mode: Mode) -> Ordering {
         mode.compare(self.as_bytes(), other.as_bytes())
@@ -64,8 +64,8 @@ pub struct ModeMap<K, V> {
 /// A directory's children (`NameMap`).
 pub type NameMap<V> = ModeMap<Name, V>;
 
-/// Values by path (`PathMap`).
-pub type PathMap<V> = ModeMap<Path<Local>, V>;
+/// Values by path (`PathMap`, of `Path.t`).
+pub type PathMap<V> = ModeMap<Path<Global>, V>;
 
 /// What [`ModeMap::validate`] found.
 #[derive(Debug, PartialEq, Eq)]
@@ -129,6 +129,14 @@ impl<K: ModeKey, V> ModeMap<K, V> {
     /// `find`.
     pub fn find(&self, k: &K) -> Option<&V> {
         self.search(k).ok().map(|i| &self.entries[i].1)
+    }
+
+    /// `findi`: the key as the map spells it, and its value.
+    pub fn find_key_value(&self, k: &K) -> Option<(&K, &V)> {
+        self.search(k).ok().map(|i| {
+            let (k, v) = &self.entries[i];
+            (k, v)
+        })
     }
 
     /// `find`, for changing the value.

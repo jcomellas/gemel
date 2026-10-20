@@ -43,8 +43,20 @@ impl Pred {
         doc: &'static str,
         fulldoc: &'static str,
     ) -> Pred {
+        Pred::with_initial(name, category, Vec::new, doc, fulldoc)
+    }
+
+    /// `Pred.create ~initial`: a predicate whose patterns start as
+    /// `initial`'s.
+    pub const fn with_initial(
+        name: &'static str,
+        category: Category,
+        initial: fn() -> Vec<String>,
+        doc: &'static str,
+        fulldoc: &'static str,
+    ) -> Pred {
         Pred {
-            pref: PrefDef::new(name, category, Vec::new, doc, fulldoc).intern(add_pattern),
+            pref: PrefDef::new(name, category, initial, doc, fulldoc).intern(add_pattern),
             cache: Mutex::new(None),
         }
     }

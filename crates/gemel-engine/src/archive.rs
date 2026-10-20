@@ -981,6 +981,61 @@ pub fn props_data(host: &Host) -> PropsData {
     cache(host).borrow().props_data.clone()
 }
 
+/// Takes the root's archive out of the cache (leaving `NoArchive`), to
+/// update it off the engine thread; [`set_archive_local`] puts it back.
+pub fn take_archive(host: &Host, this_root: &str) -> Archive {
+    cache(host)
+        .borrow_mut()
+        .archives
+        .get_mut(this_root)
+        .map_or(Archive::NoArchive, |a| {
+            std::mem::replace(a, Archive::NoArchive)
+        })
+}
+
+/// `Props.Data.merge`: adds another host's shared props data to this
+/// host's. A key must not have two values.
+pub fn merge_props_data(host: &Host, data: &PropsData) -> Result<(), Error> {
+    let cache = cache(host);
+    let mut cache = cache.borrow_mut();
+    for (kind, entries) in data {
+        if kind != b"xattr" && kind != b"ACL" {
+            continue;
+        }
+        let store = match cache.props_data.iter().position(|(k, _)| k == kind) {
+            Some(i) => &mut cache.props_data[i].1,
+            None => {
+                cache.props_data.push((kind.clone(), Vec::new()));
+                &mut cache.props_data.last_mut().expect("just pushed").1
+            }
+        };
+        for (key, value) in entries {
+            match store.iter().find(|(k, _)| k == key) {
+                None => store.push((key.clone(), value.clone())),
+                Some((_, v)) if v == value => {}
+                Some((_, v)) => {
+                    let s = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+                    return Err(Error::Fatal(format!(
+                        "Internal integrity error (propsdata). Key {} returns different \
+                         results:\n  (existing) {}\nand\n  (new) {}\n",
+                        s(key),
+                        s(v),
+                        s(value)
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `Props.Data.extern \`New`: the shared props data this host added since
+/// it was loaded. gemel doesn't synchronise xattrs or ACLs yet, so there is
+/// none.
+pub fn new_props_data(_host: &Host) -> PropsData {
+    PropsData::new()
+}
+
 /// `fileUnchanged`: whether two statuses are of the same regular file,
 /// unmodified.
 pub fn file_unchanged(prefs: &Prefs, old: Option<&Stats>, new: Option<&Stats>) -> bool {

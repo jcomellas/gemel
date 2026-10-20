@@ -44,7 +44,9 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     abort::register_prefs(prefs)?;
     globals::register_prefs(prefs)?;
     fpcache::register_prefs(prefs)?;
-    archive::register_prefs(prefs)
+    archive::register_prefs(prefs)?;
+    xferhint::register_prefs(prefs)?;
+    update::register_prefs(prefs)
 }
 
 /// Registers the remote commands of the modules ported so far.
@@ -53,5 +55,6 @@ pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
         .register_host(&gemel_rpc::root::CANONIZE_ON_SERVER)?;
     negotiate::register_commands(rpc)?;
     globals::register_commands(rpc)?;
-    archive::register_commands(rpc)
+    archive::register_commands(rpc)?;
+    update::register_commands(rpc)
 }
