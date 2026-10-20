@@ -79,41 +79,23 @@ impl Setup {
     }
 }
 
-fn read(p: &StdPath) -> String {
-    std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+fn backup_sync(
+    host: &gemel_rpc::host::Host,
+    fspath: &Fspath,
+    path: &Path<Local>,
+    disposition: Disposition,
+    arch: &gemel_engine::archive::Archive,
+) -> Result<(), Error> {
+    block_on(stasher::backup(host, fspath, path, disposition, arch))
 }
 
-/// The files under `dir`, with their contents (`->target` for links).
-fn listing(dir: &StdPath) -> Vec<(String, String)> {
-    fn walk(root: &StdPath, d: &StdPath, out: &mut Vec<(String, String)>) {
-        let mut entries: Vec<_> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap()).collect();
-        entries.sort_by_key(|e| e.file_name());
-        for e in entries {
-            let p = e.path();
-            let rel = p
-                .strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('\\', "/");
-            let t = e.file_type().unwrap();
-            if t.is_symlink() {
-                out.push((
-                    rel,
-                    format!("->{}", std::fs::read_link(&p).unwrap().display()),
-                ));
-            } else if t.is_dir() {
-                out.push((format!("{rel}/"), String::new()));
-                walk(root, &p, out);
-            } else {
-                out.push((rel, read(&p)));
-            }
-        }
-    }
-    let mut out = Vec::new();
-    if dir.exists() {
-        walk(dir, dir, &mut out);
-    }
-    out
+fn recent_sync(
+    host: &gemel_rpc::host::Host,
+    fspath: &Fspath,
+    path: &Path<Local>,
+    fp: &FullFingerprint,
+) -> Result<Option<Fspath>, Error> {
+    block_on(stasher::get_recent_version(host, fspath, path, fp))
 }
 
 /// Skips tests that would write backups where the environment says.
@@ -484,7 +466,7 @@ fn backups_rotate_up_to_maxbackups() {
         let s = setup(&dir, loopback);
         s.backups(&["backup = Name *"]);
         let backup = |s: &Setup| {
-            stasher::backup(
+            backup_sync(
                 s.host(),
                 &s.fspath(1),
                 &local("d/f"),
@@ -515,7 +497,7 @@ fn backups_rotate_up_to_maxbackups() {
         assert_eq!(listing(&s.base.join("backups")).len(), 4);
         // By copying, the original stays.
         write(&s.b(), "d/f", "v5", T0);
-        stasher::backup(
+        backup_sync(
             s.host(),
             &s.fspath(1),
             &local("d/f"),
@@ -527,7 +509,7 @@ fn backups_rotate_up_to_maxbackups() {
         assert_eq!(read(&s.base.join("backups/d/f")), "v5");
         // Not matched by backup: just removed.
         s.backups(&["backup = Name *", "backupnot = Name f"]);
-        stasher::backup(
+        backup_sync(
             s.host(),
             &s.fspath(1),
             &local("d/f"),
@@ -553,7 +535,7 @@ fn local_backups_sit_next_to_the_file_and_are_ignored() {
         ]);
         for v in ["v1", "v2"] {
             write(&s.b(), "d/f", v, T0);
-            stasher::backup(
+            backup_sync(
                 s.host(),
                 &s.fspath(1),
                 &local("d/f"),
@@ -657,8 +639,7 @@ fn the_current_version_is_stashed_when_marked_equal() {
         assert_eq!(read(&backups.join("src/deep/x")), "x");
         // And it can be found again.
         let fp = s.source(1, "README").fp;
-        let found =
-            stasher::get_recent_version(s.host(), &s.fspath(1), &local("README"), &fp).unwrap();
+        let found = recent_sync(s.host(), &s.fspath(1), &local("README"), &fp).unwrap();
         assert_eq!(
             found.map(|f| f.to_string()),
             Some(
@@ -669,7 +650,7 @@ fn the_current_version_is_stashed_when_marked_equal() {
         );
         let other = s.source(1, "src/main.c").fp;
         assert_eq!(
-            stasher::get_recent_version(s.host(), &s.fspath(1), &local("README"), &other).unwrap(),
+            recent_sync(s.host(), &s.fspath(1), &local("README"), &other).unwrap(),
             None
         );
     }
@@ -815,7 +796,7 @@ fn ocaml_backs_up_the_same_way() {
                 // What propagation does before replacing a file.
                 for f in ["d/f", "top"] {
                     write(&s.b(), f, versions[i], T0);
-                    stasher::backup(
+                    backup_sync(
                         s.host(),
                         &s.fspath(1),
                         &local(f),

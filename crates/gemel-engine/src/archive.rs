@@ -62,7 +62,7 @@ use crate::lock;
 use crate::name_map::{NameMap, PathMap, Validation};
 
 /// `Uutil.myName`.
-const MY_NAME: &str = "unison";
+pub(crate) const MY_NAME: &str = "unison";
 
 // ---- Preferences ----
 

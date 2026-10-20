@@ -142,6 +142,16 @@ pub fn split_into_words(s: &str, c: char) -> Vec<String> {
     }
 }
 
+/// `Uutil.quotes`: `s` quoted for the shell (single quotes on Unix,
+/// double quotes on Windows).
+pub fn quotes(s: &str) -> String {
+    if cfg!(windows) {
+        format!("\"{s}\"")
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
 /// `Filename.is_dir_sep` on this platform.
 fn is_dir_sep(c: u8) -> bool {
     c == b'/' || (cfg!(windows) && (c == b'\\' || c == b':'))

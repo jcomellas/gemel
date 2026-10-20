@@ -247,27 +247,6 @@ fn synced(dir: &TempDir, loopback: bool, prefs: &[&str], build: fn(&StdPath)) ->
     s
 }
 
-/// Gives every directory a new modification time. A directory changed in
-/// the second its last scan saw keeps its time, and fast checking skips it
-/// (as in OCaml); this makes scans look inside.
-fn settle(roots: &[&StdPath]) {
-    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let t = T0 + 1000.0 + 10.0 * f64::from(n);
-    fn walk(d: &StdPath, t: f64) {
-        for e in std::fs::read_dir(d).unwrap() {
-            let e = e.unwrap();
-            if e.file_type().unwrap().is_dir() {
-                walk(&e.path(), t);
-            }
-        }
-        set_mtime(d, t);
-    }
-    for r in roots {
-        walk(r, t);
-    }
-}
-
 /// The tree of OCaml's quick check: files, and a directory.
 fn small(root: &StdPath) {
     write(root, "f", "x", T0);

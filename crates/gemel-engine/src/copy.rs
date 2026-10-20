@@ -36,10 +36,9 @@ use gemel_fs::reflink;
 use gemel_rpc::host::Host;
 use gemel_rpc::registry::{RootCmd, Rpc};
 use gemel_rpc::root::Root;
-use gemel_rpc::runtime;
 
 use crate::pred::{self, Compiled};
-use crate::{fpcache, update};
+use crate::{exclusive, fpcache, update};
 
 // ---- Preferences ----
 
@@ -272,7 +271,7 @@ pub async fn check_for_changes_to_source_local(
     let ctx = Ctx::of(host)?;
     let abspath = fspath.concat(&check.path);
     let (f, c) = (fspath.clone(), check.clone());
-    match runtime::blocking(move || check_source(&ctx, &f, &c)).await? {
+    match exclusive::blocking(host, move || check_source(&ctx, &f, &c)).await? {
         SourceState::AsRecorded => Ok(()),
         SourceState::MissedChange => {
             update::mark_possibly_updated(host, fspath, &check.path)?;
@@ -714,7 +713,7 @@ pub async fn file(
             (fspath_to.clone(), path_to.clone(), real_path_to.clone());
         let (desc, fp) = (source.desc.clone(), source.fp.clone());
         let ress_length = osx::ress_length(&source.ress);
-        runtime::blocking(move || {
+        exclusive::blocking(rpc.local_host(), move || {
             Progress::none(|p| {
                 local_file(
                     &ctx,
