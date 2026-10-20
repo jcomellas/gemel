@@ -1,5 +1,5 @@
 #!/bin/sh
-# Regenerates the real-archive fixtures in crates/gemel-fs/tests/archives/:
+# Regenerates the real-archive fixtures in crates/gemel-engine/tests/archives/:
 # archives written by OCaml Unison on Linux (in Docker) and, on a macOS host
 # with unison installed, on macOS.
 #
@@ -12,12 +12,12 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 bin=$(cd "$(dirname "${1:?usage: $0 /path/to/unison-linux-binary}")" && pwd)/$(basename "$1")
 rel=${bin#"$root"/}
 [ "$rel" != "$bin" ] || { echo "$1 must be inside $root" >&2; exit 2; }
-out=crates/gemel-fs/tests/archives
+out=crates/gemel-engine/tests/archives
 mkdir -p "$root/$out"
 docker run --rm -v "$root":/work debian:trixie-slim \
-    sh "/work/crates/gemel-fs/tests/make-archives.sh" "/work/$rel" /tmp/fx "/work/$out" linux
+    sh "/work/crates/gemel-engine/tests/make-archives.sh" "/work/$rel" /tmp/fx "/work/$out" linux
 if [ "$(uname -s)" = Darwin ] && command -v unison >/dev/null; then
-    "$root/crates/gemel-fs/tests/make-archives.sh" "$(command -v unison)" \
+    "$root/crates/gemel-engine/tests/make-archives.sh" "$(command -v unison)" \
         "${TMPDIR:-/tmp}/gemel-fx" "$root/$out" macos
 fi
 {

@@ -141,6 +141,17 @@ The `Props`, `Fileinfo`, `Osx` and fingerprint types, with their Umarshal codecs
   - `checkArchive`;
   - load, store, lock, and the cross-replica consistency check.
   - **Done when:** OCaml-written archives round-trip byte for byte.
+
+  **Notes (phase 4a, 2026-10-20):**
+  - The archive half of `update.ml` is the `archive` module; `MyMap` is `name_map`. A map is re-sorted under the host's case mode as it is read, as `MyMap.m` does, and later bindings replace earlier equal ones.
+  - The case-mode preferences are registered now, and each host reads its mode from its own preferences. (`unicodeCS` is marked local, but it is still sent; local only means a server may not know it.)
+  - The loopback host stands in for the client's own process, where OCaml runs local roots' commands. So it names itself as the client does (`clientHostName`), and its warnings go to the client (`Util.warn`, now on `Host`).
+  - `"paths"` is kept beside the property list rather than in it. `"props data"` is carried as loaded, since gemel doesn't synchronise xattrs or ACLs yet.
+  - "Byte for byte" means: an OCaml archive loaded and stored again is identical, apart from the time on the third line.
+  - The real-archive fixtures moved to `gemel-engine/tests/archives/`, with `reading.rs`, now that the parser is real. There are 32: Linux and macOS, all four case modes, with and without `-path`, and each with the name OCaml gave it.
+  - `prepareCommit` and `commitUpdates` stay in 4c. The `dumparchives` text dump is not ported yet.
+  - Known divergence: root paths that aren't UTF-8 print lossily, so their archive names differ from OCaml's.
+  - For later phases: the frontend's preference set (phase 7) must register `case` and `fileinfo` preferences, which archive commands read; and since locks are released when a host is dropped, the driver (phase 8) must call `release_held_locks` before `process::exit`.
 - **4b, update detection:** scanning, fast check (inode and mtime), `dirFastCheck`, `follow` and ignore handling, fingerprinting and fpcache use.
 - **4c, commits:** `prepareCommit` and `commit`, `markEqual`, and the update of archive props after propagation.
 

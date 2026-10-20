@@ -43,7 +43,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ocaml make
       - run: make -C unison-src tui
       - run: cargo run --locked -p gemel-oracle -- --reference unison-src/src/unison --count 20
-      # gemel-fs reads replicas as this OCaml Unison does (tests/reading.rs).
-      - run: cargo test --locked -p gemel-fs --test reading
+      # gemel reads replicas as this OCaml Unison does (gemel-engine/tests/reading.rs).
+      - run: cargo test --locked -p gemel-engine --test reading
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison

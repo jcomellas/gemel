@@ -754,9 +754,112 @@ pub fn file_exists(p: &[u8]) -> bool {
     stat(p).is_ok()
 }
 
+/// A local date and time (the fields of `Unix.tm` that Unison prints).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalTime {
+    /// The year, e.g. 2026.
+    pub year: i32,
+    /// The month, 1 to 12.
+    pub month: u32,
+    /// The day of the month, 1 to 31.
+    pub day: u32,
+    /// Hours, minutes and seconds.
+    pub hour: u32,
+    /// Minutes.
+    pub min: u32,
+    /// Seconds.
+    pub sec: u32,
+}
+
+/// `Unix.localtime`: the local time of `t` (seconds since the epoch), or
+/// `None` where the system can't represent it.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn localtime(t: f64) -> Option<LocalTime> {
+    // OCaml converts the float to time_t by truncation.
+    let secs = t as libc::time_t;
+    // SAFETY: an all-zero `tm` is valid, and localtime_r only writes it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers are valid for the call.
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return None;
+    }
+    let field = |v: libc::c_int| u32::try_from(v).ok();
+    Some(LocalTime {
+        year: tm.tm_year + 1900,
+        month: field(tm.tm_mon)? + 1,
+        day: field(tm.tm_mday)?,
+        hour: field(tm.tm_hour)?,
+        min: field(tm.tm_min)?,
+        sec: field(tm.tm_sec)?,
+    })
+}
+
+/// `Unix.localtime`: the local time of `t` (seconds since the epoch), or
+/// `None` where the system can't represent it.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn localtime(t: f64) -> Option<LocalTime> {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    // 100 ns intervals since 1601.
+    let secs = t.trunc() as i64;
+    let ticks = u64::try_from(secs.checked_add(11_644_473_600)?.checked_mul(10_000_000)?).ok()?;
+    let ft = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    // SAFETY: an all-zero SYSTEMTIME is valid; the calls only write them.
+    let mut utc: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    // SAFETY: all pointers are valid for the calls; a null time zone means
+    // the current one.
+    let ok = unsafe {
+        FileTimeToSystemTime(&ft, &mut utc) != 0
+            && SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) != 0
+    };
+    ok.then(|| LocalTime {
+        year: i32::from(local.wYear),
+        month: u32::from(local.wMonth),
+        day: u32::from(local.wDay),
+        hour: u32::from(local.wHour),
+        min: u32::from(local.wMinute),
+        sec: u32::from(local.wSecond),
+    })
+}
+
+/// `Util.time2string`: `t` as local time, e.g. `2026-10-20 at  9:05:00`.
+pub fn time2string(t: f64) -> String {
+    match localtime(t) {
+        Some(tm) => format!(
+            "{:4}-{:02}-{:02} at {:2}:{:02}:{:02}",
+            tm.year, tm.month, tm.day, tm.hour, tm.min, tm.sec
+        ),
+        None => "(invalid date)".into(),
+    }
+}
+
+/// `Unix.gettimeofday`.
+pub fn gettimeofday() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn times_print_as_unison_does() {
+        let s = time2string(gettimeofday());
+        // "YYYY-MM-DD at hh:mm:ss", the hour padded with a space.
+        assert_eq!(s.len(), 22, "{s}");
+        assert_eq!(&s[10..14], " at ");
+        assert_eq!(&s[19..20], ":");
+        let tm = localtime(86_400.0 * 365.0).unwrap();
+        assert!((1970..=1971).contains(&tm.year), "{tm:?}");
+    }
 
     #[test]
     fn extended_paths() {

@@ -21,7 +21,7 @@ gemel-ui-api = { path = "crates/gemel-ui-api" }
 md-5 = "0.11"
 libc = "0.2"
 tokio = { version = "1.54.0", default-features = false, features = ["rt", "sync"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_System_Time"] }
 
 [workspace.lints.rust]
 # `deny` rather than `forbid` so that gemel-fs can opt in for FFI

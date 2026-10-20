@@ -2,4 +2,4 @@
 # exactly as generated (no end-of-line conversion) and collapse them in diffs.
 crates/gemel-compat/tests/fixtures/*.txt -text linguist-generated
 crates/gemel-compat/src/unicode/tables.rs -text linguist-generated
-crates/gemel-fs/tests/archives/* -text linguist-generated
+crates/gemel-engine/tests/archives/* -text linguist-generated
