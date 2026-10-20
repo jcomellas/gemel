@@ -242,6 +242,38 @@ Split, like phase 4, into:
 
   Two oracle tests compare four backup configurations with OCaml Unison: the `ignore` patterns its archive records after `initBackups`, and the backups' names and contents after overwriting files four times. CI's oracle job runs them.
 
+**Notes (phase 6b, 2026-10-20):**
+- **`files`:** all of it, for local roots. Every part on a root is a root command with OCaml's name and encoding.
+  - Deleting, setting props (`setProp`, `updateProps`), `mkdir`, `setDirProp`, and making links.
+  - Renaming with the commit log (`DANGER.README`), and `processCommitLogs`.
+  - The target-path commands and the parents they create.
+  - `copy`, `updateSourceArchive` and `deleteSpuriousChildren`.
+  - `copyonconflict`; `move` and `moveArchive`; `diff`, `merge` and `ls`.
+  - The archive updates keep OCaml's order exactly (for crash safety).
+- **`external`:** running diff and merge programs through the shell, with OCaml's log format and signal numbers.
+  - A divergence: on Unix the program's input is empty, where OCaml leaves it a pipe it never closes (so a program reading it hangs).
+- **Threading:** OCaml does a host's filesystem work synchronously, so none of it overlaps, even with both roots on one host.
+  - Here it runs off the engine thread, under a per-host lock (`exclusive`). Two roots' backups can share a directory, and renames share the commit log.
+  - The stasher now takes what it needs from the host first, then works on a blocking task; `markEqual` awaits it.
+  - For 6c: the lock makes each piece atomic, not each root command. OCaml's `deleteLocal`, `renameLocal` and `moveLocal` don't yield between `checkNoUpdates` and the rename; here other work can run there. That is harmless while items propagate one at a time, but `maxthreads` would expose it, so 6c keeps local items sequential or holds the lock for a whole command.
+- **Copying a directory** copies its children one at a time, in name order (the order OCaml's threads run between local roots). Running transfers concurrently (`maxthreads`) comes with transport.
+- **Not ported yet:**
+  - remote roots for diff and merge (milestone 3);
+  - the log of the merge command and its result, and merge's messages on standard error (phase 7);
+  - changing directory around making a link on Windows: `os::symlink` resolves a relative target against the link's directory instead.
+- **Extended data** (xattrs and ACLs) passes through unchanged (milestone 3).
+- **Tests:** `tests/files.rs`, in both dispatch modes, drives each operation the way transport will:
+  - new files and trees, updates, deletions with backups, props, a file over a directory and back, links;
+  - a partly failed copy;
+  - `copyonconflict`, the commit log, and moves (renames that keep the inode).
+  
+  After each, OCaml Unison finds nothing to do, with fast checking and without, so its archives agree with both replicas. On twin replicas, gemel and OCaml are compared for:
+  - merges, for ten kinds of merge-program result, including the log shown (OCaml prints it in batch mode, so signal numbers are checked too);
+  - the three kinds of `copyonconflict` conflict, and the run after;
+  - parents created for a path given with `path`, each with its own props.
+  
+  OCaml stops on a leftover commit log with the same message. CI's oracle job runs these.
+
 ### Phase 7: `gemel-ui-api` (~1.3k)
 
 - **`uicommon`:** profile choice and initialisation, root checks, the transfer and stats formatting, and the summary line.

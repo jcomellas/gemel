@@ -7,6 +7,7 @@ pub mod abort;
 pub mod archive;
 pub mod common;
 pub mod copy;
+pub mod exclusive;
 pub mod external;
 pub mod files;
 pub mod fpcache;
@@ -52,7 +53,7 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     moves::register_prefs(prefs)?;
     copy::register_prefs(prefs)?;
     stasher::register_prefs(prefs)?;
-    // files goes here.
+    files::register_prefs(prefs)?;
     sortri::register_prefs(prefs)?;
     recon::register_prefs(prefs)
 }
@@ -66,5 +67,6 @@ pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
     archive::register_commands(rpc)?;
     update::register_commands(rpc)?;
     copy::register_commands(rpc)?;
-    stasher::register_commands(rpc)
+    stasher::register_commands(rpc)?;
+    files::register_commands(rpc)
 }

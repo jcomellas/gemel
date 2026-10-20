@@ -1755,7 +1755,7 @@ pub fn set_stasher_fun(host: &Host, f: StashFn) {
 /// `markEqualLocal`: records in the root's archive that the paths, changed
 /// in the same way on both roots, are now as `paths` says (backing up their
 /// current versions first). If a backup fails, the archive is unchanged.
-pub fn mark_equal_local(
+pub async fn mark_equal_local(
     host: &Host,
     fspath: &Fspath,
     paths: &Tree<Name, UpdateContent>,
@@ -1765,20 +1765,14 @@ pub fn mark_equal_local(
     let entries = paths.flatten(Path::<Local>::empty(), &|p, n| p.child(n));
     // OCaml installs the stasher's function when it loads; here it is
     // the default.
-    let stash = host
-        .state::<Stasher>()
-        .borrow()
-        .0
-        .clone()
-        .unwrap_or_else(|| {
-            Rc::new(|host: &Host, fspath: &Fspath, path: &Path<Local>| {
-                crate::stasher::stash_current_version(host, fspath, path, None)
-            })
-        });
+    let stash = host.state::<Stasher>().borrow().0.clone();
     for (path, _) in &entries {
         let local = archive::with_archive(host, &root, |a| get_path_in_archive(a, path).0)
             .unwrap_or_else(|| path.clone());
-        stash(host, fspath, &local)?;
+        match &stash {
+            Some(stash) => stash(host, fspath, &local)?,
+            None => crate::stasher::stash_current_version(host, fspath, &local, None).await?,
+        }
     }
     archive::with_archive_mut(host, &root, |archive| {
         for (path, uc) in &entries {
@@ -1807,7 +1801,7 @@ pub static MARK_EQUAL: RootCmd<Tree<Name, UpdateContent>, ()> = RootCmd::new(
     },
     |(), _, _| {},
     |_, _| Ok(()),
-    |host, fspath, paths| Box::pin(async move { mark_equal_local(&host, &fspath, &paths) }),
+    |host, fspath, paths| Box::pin(async move { mark_equal_local(&host, &fspath, &paths).await }),
 );
 
 /// `markEqual`: records on both roots that these paths changed in the same

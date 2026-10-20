@@ -99,3 +99,61 @@ pub fn write(root: &StdPath, rel: &str, content: &str, t: f64) {
     std::fs::write(&p, content).unwrap();
     set_mtime(&p, t);
 }
+
+/// Gives every directory a new modification time. A directory changed in
+/// the second its last scan saw keeps its time, and fast checking skips it
+/// (as in OCaml); this makes scans look inside.
+pub fn settle(roots: &[&StdPath]) {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let t = sync::T0 + 1000.0 + 10.0 * f64::from(n);
+    fn walk(d: &StdPath, t: f64) {
+        for e in std::fs::read_dir(d).unwrap() {
+            let e = e.unwrap();
+            if e.file_type().unwrap().is_dir() {
+                walk(&e.path(), t);
+            }
+        }
+        set_mtime(d, t);
+    }
+    for r in roots {
+        walk(r, t);
+    }
+}
+
+pub fn read(p: &StdPath) -> String {
+    std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+}
+
+/// The files under `dir`, with their contents (`->target` for links).
+pub fn listing(dir: &StdPath) -> Vec<(String, String)> {
+    fn walk(root: &StdPath, d: &StdPath, out: &mut Vec<(String, String)>) {
+        let mut entries: Vec<_> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let p = e.path();
+            let rel = p
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let t = e.file_type().unwrap();
+            if t.is_symlink() {
+                out.push((
+                    rel,
+                    format!("->{}", std::fs::read_link(&p).unwrap().display()),
+                ));
+            } else if t.is_dir() {
+                out.push((format!("{rel}/"), String::new()));
+                walk(root, &p, out);
+            } else {
+                out.push((rel, read(&p)));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if dir.exists() {
+        walk(dir, dir, &mut out);
+    }
+    out
+}

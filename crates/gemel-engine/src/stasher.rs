@@ -12,6 +12,8 @@
 //! backups get (`makeBackupName`) are a host slot, set by
 //! [`init_backups_local`] from the preferences.
 
+use std::sync::Arc;
+
 use gemel_base::case;
 use gemel_base::path::{Local, Path};
 use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
@@ -27,9 +29,9 @@ use gemel_rpc::registry::{RootCmd, Rpc};
 
 use crate::archive::Archive;
 use crate::copy::{self, Ctx, Progress, Replacing};
-use crate::globals::{self, Roots};
-use crate::pred::Pred;
-use crate::{update, xferhint};
+use crate::globals::{self, Ignore, Roots};
+use crate::pred::{Compiled, Pred};
+use crate::{exclusive, update, xferhint};
 
 // ---- Preferences ----
 
@@ -378,19 +380,30 @@ fn naming(host: &Host) -> Result<(Affix, Affix), Error> {
         .expect("set above"))
 }
 
-/// The backup settings of one operation.
+/// The backup settings of one operation, taken from the host so that
+/// backups are made off the engine thread.
 struct Backups {
     ctx: Ctx,
     naming: (Affix, Affix),
     central: bool,
     location: String,
     max_backups: i64,
+    /// [`backup_directory`], if it could be resolved (OCaml only resolves
+    /// it when it is needed).
+    backup_dir: Result<Fspath, Error>,
+    backup: Arc<Compiled>,
+    backup_not: Arc<Compiled>,
+    backup_current: Arc<Compiled>,
+    backup_current_not: Arc<Compiled>,
+    ignore: Ignore,
 }
 
 impl Backups {
     fn of(host: &Host) -> Result<Backups, Error> {
         let naming = naming(host)?;
+        let backup_dir = backup_directory(host);
         let prefs = host.prefs().borrow();
+        let mode = case::mode(&prefs);
         let location = prefs.read(&BACKUP_LOCATION).clone();
         Ok(Backups {
             ctx: Ctx::of(host)?,
@@ -398,7 +411,23 @@ impl Backups {
             central: location == "central",
             location,
             max_backups: *prefs.read(&MAX_BACKUPS),
+            backup_dir,
+            backup: BACKUP.compiled(&prefs, mode)?,
+            backup_not: BACKUP_NOT.compiled(&prefs, mode)?,
+            backup_current: BACKUP_CURRENT.compiled(&prefs, mode)?,
+            backup_current_not: BACKUP_CURRENT_NOT.compiled(&prefs, mode)?,
+            ignore: Ignore::new(&prefs, mode)?,
         })
+    }
+
+    /// `shouldBackup`.
+    fn should_backup(&self, p: &Path<Local>) -> bool {
+        self.backup.test(p.as_bytes()) && !self.backup_not.test(p.as_bytes())
+    }
+
+    /// `shouldBackupCurrent`.
+    fn should_backup_current(&self, p: &Path<Local>) -> bool {
+        self.backup_current.test(p.as_bytes()) && !self.backup_current_not.test(p.as_bytes())
     }
 
     /// `makeBackupName`: version `i`'s name. A root that is a file is named
@@ -424,14 +453,9 @@ impl Backups {
     }
 
     /// `stashDirectory`: where backups of `fspath`'s paths go.
-    fn stash_directory(
-        &self,
-        host: &Host,
-        fspath: &Fspath,
-        path: &Path<Local>,
-    ) -> Result<Fspath, Error> {
+    fn stash_directory(&self, fspath: &Fspath, path: &Path<Local>) -> Result<Fspath, Error> {
         match self.location.as_str() {
-            "central" => backup_directory(host),
+            "central" => self.backup_dir.clone(),
             // A root that is a file: next to it.
             "local" if path.is_empty() => {
                 Fspath::canonize(Some(util::filename_dirname(&fspath.to_string()).as_bytes()))
@@ -507,12 +531,11 @@ impl Backups {
     /// older ones), or none if the current version 0 is the same already.
     fn backup_path(
         &self,
-        host: &Host,
         fspath: &Fspath,
         path: &Path<Local>,
     ) -> Result<Option<(Fspath, Path<Local>)>, Error> {
         let fs = &self.ctx.fs;
-        let sfspath = self.stash_directory(host, fspath, path)?;
+        let sfspath = self.stash_directory(fspath, path)?;
         let path0 = self.make_backup_name(fspath, path, 0)?;
         let follow = |p: &Path<Local>| self.ctx.follow.test(p.as_bytes());
         let source_typ = fileinfo::get_type(true, fspath, path, &follow, fs)?;
@@ -536,6 +559,142 @@ impl Backups {
         }
         Ok(Some((sfspath, spath)))
     }
+
+    /// [`backup`]'s filesystem work: where the backup went, if one was made.
+    fn backup(
+        &self,
+        fspath: &Fspath,
+        path: &Path<Local>,
+        disposition: Disposition,
+    ) -> Result<Option<(Fspath, Path<Local>)>, Error> {
+        let fs = &self.ctx.fs;
+        let (working_dir, real_path) =
+            fspath.find_working_dir(path, self.ctx.follow.test(path.as_bytes()))?;
+        let dispose = || {
+            if disposition == Disposition::AndRemove {
+                os::delete(&working_dir, &real_path, fs)
+            } else {
+                Ok(())
+            }
+        };
+        if !os::exists(&working_dir, &real_path, fs)? {
+            return Ok(None);
+        }
+        if !self.should_backup(path) {
+            dispose()?;
+            return Ok(None);
+        }
+        let Some((back_root, back_path)) = self.backup_path(fspath, path)? else {
+            dispose()?;
+            return Ok(None);
+        };
+        let by_copying = || {
+            copy::recursively(&self.ctx, fspath, path, &back_root, &back_path)?;
+            dispose()
+        };
+        if disposition == Disposition::AndRemove {
+            // FIX (OCaml's): this does the wrong thing with followed links.
+            match os::rename(
+                "backup",
+                &working_dir,
+                &real_path,
+                &back_root,
+                &back_path,
+                None,
+                fs,
+            ) {
+                Ok(()) => {}
+                Err(Error::Transient(_)) => by_copying()?,
+                Err(e) => return Err(e),
+            }
+        } else {
+            by_copying()?;
+        }
+        Ok(Some((back_root, back_path)))
+    }
+
+    /// [`stash_current_version`]'s filesystem work.
+    fn stash_current_version(
+        &self,
+        fspath: &Fspath,
+        path: &Path<Local>,
+        source_path: Option<&Path<Local>>,
+    ) -> Result<(), Error> {
+        if !self.should_backup_current(path) {
+            return Ok(());
+        }
+        let source = source_path.unwrap_or(path);
+        let follow = |p: &Path<Local>| self.ctx.follow.test(p.as_bytes());
+        let stat = fileinfo::get(true, fspath, source, &follow, &self.ctx.fs)?;
+        match stat.typ {
+            Typ::Absent => Ok(()),
+            Typ::Directory => {
+                if source_path.is_some() {
+                    return Err(Error::Fatal(
+                        "Internal error: stasher: stashing a directory from elsewhere".to_owned(),
+                    ));
+                }
+                for n in os::children_of(fspath, path, &self.ctx.temp_names, &self.ctx.fs)? {
+                    let child = path.child(&n);
+                    if !self.ignore.test(&child) {
+                        self.stash_current_version(fspath, &child, None)?;
+                    }
+                }
+                Ok(())
+            }
+            Typ::Symlink => {
+                if let Some((sfspath, spath)) = self.backup_path(fspath, path)? {
+                    os::symlink(&sfspath, &spath, &os::read_link(fspath, source)?)?;
+                }
+                Ok(())
+            }
+            Typ::File => {
+                if let Some((sfspath, spath)) = self.backup_path(fspath, path)? {
+                    Progress::none(|p| {
+                        copy::local_file(
+                            &self.ctx,
+                            fspath,
+                            source,
+                            &sfspath,
+                            &spath,
+                            &spath,
+                            Replacing::Copy,
+                            &stat.desc,
+                            osx::ress_length(&stat.os_x.ress_info),
+                            p,
+                        )
+                    })?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// [`get_recent_version`]'s filesystem work.
+    fn get_recent_version(
+        &self,
+        fspath: &Fspath,
+        path: &Path<Local>,
+        fp: &os::FullFingerprint,
+    ) -> Result<Option<Fspath>, Error> {
+        let fs = &self.ctx.fs;
+        let dir = self.stash_directory(fspath, path)?;
+        let mut i = 0;
+        loop {
+            let p = self.make_backup_name(fspath, path, i)?;
+            if os::exists(&dir, &p, fs)? {
+                let typ = fileinfo::get_type(false, &dir, &p, &|_| false, fs)?;
+                if os::fingerprint(&dir, &p, typ.info_kind(), fs.props.rsrc)? == *fp {
+                    return Ok(Some(dir.concat(&p)));
+                }
+            }
+            // Versions 0 to maxbackups.
+            if i >= self.max_backups {
+                return Ok(None);
+            }
+            i += 1;
+        }
+    }
 }
 
 // ---- Backing up ----
@@ -551,8 +710,9 @@ pub enum Disposition {
 
 /// `Stasher.backup`: backs up `path` if `backup` says so; with
 /// [`Disposition::AndRemove`] the original is gone afterwards. The backed
-/// up files of `arch` become copy hints.
-pub fn backup(
+/// up files of `arch` become copy hints. The files are handled off the
+/// engine thread.
+pub async fn backup(
     host: &Host,
     fspath: &Fspath,
     path: &Path<Local>,
@@ -560,57 +720,21 @@ pub fn backup(
     arch: &Archive,
 ) -> Result<(), Error> {
     let b = Backups::of(host)?;
-    let fs = &b.ctx.fs;
-    let (working_dir, real_path) =
-        fspath.find_working_dir(path, b.ctx.follow.test(path.as_bytes()))?;
-    let dispose = || {
-        if disposition == Disposition::AndRemove {
-            os::delete(&working_dir, &real_path, fs)
-        } else {
-            Ok(())
-        }
-    };
-    if !os::exists(&working_dir, &real_path, fs)? {
-        return Ok(());
+    let (f, p) = (fspath.clone(), path.clone());
+    let made = exclusive::blocking(host, move || b.backup(&f, &p, disposition)).await?;
+    if let Some((back_root, back_path)) = made {
+        update::iter_files(&back_root, &back_path, arch, &mut |f, p, fp| {
+            xferhint::insert_entry(host, (f.clone(), p.clone(), fp.clone()));
+        });
     }
-    if !should_backup(&host.prefs().borrow(), path)? {
-        return dispose();
-    }
-    let Some((back_root, back_path)) = b.backup_path(host, fspath, path)? else {
-        return dispose();
-    };
-    let by_copying = || {
-        copy::recursively(&b.ctx, fspath, path, &back_root, &back_path)?;
-        dispose()
-    };
-    if disposition == Disposition::AndRemove {
-        // FIX (OCaml's): this does the wrong thing with followed links.
-        match os::rename(
-            "backup",
-            &working_dir,
-            &real_path,
-            &back_root,
-            &back_path,
-            None,
-            fs,
-        ) {
-            Ok(()) => {}
-            Err(Error::Transient(_)) => by_copying()?,
-            Err(e) => return Err(e),
-        }
-    } else {
-        by_copying()?;
-    }
-    update::iter_files(&back_root, &back_path, arch, &mut |f, p, fp| {
-        xferhint::insert_entry(host, (f.clone(), p.clone(), fp.clone()));
-    });
     Ok(())
 }
 
 /// `stashCurrentVersion`: keeps the current version of `path` (or of the
 /// bits at `source_path`, kept as `path`'s) if `backupcurr` says so; a
-/// directory's children one by one, except ignored ones.
-pub fn stash_current_version(
+/// directory's children one by one, except ignored ones. The files are
+/// handled off the engine thread.
+pub async fn stash_current_version(
     host: &Host,
     fspath: &Fspath,
     path: &Path<Local>,
@@ -620,83 +744,21 @@ pub fn stash_current_version(
         return Ok(());
     }
     let b = Backups::of(host)?;
-    let source = source_path.unwrap_or(path);
-    let follow = |p: &Path<Local>| b.ctx.follow.test(p.as_bytes());
-    let stat = fileinfo::get(true, fspath, source, &follow, &b.ctx.fs)?;
-    match stat.typ {
-        Typ::Absent => Ok(()),
-        Typ::Directory => {
-            if source_path.is_some() {
-                return Err(Error::Fatal(
-                    "Internal error: stasher: stashing a directory from elsewhere".to_owned(),
-                ));
-            }
-            for n in os::children_of(fspath, path, &b.ctx.temp_names, &b.ctx.fs)? {
-                let child = path.child(&n);
-                let ignored = {
-                    let prefs = host.prefs().borrow();
-                    globals::should_ignore(&prefs, case::mode(&prefs), &child)?
-                };
-                if !ignored {
-                    stash_current_version(host, fspath, &child, None)?;
-                }
-            }
-            Ok(())
-        }
-        Typ::Symlink => {
-            if let Some((sfspath, spath)) = b.backup_path(host, fspath, path)? {
-                os::symlink(&sfspath, &spath, &os::read_link(fspath, source)?)?;
-            }
-            Ok(())
-        }
-        Typ::File => {
-            if let Some((sfspath, spath)) = b.backup_path(host, fspath, path)? {
-                Progress::none(|p| {
-                    copy::local_file(
-                        &b.ctx,
-                        fspath,
-                        source,
-                        &sfspath,
-                        &spath,
-                        &spath,
-                        Replacing::Copy,
-                        &stat.desc,
-                        osx::ress_length(&stat.os_x.ress_info),
-                        p,
-                    )
-                })?;
-            }
-            Ok(())
-        }
-    }
+    let (f, p, s) = (fspath.clone(), path.clone(), source_path.cloned());
+    exclusive::blocking(host, move || b.stash_current_version(&f, &p, s.as_ref())).await
 }
 
 /// `getRecentVersion`: a backup of `path` (in this replica's backups only)
 /// with this fingerprint, if there is one.
-pub fn get_recent_version(
+pub async fn get_recent_version(
     host: &Host,
     fspath: &Fspath,
     path: &Path<Local>,
     fp: &os::FullFingerprint,
 ) -> Result<Option<Fspath>, Error> {
     let b = Backups::of(host)?;
-    let fs = &b.ctx.fs;
-    let dir = b.stash_directory(host, fspath, path)?;
-    let mut i = 0;
-    loop {
-        let p = b.make_backup_name(fspath, path, i)?;
-        if os::exists(&dir, &p, fs)? {
-            let typ = fileinfo::get_type(false, &dir, &p, &|_| false, fs)?;
-            if os::fingerprint(&dir, &p, typ.info_kind(), fs.props.rsrc)? == *fp {
-                return Ok(Some(dir.concat(&p)));
-            }
-        }
-        // Versions 0 to maxbackups.
-        if i >= b.max_backups {
-            return Ok(None);
-        }
-        i += 1;
-    }
+    let (f, p, fp) = (fspath.clone(), path.clone(), fp.clone());
+    exclusive::blocking(host, move || b.get_recent_version(&f, &p, &fp)).await
 }
 
 // ---- Initialisation ----

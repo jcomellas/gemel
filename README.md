@@ -18,9 +18,10 @@ command registry, the engine thread), the engine's foundations (update
 items, ignore and other path predicates, roots and feature negotiation,
 locks, the fingerprint cache), archives (loading, storing, locking, crash
 recovery and commits, byte-compatible with OCaml's), update detection,
-reconciliation (with move detection), and copying between local roots
-with backups are done. The rest of propagation, remote connections and
-the frontends are still to come.
+reconciliation (with move detection), and the file operations of
+propagation between local roots (copying, deleting, props, renames,
+moves, backups, diff and merge) are done. Transport, remote connections
+and the frontends are still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 
