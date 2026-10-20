@@ -208,6 +208,28 @@ impl Archive {
         })
     }
 
+    /// The archive with every directory's children ordered by `mode`
+    /// (for an archive decoded under another mode).
+    pub fn with_mode(self, mode: Mode) -> Archive {
+        match self {
+            Archive::Dir(desc, mut children) if children.mode() == mode => {
+                for (_, a) in children.iter_mut() {
+                    *a = std::mem::replace(a, Archive::NoArchive).with_mode(mode);
+                }
+                Archive::Dir(desc, children)
+            }
+            Archive::Dir(desc, children) => {
+                let bindings: Vec<_> = children
+                    .into_bindings()
+                    .into_iter()
+                    .map(|(n, a)| (n, a.with_mode(mode)))
+                    .collect();
+                Archive::Dir(desc, NameMap::from_bindings(mode, bindings))
+            }
+            a => a,
+        }
+    }
+
     /// `archive2string`.
     pub fn kind_str(&self) -> &'static str {
         match self {
@@ -602,6 +624,31 @@ pub struct ArchiveData {
     pub props: ArchiveProps,
 }
 
+/// The contents of an archive file, borrowed.
+#[derive(Debug, Clone, Copy)]
+pub struct ArchiveRef<'a> {
+    /// The archive.
+    pub archive: &'a Archive,
+    /// Its [`check_archive`] hash.
+    pub hash: i64,
+    /// The magic (see [`ArchiveData::magic`]).
+    pub magic: &'a [u8],
+    /// The properties.
+    pub props: &'a ArchiveProps,
+}
+
+impl ArchiveData {
+    /// The contents, borrowed.
+    pub fn as_ref(&self) -> ArchiveRef<'_> {
+        ArchiveRef {
+            archive: &self.archive,
+            hash: self.hash,
+            magic: &self.magic,
+            props: &self.props,
+        }
+    }
+}
+
 /// `input_line`: the bytes up to the next newline (or the end), and
 /// `None` at the end.
 fn input_line<'a>(bytes: &'a [u8], at: &mut usize) -> Option<&'a [u8]> {
@@ -735,6 +782,16 @@ pub fn archive_file_bytes(
     features: &[Id],
     c: &PropsConfig,
 ) -> Vec<u8> {
+    file_bytes(data.as_ref(), roots_line, written, features, c)
+}
+
+fn file_bytes(
+    data: ArchiveRef<'_>,
+    roots_line: &str,
+    written: &str,
+    features: &[Id],
+    c: &PropsConfig,
+) -> Vec<u8> {
     let mut out = Vec::new();
     for line in [FORMAT_STRING, roots_line] {
         out.extend_from_slice(line.as_bytes());
@@ -747,7 +804,7 @@ pub fn archive_file_bytes(
     out.extend(umarshal::to_bytes(|w| {
         data.archive.marshal(w, c);
         w.int(data.hash);
-        w.string(&data.magic);
+        w.string(data.magic);
         data.props.props.marshal(w);
     }));
     // A frame of its own, so that Unison ≤ 2.53.3 (which would fail with
@@ -805,6 +862,16 @@ pub fn store_archive_local(
     this_root: &str,
     data: &ArchiveData,
 ) -> Result<(), Error> {
+    store_archive_ref(host, file, this_root, data.as_ref())
+}
+
+/// [`store_archive_local`], from borrowed parts.
+pub fn store_archive_ref(
+    host: &Host,
+    file: &[u8],
+    this_root: &str,
+    data: ArchiveRef<'_>,
+) -> Result<(), Error> {
     let (roots_line, mode) = {
         let prefs = host.prefs().borrow();
         (
@@ -824,7 +891,7 @@ pub fn store_archive_local(
         system::time2string(system::gettimeofday()),
         mode.desc()
     );
-    let bytes = archive_file_bytes(data, &roots_line, &written, &features, &c);
+    let bytes = file_bytes(data, &roots_line, &written, &features, &c);
     write_file(file, &bytes).map_err(|e| e.to_fatal("saving archive"))
 }
 
@@ -955,6 +1022,17 @@ pub fn with_archive<R>(host: &Host, this_root: &str, f: impl FnOnce(&Archive) ->
     cache(host).borrow().archives.get(this_root).map(f)
 }
 
+/// Runs `f` on the root's archive in the cache, to change it (the root
+/// gets `NoArchive` first if it had none).
+pub fn with_archive_mut<R>(host: &Host, this_root: &str, f: impl FnOnce(&mut Archive) -> R) -> R {
+    let cache = cache(host);
+    let mut cache = cache.borrow_mut();
+    f(cache
+        .archives
+        .entry(this_root.to_owned())
+        .or_insert(Archive::NoArchive))
+}
+
 /// `setArchiveLocal`: replaces the root's archive in the cache.
 pub fn set_archive_local(host: &Host, this_root: &str, archive: Archive) {
     cache(host)
@@ -991,6 +1069,41 @@ pub fn take_archive(host: &Host, this_root: &str) -> Archive {
         .map_or(Archive::NoArchive, |a| {
             std::mem::replace(a, Archive::NoArchive)
         })
+}
+
+/// `externArchivePropsdata`: records in `props` the shared props data the
+/// archive still uses (`prunePropsdata`). Only ACLs keep data; keys with
+/// none are skipped (OCaml asserts there). If nothing is kept, `props` is
+/// left as it was.
+pub fn extern_archive_propsdata(host: &Host, archive: &Archive, props: &mut Proplist) {
+    fn keys<'a>(a: &'a Archive, out: &mut HashSet<&'a [u8]>) {
+        let acl = |p: &'a Props| p.acl.as_deref().filter(|s| !s.is_empty());
+        match a {
+            Archive::Dir(desc, children) => {
+                out.extend(acl(desc));
+                for (_, c) in children.iter() {
+                    keys(c, out);
+                }
+            }
+            Archive::File(desc, ..) => out.extend(acl(desc)),
+            Archive::Symlink(_) | Archive::NoArchive => {}
+        }
+    }
+    let mut used = HashSet::new();
+    keys(archive, &mut used);
+    let cache = cache(host);
+    let cache = cache.borrow();
+    let kept: Vec<(Vec<u8>, Vec<u8>)> = cache
+        .props_data
+        .iter()
+        .filter(|(k, _)| k == b"ACL")
+        .flat_map(|(_, l)| l.iter())
+        .filter(|(k, _)| used.contains(k.as_slice()))
+        .cloned()
+        .collect();
+    if !kept.is_empty() {
+        props.add(&PROPS_DATA_KEY, vec![(b"ACL".to_vec(), kept)]);
+    }
 }
 
 /// `Props.Data.merge`: adds another host's shared props data to this

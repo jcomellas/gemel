@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+pub mod sync;
+
 use std::path::{Path as StdPath, PathBuf};
 
 use gemel_base::case::{self, Mode, Settings};
