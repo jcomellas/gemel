@@ -73,7 +73,7 @@ So `NameMap` is a sorted vector that can only be built and searched under a give
 Names and paths are byte strings in the engine. They become OS paths only in `gemel-fs`:
 - **Unix:** `OsStrExt`.
 - **Windows:** UTF-16 with Unison's own filename mapping (`unicode::to_utf_16_filename`/`from_utf_16_filename`, already ported). Unison's long-path handling is followed.
-- **Inode stamps:** none are needed on Windows. `Fs.hasInodeNumbers ()` is false there, so `Fileinfo.stamp` is `NoStamp`.
+- **Inode stamps:** Windows has them too. `Fs.hasInodeNumbers ()` is true everywhere, and Unison's `win_stat` derives the number from the file index (`IndexNumber + 155825701 × high part`); gemel does the same through `GetFileInformationByHandle`. *(Corrected in phase 1b: this plan first said Windows used `NoStamp`.)*
 
 ## Phases
 
