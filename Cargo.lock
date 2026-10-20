@@ -1494,7 +1494,9 @@ version = "0.1.0"
 dependencies = [
  "gemel-base",
  "gemel-compat",
+ "libc",
  "md-5",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

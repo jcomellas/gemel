@@ -13,5 +13,11 @@ gemel-compat.workspace = true
 gemel-base.workspace = true
 md-5.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [lints]
 workspace = true

@@ -3,16 +3,17 @@
 //! Ports Unison `src/fingerprint.ml`.
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
-//!
-//! This module has the value type so far; hashing file contents is phase 1b
-//! of milestone 2.
 
 use std::fmt;
 
 use gemel_compat::umarshal::{self, Reader, Writer};
 use md5::{Digest, Md5};
 
+use crate::fspath::Fspath;
 use crate::props::Filesize;
+use crate::system;
+use gemel_base::path::Path;
+use gemel_base::util::Error;
 
 /// A fingerprint (`Fingerprint.t`): the raw MD5 of a file's contents, a
 /// pseudo-fingerprint (`LEN<size>@<MD5 of the path>`, for files whose
@@ -57,6 +58,71 @@ impl Fingerprint {
     /// `Fingerprint.m`.
     pub fn unmarshal(r: &mut Reader<'_>) -> umarshal::Result<Fingerprint> {
         r.string().map(Fingerprint)
+    }
+}
+
+/// The MD5 of a reader's contents, up to `len` bytes if given.
+fn digest(mut r: impl std::io::Read, len: Option<u64>) -> std::io::Result<(Vec<u8>, u64)> {
+    let mut md5 = Md5::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut total = 0u64;
+    loop {
+        let want = match len {
+            Some(l) => (l - total).min(buf.len() as u64) as usize,
+            None => buf.len(),
+        };
+        if want == 0 {
+            break;
+        }
+        let n = r.read(&mut buf[..want])?;
+        if n == 0 {
+            break;
+        }
+        md5.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((md5.finalize().to_vec(), total))
+}
+
+impl Fingerprint {
+    /// `Fingerprint.file`: the MD5 of the contents of `fspath/path`.
+    pub fn file<S>(fspath: &Fspath, path: &Path<S>) -> Result<Fingerprint, Error> {
+        let f = fspath.concat(path);
+        let what = format!("digesting {f}");
+        // OCaml reads through a channel, so errors are Sys_errors.
+        let sys = |call, e| system::SysError {
+            call,
+            param: f.to_string(),
+            error: e,
+        };
+        let file = std::fs::File::open(system::os_path(f.as_bytes()))
+            .map_err(|e| sys("open", e).to_transient_sys(&what))?;
+        let (d, _) = digest(file, None).map_err(|e| sys("read", e).to_transient_sys(&what))?;
+        Ok(Fingerprint(d))
+    }
+
+    /// `Fingerprint.subfile`: the MD5 of `len` bytes at `offset` in `path`.
+    pub fn subfile(path: &Fspath, offset: u64, len: Filesize) -> Result<Fingerprint, Error> {
+        use std::io::{Seek, SeekFrom};
+        let len = u64::try_from(len)
+            .map_err(|_| Error::Transient(format!("File '{path}' too big for fingerprinting")))?;
+        let sys = |call, e| system::SysError {
+            call,
+            param: path.to_string(),
+            error: e,
+        };
+        let mut f = std::fs::File::open(system::os_path(path.as_bytes()))
+            .map_err(|e| sys("open", e).to_transient_sys("digesting subfile"))?;
+        f.seek(SeekFrom::Start(offset))
+            .map_err(|e| sys("lseek", e).to_transient_sys("digesting subfile"))?;
+        let (d, n) =
+            digest(f, Some(len)).map_err(|e| sys("read", e).to_transient("digesting subfile"))?;
+        if n < len {
+            return Err(Error::Transient(format!(
+                "Error in digesting subfile '{path}': truncated file"
+            )));
+        }
+        Ok(Fingerprint(d))
     }
 }
 
