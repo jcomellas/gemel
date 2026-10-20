@@ -1,6 +1,11 @@
 (* Stand-in for Unison's src/ubase/util.ml, for building clroot.ml in
-   gen_base.ml. The functions below are copied verbatim from util.ml:
+   gen_base.ml and pred.ml in gen_pred.ml. The functions below, except
+   debug and msg, are copied verbatim from util.ml:
    Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce. *)
+
+(* Debugging output is off. *)
+let debug (_ : string) (_ : unit -> unit) = ()
+let msg f = Printf.ifprintf stderr f
 
 exception Fatal of string
 exception Transient of string
@@ -52,3 +57,32 @@ let splitIntoWords ?esc:(e='\\') (s:string) (c:char) =
     else inword acc [] pos pos
   in betweenwords [] 0
 
+
+let startswith s1 s2 =
+  let l1 = String.length s1 in
+  let l2 = String.length s2 in
+  if l1 < l2 then false else
+    let rec loop i =
+      if i>=l2 then true
+      else if s1.[i] <> s2.[i] then false
+      else loop (i+1)
+    in loop 0
+
+let findsubstring ?reverse:(rev=false) s1 s2 =
+  let l1 = String.length s1 in
+  let l2 = String.length s2 in
+  let rec loop i =
+    if i+l1 > l2 || i < 0 then None
+    else if s1 = String.sub s2 i l1 then Some(i)
+    else loop (if rev then i-1 else i+1)
+  in loop (if rev then l2-l1 else 0)
+
+let splitAtString ?(reverse=false) s sep =
+  match findsubstring ~reverse:reverse sep s with
+    None -> (s, None)
+  | Some(i) ->
+      let before = String.sub s 0 i in
+      let afterpos = i + (String.length sep) in
+      let after = String.sub s afterpos ((String.length s) - afterpos) in
+      (* rest is possibly the empty string *)
+      (before, Some after)

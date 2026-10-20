@@ -14,8 +14,7 @@
 //! As with [`Name`], comparison takes the [`Mode`] explicitly and `Path` has
 //! no `Ord`; see the `name` module.
 //!
-//! `followLink` (the `follow` preference) moves to the predicate module when
-//! `pred.ml` is ported.
+//! `followLink` (the `follow` preference) is in the engine's `pred` module.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -25,6 +24,7 @@ use gemel_compat::umarshal::{self, Reader, Writer};
 
 use crate::case::Mode;
 use crate::name::Name;
+use crate::prefs::{DecodeError, Input, Kind, PrefValue};
 use crate::util::Error;
 
 /// Marker for paths valid on both replicas (`[`Global] path`, `Path.t`).
@@ -248,6 +248,30 @@ impl Path<Local> {
     }
 }
 
+/// The value of the `path` preference: each setting is appended, so the
+/// paths stay in the order given, and the dump is a list of paths.
+impl PrefValue for Vec<Path<Global>> {
+    const KIND: Kind = Kind::Custom;
+    fn apply(&self, input: Input<'_>) -> Result<Self, String> {
+        let Input::Str(s) = input else {
+            return Err(format!("expected a path, got {input:?}"));
+        };
+        let p = Path::from_bytes(s.as_bytes()).map_err(|e| e.to_string())?;
+        Ok(self.iter().cloned().chain([p]).collect())
+    }
+    fn print(&self) -> Vec<String> {
+        self.iter()
+            .map(|p| String::from_utf8_lossy(p.as_bytes()).into_owned())
+            .collect()
+    }
+    fn marshal(&self, w: &mut Writer) {
+        w.list(self, |w, p| p.marshal(w));
+    }
+    fn unmarshal(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        Ok(r.list(Path::unmarshal)?)
+    }
+}
+
 impl<S> Clone for Path<S> {
     fn clone(&self) -> Self {
         Path::new(self.bytes.clone())
@@ -324,6 +348,27 @@ mod tests {
 
     fn global(s: &str) -> Path<Global> {
         Path::from_bytes_for(s.as_bytes(), false).unwrap()
+    }
+
+    #[test]
+    fn the_path_preference_appends_and_dumps_strings() {
+        let v: Vec<Path<Global>> = Vec::new();
+        let v = v.apply(Input::Str("a/./b/")).unwrap();
+        let v = v.apply(Input::Str("c")).unwrap();
+        assert_eq!(v, [global("a/b"), global("c")]);
+        assert_eq!(v.print(), ["a/b", "c"]);
+        assert!(v.apply(Input::Str("../x")).is_err());
+        // The same bytes as a string list (`list Path.m`).
+        let as_strings = vec!["a/b".to_owned(), "c".to_owned()];
+        assert_eq!(
+            umarshal::to_bytes(|w| v.marshal(w)),
+            umarshal::to_bytes(|w| as_strings.marshal(w))
+        );
+        let bytes = umarshal::to_bytes(|w| v.marshal(w));
+        let back = umarshal::from_bytes(&bytes, |r| {
+            Ok(<Vec<Path<Global>> as PrefValue>::unmarshal(r).unwrap())
+        });
+        assert_eq!(back.unwrap(), v);
     }
 
     fn local(s: &str) -> Path<Local> {

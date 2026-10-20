@@ -242,6 +242,286 @@ let rpc oc =
   Printf.fprintf oc "canonize_res %s\n"
     (hex (Umarshal.to_string mcanonizeRes ("host", "/a/b")))
 
+(* ---- Update items (src/common.ml) and the fingerprint cache
+   (src/fpcache.ml) ----
+
+   Props.m and the codecs it is made of, copied from props.ml, fileinfo.ml,
+   osx.ml, os.ml and fingerprint.ml, with the features as references. Then
+   common.ml's codecs, verbatim. *)
+
+let xattrOn = ref false
+let aclOn = ref false
+let prevState2On = ref false
+let xattrEnabled () = !xattrOn
+let aclEnabled () = !aclOn
+
+type perm = int * int
+let mperm = Umarshal.(prod2 int int id id)
+
+type uid = IdIgnored | IdNamed of string | IdNumeric of int
+let mid = Umarshal.(sum3 unit string int
+                    (function
+                     | IdIgnored -> I31 ()
+                     | IdNamed a -> I32 a
+                     | IdNumeric a -> I33 a)
+                    (function
+                     | I31 () -> IdIgnored
+                     | I32 a -> IdNamed a
+                     | I33 a -> IdNumeric a))
+
+type time = Synced of float | NotSynced of float
+let mtime = Umarshal.(sum2 float float
+                    (function
+                     | Synced a -> I21 a
+                     | NotSynced a -> I22 a)
+                    (function
+                     | I21 a -> Synced a
+                     | I22 a -> NotSynced a))
+
+type props = { perm : perm; uid : uid; gid : uid; time : time;
+               typeCreator : string option; length : int64; ctime : float;
+               xattr : ((string * attrvalue) list * int64) option;
+               acl : string option }
+
+let mprops = Umarshal.(prod4
+                    (prod6 mperm mid mid mtime (option string) int64 id id)
+                    (cond (fun () -> xattrEnabled () || aclEnabled ()) (-1.) float)
+                    (cond xattrEnabled None (option msizeandattrs))
+                    (cond aclEnabled None (option string))
+                    (fun {perm; uid; gid; time; typeCreator; length; ctime; xattr; acl} ->
+                       ((perm, uid, gid, time, typeCreator, length), ctime, xattr, acl))
+                    (fun ((perm, uid, gid, time, typeCreator, length), ctime, xattr, acl) ->
+                       {perm; uid; gid; time; typeCreator; length; ctime; xattr; acl}))
+
+let props_dummy =
+  { perm = (0, 0); uid = IdIgnored; gid = IdIgnored; time = NotSynced 0.;
+    typeCreator = None; length = -1L; ctime = -1.; xattr = None; acl = None }
+
+type typ = [ `ABSENT | `FILE | `DIRECTORY | `SYMLINK ]
+let mtyp = Umarshal.(sum4 unit unit unit unit
+                       (function
+                        | `ABSENT -> I41 ()
+                        | `FILE -> I42 ()
+                        | `DIRECTORY -> I43 ()
+                        | `SYMLINK -> I44 ())
+                       (function
+                        | I41 () -> `ABSENT
+                        | I42 () -> `FILE
+                        | I43 () -> `DIRECTORY
+                        | I44 () -> `SYMLINK))
+
+type stamp = InodeStamp of int | NoStamp | RescanStamp
+let mstamp = Umarshal.(sum3 int unit unit
+                         (function
+                          | InodeStamp a -> I31 a
+                          | NoStamp -> I32 ()
+                          | RescanStamp -> I33 ())
+                         (function
+                          | I31 a -> InodeStamp a
+                          | I32 () -> NoStamp
+                          | I33 () -> RescanStamp))
+
+type 'a ressInfo =
+    NoRess
+  | HfsRess of int64
+  | AppleDoubleRess of int * float * float * int64 * 'a
+let mressInfo m = Umarshal.(sum3 unit int64
+                              (prod5 int float float int64 m id id)
+                              (function
+                               | NoRess -> I31 ()
+                               | HfsRess a -> I32 a
+                               | AppleDoubleRess (a, b, c, d, e) -> I33 (a, b, c, d, e))
+                              (function
+                               | I31 () -> NoRess
+                               | I32 a -> HfsRess a
+                               | I33 (a, b, c, d, e) -> AppleDoubleRess (a, b, c, d, e)))
+let mressStamp = mressInfo Umarshal.unit
+
+let mfullfingerprint = Umarshal.(prod2 string string id id)
+let fullfingerprint_dummy = ("", "")
+
+type prevState1 =
+    Previous of typ * props * (string * string) * unit ressInfo
+  | New1
+
+let mprevState1 = Umarshal.(sum2
+                             (prod4 mtyp mprops mfullfingerprint mressStamp id id)
+                             unit
+                             (function
+                              | Previous (a, b, c, d) -> I21 (a, b, c, d)
+                              | New1 -> I22 ())
+                             (function
+                              | I21 (a, b, c, d) -> Previous (a, b, c, d)
+                              | I22 () -> New1))
+
+type prevState =
+  | PrevDir of props
+  | PrevFile of props * (string * string) * stamp * unit ressInfo
+  | PrevSymlink
+  | New
+
+let mprevState2 = Umarshal.(sum4
+                             mprops
+                             (prod4 mprops mfullfingerprint mstamp mressStamp id id)
+                             unit
+                             unit
+                             (function
+                              | PrevDir a -> I41 a
+                              | PrevFile (a, b, c, d) -> I42 (a, b, c, d)
+                              | PrevSymlink -> I43 ()
+                              | New -> I44 ())
+                             (function
+                              | I41 a -> PrevDir a
+                              | I42 (a, b, c, d) -> PrevFile (a, b, c, d)
+                              | I43 () -> PrevSymlink
+                              | I44 () -> New))
+
+let prev_to_old = function
+  | PrevDir desc ->
+      Previous (`DIRECTORY, desc, fullfingerprint_dummy, NoRess)
+  | PrevFile (desc, fp, _, ress) ->
+      Previous (`FILE, desc, fp, ress)
+  | PrevSymlink ->
+      Previous (`SYMLINK, props_dummy, fullfingerprint_dummy, NoRess)
+  | New ->
+      New1
+
+let prev_of_old = function
+  | Previous (`DIRECTORY, desc, _, _) -> PrevDir desc
+  | Previous (`FILE, desc, fp, ress) -> PrevFile (desc, fp, NoStamp, ress)
+  | Previous (`SYMLINK, _, _, _) -> PrevSymlink
+  | Previous (`ABSENT, _, _, _)
+  | New1 -> New
+
+let newPrevStateType () = !prevState2On
+
+let mprevState = Umarshal.(switch newPrevStateType
+  mprevState2 id id
+  mprevState1 prev_to_old prev_of_old)
+
+type contentschange =
+    ContentsSame
+  | ContentsUpdated of (string * string) * stamp * unit ressInfo
+
+let mcontentschange = Umarshal.(sum2 unit (prod3 mfullfingerprint mstamp mressStamp id id)
+                                  (function
+                                   | ContentsSame -> I21 ()
+                                   | ContentsUpdated (a, b, c) -> I22 (a, b, c))
+                                  (function
+                                   | I21 () -> ContentsSame
+                                   | I22 (a, b, c) -> ContentsUpdated (a, b, c)))
+
+type permchange     = PropsSame    | PropsUpdated
+
+let mpermchange = Umarshal.(sum2 unit unit
+                              (function
+                               | PropsSame -> I21 ()
+                               | PropsUpdated -> I22 ())
+                              (function
+                               | I21 () -> PropsSame
+                               | I22 () -> PropsUpdated))
+
+type updateItem =
+    NoUpdates
+  | Updates of updateContent * prevState
+  | Error of string
+
+and updateContent =
+    Absent
+  | File of props * contentschange
+  | Dir of props * (string * updateItem) list * permchange * bool
+  | Symlink of string
+
+let mupdateItem_rec mupdateContent =
+  Umarshal.(sum3 unit (prod2 mupdateContent mprevState id id) string
+              (function
+               | NoUpdates -> I31 ()
+               | Updates (a, b) -> I32 (a, b)
+               | Error a -> I33 a)
+              (function
+               | I31 () -> NoUpdates
+               | I32 (a, b) -> Updates (a, b)
+               | I33 a -> Error a))
+
+let mupdateContent_rec mupdateItem =
+  Umarshal.(sum4
+              unit
+              (prod2 mprops mcontentschange id id)
+              (prod4 mprops (list (prod2 string mupdateItem id id)) mpermchange bool id id)
+              string
+              (function
+               | Absent -> I41 ()
+               | File (a, b) -> I42 (a, b)
+               | Dir (a, b, c, d) -> I43 (a, b, c, d)
+               | Symlink a -> I44 a)
+              (function
+               | I41 () -> Absent
+               | I42 (a, b) -> File (a, b)
+               | I43 (a, b, c, d) -> Dir (a, b, c, d)
+               | I44 a -> Symlink a))
+
+let mupdateContent, mupdateItem =
+  Umarshal.rec2 mupdateItem_rec mupdateContent_rec
+
+(* The values below are mirrored in gemel-engine's tests/common.rs. *)
+let p1 =
+  { perm = (0o644, 0o1777); uid = IdNamed "alice"; gid = IdNumeric 20;
+    time = Synced 1600000000.5; typeCreator = Some "TEXTMACS"; length = 123L;
+    ctime = 1600000001.25; xattr = xattrs; acl = Some "acl text" }
+let p2 =
+  { perm = (0o755, 0o777); uid = IdIgnored; gid = IdIgnored;
+    time = NotSynced 12.; typeCreator = None; length = 0L; ctime = -1.;
+    xattr = None; acl = None }
+let fp1 = ("0123456789abcdef", "")
+let fp2 = ("fedcba9876543210", "ressfingerprint!")
+let update_items =
+  [ "noupdates", NoUpdates;
+    "error", Error "oops";
+    "absent", Updates (Absent, New);
+    "file", Updates (File (p1, ContentsUpdated (fp1, InodeStamp 42, NoRess)),
+                     PrevFile (p2, fp2, NoStamp, HfsRess 7L));
+    "file_same", Updates (File (p1, ContentsSame), PrevDir p2);
+    "file_rescan", Updates (File (p2, ContentsUpdated (fp2, RescanStamp,
+                                   AppleDoubleRess (5, 2.5, 3.5, 9L, ()))),
+                            PrevFile (p1, fp1, InodeStamp 7, NoRess));
+    "dir", Updates (Dir (p1, [ "a", NoUpdates;
+                               "b", Updates (Symlink "t", PrevSymlink);
+                               "c", Error "deep" ],
+                         PropsUpdated, false),
+                    PrevDir p2);
+    "dir_empty", Updates (Dir (p2, [], PropsSame, true), New);
+    "symlink", Updates (Symlink "target", PrevSymlink) ]
+
+(* fpcache.ml's entry codec and the chunk that [write] produces. *)
+let mentry = Umarshal.(prod3 int string
+                         (prod4 mprops mfullfingerprint mstamp mressStamp id id)
+                         id id)
+let mentry_list = Umarshal.list mentry
+let fpcache_chunk q =
+  let s = Umarshal.to_string mentry_list q in
+  let fp1 = Digest.substring s 0 Umarshal.header_size in
+  let fp2 = Digest.string s in
+  fp1 ^ fp2 ^ s
+
+let common oc =
+  header oc "Common.updateItem (with Props.m as in props.ml) and fpcache chunks";
+  List.iter (fun (x, a, p) ->
+      xattrOn := x; aclOn := a; prevState2On := p;
+      let config = Printf.sprintf "x%d-a%d-p%d"
+          (Bool.to_int x) (Bool.to_int a) (Bool.to_int p) in
+      List.iter (fun (name, ui) ->
+          Printf.fprintf oc "ui %s %s %s\n" config name
+            (hex (Umarshal.to_string mupdateItem ui)))
+        update_items)
+    [ (false, false, false); (false, false, true);
+      (true, true, false); (true, true, true); (true, false, true) ];
+  xattrOn := true; aclOn := true;
+  Printf.fprintf oc "fpcache_chunk %s\n"
+    (hex (fpcache_chunk
+            [ (0, "a/b", (p1, fp1, InodeStamp 42, NoRess));
+              (2, "c", (p2, fp2, NoStamp, HfsRess 7L));
+              (0, "", (p1, fp2, RescanStamp, AppleDoubleRess (5, 2.5, 3.5, 9L, ()))) ]))
+
 let () =
   let dir = Sys.argv.(1) in
   let with_file name f =
@@ -252,4 +532,5 @@ let () =
   with_file "umarshal.txt" umarshal;
   with_file "ocaml_hash.txt" ocaml_hash;
   with_file "prefs_dump.txt" prefs_dump;
-  with_file "rpc.txt" rpc
+  with_file "rpc.txt" rpc;
+  with_file "common.txt" common

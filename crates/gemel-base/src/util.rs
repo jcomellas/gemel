@@ -26,6 +26,27 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// `Uutil.File.t`: identifies an item being propagated (its line in the
+/// user interface), for progress reports and aborting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FileId(pub i64);
+
+impl FileId {
+    /// `Uutil.File.dummy`.
+    pub const DUMMY: FileId = FileId(-1);
+}
+
+/// `Uutil.File.toString`.
+impl fmt::Display for FileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if *self == FileId::DUMMY {
+            f.write_str("<dummy>")
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
+
 /// Lowercases a Latin-1 (ISO 8859-1) byte: `A`–`Z`, `À`–`Ö` and `Ø`–`Þ`.
 pub fn lowercase_latin1(c: u8) -> u8 {
     match c {
@@ -55,6 +76,25 @@ pub fn remove_trailing_cr(s: &str) -> &str {
 pub fn split_at_char(s: &str, c: char) -> (&str, Option<&str>) {
     match s.split_once(c) {
         Some((a, b)) => (a, Some(b)),
+        None => (s, None),
+    }
+}
+
+/// `Util.findsubstring`: the first (or, with `reverse`, the last) position
+/// of `needle` in `s`.
+pub fn find_substring(needle: &str, s: &str, reverse: bool) -> Option<usize> {
+    if reverse {
+        s.rfind(needle)
+    } else {
+        s.find(needle)
+    }
+}
+
+/// `Util.splitAtString`: splits at the first (or, with `reverse`, the last)
+/// `sep`.
+pub fn split_at_string<'a>(s: &'a str, sep: &str, reverse: bool) -> (&'a str, Option<&'a str>) {
+    match find_substring(sep, s, reverse) {
+        Some(i) => (&s[..i], Some(&s[i + sep.len()..])),
         None => (s, None),
     }
 }
@@ -138,6 +178,15 @@ mod tests {
         assert_eq!(remove_trailing_cr("a\r"), "a");
         assert_eq!(split_at_char("a=b=c", '='), ("a", Some("b=c")));
         assert_eq!(split_at_char("a", '='), ("a", None));
+        assert_eq!(
+            split_at_string(" a -> b -> c ", " -> ", true),
+            (" a -> b", Some("c "))
+        );
+        assert_eq!(
+            split_at_string(" a -> b -> c ", " -> ", false),
+            (" a", Some("b -> c "))
+        );
+        assert_eq!(split_at_string("a", " -> ", true), ("a", None));
         assert_eq!(
             split_into_words("  include  my\\ file ", ' '),
             ["include", "my file"]

@@ -8,8 +8,10 @@
 //! [`HostCmd`] runs on a host (`Remote.registerHostCmd`), a [`RootCmd`] on
 //! the host of a root, with the root's path as an extra first argument
 //! (`Remote.registerRootCmd`). Each has codecs for its argument and result
-//! and an async function that runs on the host. They are registered with an
-//! [`Rpc`], which dispatches calls:
+//! and an async function that runs on the host. The codecs get the features
+//! in effect on their side, since some encodings depend on them (`Props`
+//! and `prevState`, for example). Commands are registered with an [`Rpc`],
+//! which dispatches calls:
 //!
 //! - [`Dispatch::Direct`]: a local root's command is called directly, as
 //!   `registerHostCmd` does in OCaml;
@@ -26,6 +28,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
 
+use gemel_base::features::Features;
 use gemel_base::util::Error;
 use gemel_compat::umarshal::{self, Reader, Writer};
 use gemel_fs::fspath::Fspath;
@@ -37,10 +40,10 @@ use crate::root::{Host as RootHost, Root};
 /// A future on the engine thread.
 pub type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
 
-/// Writes a value.
-pub type Write<T> = fn(&T, &mut Writer);
-/// Reads a value.
-pub type Read<T> = fn(&mut Reader<'_>) -> umarshal::Result<T>;
+/// Writes a value, given the features in effect.
+pub type Write<T> = fn(&T, &mut Writer, &Features);
+/// Reads a value, given the features in effect.
+pub type Read<T> = fn(&mut Reader<'_>, &Features) -> umarshal::Result<T>;
 /// Runs a host command.
 pub type HostFn<A, R> = fn(Rc<Host>, A) -> LocalBoxFuture<Result<R, Error>>;
 /// Runs a root command, given the root's path.
@@ -173,10 +176,15 @@ impl Registry {
             cmd.name,
             Box::new(move |host, body| {
                 Box::pin(async move {
-                    let arg =
-                        protocol::decode_section_body(&args_tag(cmd.name), &body, cmd.read_arg)?;
-                    let res = (cmd.run)(host, arg).await?;
-                    protocol::encode_section(&res_tag(cmd.name), |w| (cmd.write_res)(&res, w))
+                    let arg = {
+                        let f = host.features().borrow();
+                        protocol::decode_section_body(&args_tag(cmd.name), &body, |r| {
+                            (cmd.read_arg)(r, &f)
+                        })?
+                    };
+                    let res = (cmd.run)(host.clone(), arg).await?;
+                    let f = host.features().borrow();
+                    protocol::encode_section(&res_tag(cmd.name), |w| (cmd.write_res)(&res, w, &f))
                 })
             }),
         )
@@ -191,12 +199,15 @@ impl Registry {
             cmd.name,
             Box::new(move |host, body| {
                 Box::pin(async move {
-                    let (fspath, arg) =
+                    let (fspath, arg) = {
+                        let f = host.features().borrow();
                         protocol::decode_section_body(&args_tag(cmd.name), &body, |r| {
-                            Ok((Fspath::unmarshal(r)?, (cmd.read_arg)(r)?))
-                        })?;
-                    let res = (cmd.run)(host, fspath, arg).await?;
-                    protocol::encode_section(&res_tag(cmd.name), |w| (cmd.write_res)(&res, w))
+                            Ok((Fspath::unmarshal(r)?, (cmd.read_arg)(r, &f)?))
+                        })?
+                    };
+                    let res = (cmd.run)(host.clone(), fspath, arg).await?;
+                    let f = host.features().borrow();
+                    protocol::encode_section(&res_tag(cmd.name), |w| (cmd.write_res)(&res, w, &f))
                 })
             }),
         )
@@ -235,9 +246,14 @@ impl Registry {
 pub enum Dispatch {
     /// Call the command directly on the client's own host.
     Direct(Rc<Host>),
-    /// Encode every call and run it on a separate host (see the module
-    /// documentation).
-    Loopback(Rc<Host>),
+    /// Encode every call with the client's features and run it on a
+    /// separate host (see the module documentation).
+    Loopback {
+        /// The client, whose features encode arguments and decode results.
+        client: Rc<Host>,
+        /// The host the commands run on.
+        server: Rc<Host>,
+    },
 }
 
 /// Runs commands on roots.
@@ -263,8 +279,34 @@ impl Rpc {
     /// The host that local roots' commands run on.
     pub fn local_host(&self) -> &Rc<Host> {
         match &self.dispatch {
-            Dispatch::Direct(h) | Dispatch::Loopback(h) => h,
+            Dispatch::Direct(h) | Dispatch::Loopback { server: h, .. } => h,
         }
+    }
+
+    /// The client's host: the same as [`Rpc::local_host`] in direct mode.
+    pub fn client_host(&self) -> &Rc<Host> {
+        match &self.dispatch {
+            Dispatch::Direct(h) | Dispatch::Loopback { client: h, .. } => h,
+        }
+    }
+
+    /// Whether calls are encoded as for a server ([`Dispatch::Loopback`]).
+    /// Code that skips a root command for local roots, as OCaml does, calls
+    /// it anyway in this mode, so that it is exercised.
+    pub fn is_loopback(&self) -> bool {
+        matches!(self.dispatch, Dispatch::Loopback { .. })
+    }
+
+    /// `Remote.commandAvailable`: whether `root`'s host has the command.
+    /// (OCaml asks with a root command of its own; for a local root it
+    /// looks in the same table as here.)
+    pub fn command_available(&self, root: &Root, name: &str) -> Result<bool, Error> {
+        if let RootHost::Remote(h) = &root.host {
+            return Err(Error::Fatal(format!(
+                "Remote roots are not supported yet (command commandAvailable for host {h})"
+            )));
+        }
+        Ok(self.registry.contains(name))
     }
 
     fn check_local(&self, host: &RootHost, name: &str) -> Result<(), Error> {
@@ -283,17 +325,21 @@ impl Rpc {
     /// and decodes the reply.
     async fn loopback<R>(
         &self,
-        host: &Rc<Host>,
+        client: &Host,
+        server: &Rc<Host>,
         name: &str,
         args: Vec<u8>,
         read_res: Read<R>,
     ) -> Result<R, Error> {
         let mut msg = Header::Request(name.to_owned()).encode()?;
         msg.extend(args);
-        let reply = self.registry.process_request(host.clone(), &msg).await?;
+        let reply = self.registry.process_request(server.clone(), &msg).await?;
         let (header, rest) = protocol::split_section(&reply)?;
         match protocol::decode_section_body(HEADER_TAG, header, Header::unmarshal)? {
-            Header::NormalResult => protocol::decode_section(&res_tag(name), rest, read_res),
+            Header::NormalResult => {
+                let f = client.features().borrow();
+                protocol::decode_section(&res_tag(name), rest, |r| read_res(r, &f))
+            }
             Header::TransientExn(m) => Err(Error::Transient(m)),
             Header::FatalExn(m) => Err(Error::Fatal(m)),
             other => Err(Error::Fatal(format!(
@@ -312,10 +358,13 @@ impl Rpc {
         self.check_local(host, cmd.name)?;
         match &self.dispatch {
             Dispatch::Direct(h) => (cmd.run)(h.clone(), arg).await,
-            Dispatch::Loopback(h) => {
-                let args =
-                    protocol::encode_section(&args_tag(cmd.name), |w| (cmd.write_arg)(&arg, w))?;
-                self.loopback(h, cmd.name, args, cmd.read_res).await
+            Dispatch::Loopback { client, server } => {
+                let args = {
+                    let f = client.features().borrow();
+                    protocol::encode_section(&args_tag(cmd.name), |w| (cmd.write_arg)(&arg, w, &f))?
+                };
+                self.loopback(client, server, cmd.name, args, cmd.read_res)
+                    .await
             }
         }
     }
@@ -331,12 +380,16 @@ impl Rpc {
         self.check_local(&root.host, cmd.name)?;
         match &self.dispatch {
             Dispatch::Direct(h) => (cmd.run)(h.clone(), root.fspath.clone(), arg).await,
-            Dispatch::Loopback(h) => {
-                let args = protocol::encode_section(&args_tag(cmd.name), |w| {
-                    root.fspath.marshal(w);
-                    (cmd.write_arg)(&arg, w);
-                })?;
-                self.loopback(h, cmd.name, args, cmd.read_res).await
+            Dispatch::Loopback { client, server } => {
+                let args = {
+                    let f = client.features().borrow();
+                    protocol::encode_section(&args_tag(cmd.name), |w| {
+                        root.fspath.marshal(w);
+                        (cmd.write_arg)(&arg, w, &f);
+                    })?
+                };
+                self.loopback(client, server, cmd.name, args, cmd.read_res)
+                    .await
             }
         }
     }

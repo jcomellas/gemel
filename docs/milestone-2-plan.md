@@ -123,6 +123,14 @@ The `Props`, `Fileinfo`, `Osx` and fingerprint types, with their Umarshal codecs
 - **`lock`:** archive lock files.
 - **`fpcache`:** the fingerprint cache file.
 
+**Notes (phase 3, 2026-10-20):**
+- Command codecs now get the features in effect on their side, because `Props` and `prevState` change shape with them. The loopback encodes with the client's features.
+- `negotiate` came forward from later phases, since `installRoots` needs it. In loopback mode it questions the local roots too, which enables the features on the loopback host.
+- `propagatePrefs` and `installPrefs` came forward too, under the same rule: the loopback host is created before the roots are installed, so it needs the preferences set after that, as a server would get them.
+- `fpcache` is an owned value per root rather than one global, so the two roots can be scanned at the same time on blocking threads.
+- Predicates compile to an immutable, shareable value, cached by pattern list and case mode.
+- New OCaml vectors cover every update-item constructor in every feature combination, a fingerprint-cache chunk, and `pred.ml` itself (matching and associated strings in the four case modes, and the error messages).
+
 ### Phase 4: `update.ml` (3.1k, in three PRs)
 
 - **4a, archives:**

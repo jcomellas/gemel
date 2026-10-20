@@ -92,10 +92,10 @@ fn canonize_on_server_codecs_match_ocaml() {
 /// A root command that fails on request, and reports the root it ran on.
 static PROBE: RootCmd<u8, Vec<u8>> = RootCmd::new(
     "probe",
-    |a, w| w.char(*a),
-    |r| r.char(),
-    |s, w| w.string(s),
-    |r| r.string(),
+    |a, w, _| w.char(*a),
+    |r, _| r.char(),
+    |s, w, _| w.string(s),
+    |r, _| r.string(),
     |_, fspath, a| {
         Box::pin(async move {
             match a {
@@ -116,13 +116,13 @@ static NOT_SENT: PrefDef<String> =
 /// A host command that reports the two preferences as the host sees them.
 static READ_PREFS: HostCmd<(), (String, String)> = HostCmd::new(
     "readPrefs",
-    |(), _| {},
-    |_| Ok(()),
-    |(a, b), w| {
+    |(), _, _| {},
+    |_, _| Ok(()),
+    |(a, b), w, _| {
         w.string(a.as_bytes());
         w.string(b.as_bytes());
     },
-    |r| {
+    |r, _| {
         Ok((
             String::from_utf8(r.string()?).unwrap(),
             String::from_utf8(r.string()?).unwrap(),
@@ -161,13 +161,16 @@ fn both() -> [Rpc; 2] {
     prefs.set(&NOT_SENT, "not sent".into());
     let features = Features::new();
     let server = Host::loopback_server(&prefs, &features, fresh_prefs(), Features::new()).unwrap();
-    let client = Host::client(
+    let client = Rc::new(Host::client(
         Rc::new(RefCell::new(prefs)),
         Rc::new(RefCell::new(features)),
-    );
+    ));
     [
-        registered(Dispatch::Direct(Rc::new(client))),
-        registered(Dispatch::Loopback(Rc::new(server))),
+        registered(Dispatch::Direct(client.clone())),
+        registered(Dispatch::Loopback {
+            client,
+            server: Rc::new(server),
+        }),
     ]
 }
 

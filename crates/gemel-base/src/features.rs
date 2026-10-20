@@ -83,6 +83,12 @@ impl Features {
         feature.0.is_some_and(|i| self.entries[i].enabled)
     }
 
+    /// Whether the feature registered as `name` is enabled (false if there
+    /// is none). For codecs, which get the registry rather than handles.
+    pub fn enabled_by_name(&self, name: &str) -> bool {
+        self.entries.iter().any(|e| e.enabled && e.name == name)
+    }
+
     /// `Features.all`: every registered feature, most recently registered
     /// first (the order OCaml sends them in).
     pub fn all(&self) -> Vec<Id> {
@@ -169,6 +175,8 @@ mod tests {
         assert!(!f.enabled(moves));
 
         f.set_enabled(&["Sync: xattr".into(), "unknown".into()]);
+        assert!(f.enabled_by_name("Sync: xattr"));
+        assert!(!f.enabled_by_name("Sync: Moves") && !f.enabled_by_name("unknown"));
         assert!(!f.enabled(moves) && f.enabled(xattr));
         assert!(!f.enabled(Feature::DUMMY));
         assert_eq!(f.changing_archive_format(), ["Sync: xattr"]);

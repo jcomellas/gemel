@@ -448,6 +448,34 @@ pub fn unlink(p: &[u8]) -> SysResult<()> {
     fs::remove_file(os_path(p)).map_err(|e| SysError::new("unlink", p, e))
 }
 
+/// `System.link`: a hard link.
+pub fn link(from: &[u8], to: &[u8]) -> SysResult<()> {
+    fs::hard_link(os_path(from), os_path(to)).map_err(|e| SysError::new("link", to, e))
+}
+
+/// `System.openfile p [O_WRONLY; O_CREAT; O_EXCL] perm`, closing the file
+/// at once: creates `p`, failing if it exists.
+pub fn create_exclusive(p: &[u8], perm: u32) -> SysResult<()> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, perm);
+    #[cfg(not(unix))]
+    let _ = perm;
+    opts.open(os_path(p))
+        .map(drop)
+        .map_err(|e| SysError::new("open", p, e))
+}
+
+/// The number of hard links to `p` (`st_nlink`).
+#[cfg(unix)]
+pub fn link_count(p: &[u8]) -> SysResult<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(os_path(p))
+        .map(|m| m.nlink())
+        .map_err(|e| SysError::new("stat", p, e))
+}
+
 /// `System.rename`. On Windows, like Unison, a read-only target is made
 /// writable to be replaced, and sharing violations are retried for about a
 /// second (an indexer or a virus scanner may hold the file).
