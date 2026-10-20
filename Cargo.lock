@@ -1486,6 +1486,8 @@ dependencies = [
  "gemel-compat",
  "gemel-fs",
  "gemel-rpc",
+ "md-5",
+ "tokio",
 ]
 
 [[package]]

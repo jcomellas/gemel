@@ -13,6 +13,10 @@ gemel-compat.workspace = true
 gemel-base.workspace = true
 gemel-fs.workspace = true
 gemel-rpc.workspace = true
+md-5.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
 
 [lints]
 workspace = true

@@ -31,6 +31,7 @@
 //! ACL comparison under `numericids`, and the "props data" store that ACL
 //! strings refer to.
 
+use gemel_base::features::Features;
 use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
 use gemel_base::util::Error;
 use gemel_compat::ocaml_hash::{self, Value};
@@ -139,6 +140,21 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     prefs.register(&TIMES)
 }
 
+/// The feature that adds the change time and xattrs to props.
+pub const FEATURE_XATTR: &str = "Sync: xattr";
+
+/// The feature that adds the change time and the ACL to props.
+pub const FEATURE_ACL: &str = "Sync: ACL";
+
+/// Registers this module's features, in OCaml's order. Both change the
+/// archive format. (OCaml's validators check the `xattrs` and `acl`
+/// preferences, which aren't ported, so there are none.)
+pub fn register_features(features: &mut Features) -> Result<(), Error> {
+    features.register(FEATURE_XATTR, true, None)?;
+    features.register(FEATURE_ACL, true, None)?;
+    Ok(())
+}
+
 /// The preferences and negotiated features the props operations depend on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropsConfig {
@@ -196,6 +212,15 @@ impl PropsConfig {
             sync_times: *prefs.read(&TIMES),
             rsrc: *prefs.read(&osx::RSRC_AUX),
             ..PropsConfig::default()
+        }
+    }
+
+    /// The configuration with the feature flags from `features`.
+    pub fn with_features(self, features: &Features) -> Self {
+        PropsConfig {
+            xattr_enabled: features.enabled_by_name(FEATURE_XATTR),
+            acl_enabled: features.enabled_by_name(FEATURE_ACL),
+            ..self
         }
     }
 

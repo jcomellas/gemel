@@ -101,16 +101,16 @@ pub type CanonizeResult = (String, Fspath);
 /// path on it. (The boolean is ignored; it was needed by Unison ≤ 2.52.)
 pub static CANONIZE_ON_SERVER: HostCmd<CanonizeArgs, CanonizeResult> = HostCmd::new(
     "canonizeOnServer",
-    |(s, b), w| {
+    |(s, b), w, _| {
         w.option(s.as_ref(), |w, s| w.string(s));
         w.bool(*b);
     },
-    |r| Ok((r.option(Reader::string)?, r.bool()?)),
-    |(h, f), w| {
+    |r, _| Ok((r.option(Reader::string)?, r.bool()?)),
+    |(h, f), w, _| {
         w.string(h.as_bytes());
         f.marshal(w);
     },
-    |r| Ok((read_text(r)?, Fspath::unmarshal(r)?)),
+    |r, _| Ok((read_text(r)?, Fspath::unmarshal(r)?)),
     |host, (s, _)| {
         Box::pin(async move {
             let name = host.canonical_host_name();

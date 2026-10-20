@@ -22,3 +22,32 @@ pub mod transport;
 pub mod tree;
 pub mod update;
 pub mod xferhint;
+
+use gemel_base::features::Features;
+use gemel_base::prefs::Prefs;
+use gemel_base::util::Error;
+use gemel_rpc::registry::Rpc;
+
+/// Registers the features of the engine and of `gemel-fs`, in OCaml's
+/// order (`props`, then `common`).
+pub fn register_features(features: &mut Features) -> Result<(), Error> {
+    gemel_fs::props::register_features(features)?;
+    common::register_features(features)
+}
+
+/// Registers the preferences of the engine modules ported so far (not
+/// those of `gemel-base` and `gemel-fs`).
+pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
+    pred::register_prefs(prefs)?;
+    abort::register_prefs(prefs)?;
+    globals::register_prefs(prefs)?;
+    fpcache::register_prefs(prefs)
+}
+
+/// Registers the remote commands of the modules ported so far.
+pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
+    rpc.registry_mut()
+        .register_host(&gemel_rpc::root::CANONIZE_ON_SERVER)?;
+    negotiate::register_commands(rpc)?;
+    globals::register_commands(rpc)
+}
