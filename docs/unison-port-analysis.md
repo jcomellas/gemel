@@ -85,8 +85,8 @@ gemel/
     gemel-base     # prefs/.prf profiles, uarg flags, glob (rx.ml), features registry, case, name, path, clroot
     gemel-fs       # OS layer: system, fspath, os, props (xattr/ACL), macOS metadata, reflink, fingerprints
     gemel-rpc      # RPC framing + version handshake, command registry/dispatch, ssh/socket connections, PTY
-    gemel-engine   # update detection + archives, recon, transport, transfer (rsync), stasher, moves, negotiate
-    gemel-ui-api   # the engine<->frontend contract (commands + event stream), uicommon, sortri, exit codes
+    gemel-engine   # update detection + archives, recon, sortri, transport, transfer (rsync), stasher, moves, negotiate
+    gemel-ui-api   # the engine<->frontend contract (commands + event stream), uicommon, exit codes
   bins/
     gemel          # text UI + `-server` mode. MUST have zero GUI deps (runs on headless servers; checked in CI)
     gemel-gui      # GUI frontend, built with Slint (chosen by the §6 spike)
@@ -294,7 +294,7 @@ The sort frame is mostly the shared Rust sort of 50k rows: the same code in both
 **Afterwards (2026-10-19).** The Slint spike became `bins/gemel-gui`:
 
 - `ui/app.slint` is the spike's window, titled "gemel".
-- `src/recon_view.rs` holds the recon view model: rows, sorting and the multi-selection. Selection stays in the GUI. The item types are placeholders until `gemel-ui-api` defines the reconciliation items, and sorting is due to move to `gemel_ui_api::sortri`.
+- `src/recon_view.rs` holds the recon view model: rows, sorting and the multi-selection. Selection stays in the GUI. The item types are placeholders until `gemel-ui-api` defines the reconciliation items, and sorting is due to move to `gemel_engine::sortri`.
 - `src/fake_engine.rs` holds the spike's fake feed. It is the GUI's only data source until the engine exists, and must not depend on `gemel-engine` directly.
 - The bench and startup-timing flags were dropped. `--rows` and `--rate` remain as development flags.
 - The input and accessibility test came across unchanged.

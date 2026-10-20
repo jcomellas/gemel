@@ -7,5 +7,4 @@
 
 pub mod exit_code;
 pub mod session;
-pub mod sortri;
 pub mod uicommon;

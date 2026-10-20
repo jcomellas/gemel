@@ -303,7 +303,7 @@ mod tests {
         init(&mut prefs, true, true);
         assert_eq!(mode(&prefs), Mode::UnicodeSensitive);
         // All three travel to the server; unicodeCS as optional.
-        let dump = prefs.dump(1).unwrap();
+        let dump = prefs.dump(1, &crate::features::Features::new()).unwrap();
         for name in ["someHostIsInsensitive", "unicodeEnc", "unicodeCS"] {
             let (_, optional, _) = dump.iter().find(|(n, _, _)| n == name).unwrap();
             assert_eq!(*optional, name == "unicodeCS");

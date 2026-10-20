@@ -93,7 +93,7 @@ impl Host {
         mut prefs: Prefs,
         mut features: Features,
     ) -> Result<Host, gemel_base::util::Error> {
-        prefs.load(&client_prefs.dump(1)?, 1)?;
+        prefs.load(&client_prefs.dump(1, client_features)?, 1)?;
         features.set_enabled(&client_features.get_enabled());
         let mut host = Host::server(prefs, features);
         host.runs_client_roots = true;

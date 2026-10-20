@@ -230,7 +230,7 @@ fn dump_encoding_matches_prefs_ml() {
     p.register(&BATCH).unwrap();
     p.register(&TESTSERVER).unwrap();
     p.set(&BATCH, true);
-    let dumped = p.dump(1).unwrap();
+    let dumped = p.dump(1, &Features::new()).unwrap();
     // Newest first; cli_only preferences (source, include, testserver) are
     // never sent.
     let names: Vec<_> = dumped.iter().map(|d| d.0.as_str()).collect();
@@ -244,7 +244,7 @@ fn dump_encoding_matches_prefs_ml() {
             0, 0, 0, 0, 0, 0, 0, 10, 1, 1, 1, 1, 5, b'b', b'a', b't', b'c', b'h'
         ]
     );
-    assert!(p.dump(2).is_err());
+    assert!(p.dump(2, &Features::new()).is_err());
 }
 
 #[test]
@@ -259,7 +259,8 @@ fn dump_and_load_round_trip() {
             "-sshcmd=x",
         ]))
         .unwrap();
-    let bytes = umarshal::to_bytes(|w| marshal_dumped(w, &client.dump(1).unwrap()));
+    let bytes =
+        umarshal::to_bytes(|w| marshal_dumped(w, &client.dump(1, &Features::new()).unwrap()));
     let dumped = umarshal::from_bytes(&bytes, unmarshal_dumped).unwrap();
 
     let mut server = prefs();

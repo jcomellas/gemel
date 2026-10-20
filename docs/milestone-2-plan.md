@@ -179,8 +179,24 @@ The `Props`, `Fileinfo`, `Osx` and fingerprint types, with their Umarshal codecs
 
 - **`recon`:** directions, conflicts, and `prefer`, `force`, `preferpartial` and `forcepartial`.
 - **`sortri`.**
+- **`moves`**, which `recon` calls: move and rename detection (`moves-experimental`).
 
 `recon` has no Lwt, so this is plain code with table-driven tests and oracle comparisons.
+
+**Notes (phase 5, 2026-10-20):**
+- `recon`, `sortri` and `moves` are in `gemel-engine`. `sortri` was planned for `gemel-ui-api`, but `recon` sorts its items; the UI's sorting menu calls the engine's functions.
+- `recon` is plain code except for `markEqual` and `commitUpdates`, which are remote calls. OCaml marks the equal paths in batches of 5000 during the walk. Here the walk keeps the batches, and marks them in the same order when it is done. That's safe because the walk only reads the local archive at paths below none already marked. As in OCaml, the "some path was equal" result comes from the last batch only.
+- `moves` keeps its candidates in a value for one reconciliation rather than in global tables. It registers the `Sync: Moves` feature, and the `moves-experimental` preference is sent only when that feature is negotiated.
+  - Feature validators now get the preferences, and a preference's `send` check gets the negotiated features. That second change also unblocks sending `xattrignore` only with the xattr feature (milestone 3).
+- Recon's size lookups borrow the local archive (`update::LocalArchive`) rather than copying the subtree each time.
+- For later phases:
+  - OCaml's startup derives `links-aux` (`Fileinfo.init`), which update detection reads. Phase 7 must call it with the other inits, before `propagatePrefs`.
+  - The `Sync: Moves` validator reads `moves-experimental` during negotiation, so a host that registers the engine's features must register its preferences too (phase 7's setup, and phase 8's `-server`).
+  - Not ported yet: the "Reconciling changes" status and recon's debug traces (phase 7, with update detection's).
+- Tests:
+  - `tests/recon.rs` covers, in both dispatch modes: sorting before overriding, `prefer` and `force` (by root, prefix, suffix, `newer` and `older`, and the partial forms), the root checks, the `no*` preferences and `maxsizethreshold`, merge, atomic and props conflicts, dangerous paths, batches of equal paths, moves, links with `links = false`, and case-insensitive spellings.
+  - An oracle test runs 18 scenarios through gemel, then through OCaml Unison's batch text UI on the same replicas, and compares each item line (statuses, arrows, forced arrows, moved names), the summary (items to sync and skip, and the bytes each way), and each skipped item's reason. It passes against 2.54.0 on macOS and 8772d26 on Linux, and CI's oracle job runs it.
+  - The tests give directories fresh times before each scan. A directory changed within the second of its last scan keeps its time, and fast checking skips it, in OCaml as here. Times a second apart also count as equal (for FAT).
 
 ### Phase 6: propagation (~3.6k)
 

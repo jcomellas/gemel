@@ -23,7 +23,7 @@ fn common_features_local(host: &Host, proposed: &[Id]) -> Result<Vec<Id>, Error>
     let mut f = host.features().borrow_mut();
     f.reset_enabled();
     let common = features::inter(proposed, &f.all());
-    f.validate(&common)?;
+    f.validate(&common, &host.prefs().borrow())?;
     f.set_enabled(&common);
     Ok(common)
 }
@@ -49,7 +49,11 @@ async fn common_features(rpc: &Rpc, root: &Root, proposed: Vec<Id>) -> Result<Ve
     } else {
         rpc.call_root(&NEGOTIATE_FEATURES, root, proposed).await?
     };
-    rpc.client_host().features().borrow().validate(&common)?;
+    let client = rpc.client_host();
+    client
+        .features()
+        .borrow()
+        .validate(&common, &client.prefs().borrow())?;
     Ok(common)
 }
 

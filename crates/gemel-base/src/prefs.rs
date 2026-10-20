@@ -47,6 +47,7 @@ use std::time::SystemTime;
 
 use gemel_compat::umarshal::{self, Reader, Writer};
 
+use crate::features::Features;
 use crate::uarg::{self, Arg, Spec, UsageError};
 use crate::util::{
     Error, int_of_string, remove_trailing_cr, split_at_char, split_into_words, trim_whitespace,
@@ -366,7 +367,7 @@ pub struct PrefDef<T> {
     cli_only: bool,
     local: bool,
     deprecated: bool,
-    send: Option<fn(&Prefs) -> bool>,
+    send: Option<fn(&Prefs, &Features) -> bool>,
     intern: Option<Intern<T>>,
     printer: Option<fn(&T) -> Vec<String>>,
 }
@@ -415,8 +416,9 @@ impl<T> PrefDef<T> {
         self
     }
 
-    /// Sent to the server only when `send` returns true (`?send`).
-    pub const fn send(mut self, send: fn(&Prefs) -> bool) -> Self {
+    /// Sent to the server only when `send`, given the preferences and the
+    /// negotiated features, returns true (`?send`).
+    pub const fn send(mut self, send: fn(&Prefs, &Features) -> bool) -> Self {
         self.send = Some(send);
         self
     }
@@ -457,7 +459,7 @@ trait AnyPref: Sync {
     fn cli_only(&self) -> bool;
     fn local(&self) -> bool;
     fn deprecated(&self) -> bool;
-    fn should_send(&self, prefs: &Prefs) -> bool;
+    fn should_send(&self, prefs: &Prefs, features: &Features) -> bool;
     fn default_value(&self) -> BoxedValue;
     fn is_default(&self, v: &BoxedValue) -> bool;
     fn apply(&self, v: &BoxedValue, input: Input<'_>) -> Result<BoxedValue, String>;
@@ -508,8 +510,8 @@ impl<T: PrefValue> AnyPref for PrefDef<T> {
     fn deprecated(&self) -> bool {
         self.deprecated
     }
-    fn should_send(&self, prefs: &Prefs) -> bool {
-        !self.cli_only && self.send.is_none_or(|f| f(prefs))
+    fn should_send(&self, prefs: &Prefs, features: &Features) -> bool {
+        !self.cli_only && self.send.is_none_or(|f| f(prefs, features))
     }
     fn default_value(&self) -> BoxedValue {
         Box::new((self.default)())
@@ -871,14 +873,15 @@ impl Prefs {
     }
 
     /// `Prefs.dump`: the preferences to send to the server, in OCaml's order
-    /// (most recently registered first).
-    pub fn dump(&self, rpc_version: u32) -> Result<Vec<DumpedPref>, Error> {
+    /// (most recently registered first). Some are sent only with some
+    /// negotiated `features`.
+    pub fn dump(&self, rpc_version: u32, features: &Features) -> Result<Vec<DumpedPref>, Error> {
         Self::check_rpc_version(rpc_version)?;
         Ok(self
             .cells
             .iter()
             .rev()
-            .filter(|c| c.def.should_send(self))
+            .filter(|c| c.def.should_send(self, features))
             .map(|c| {
                 (
                     c.def.name().to_owned(),
