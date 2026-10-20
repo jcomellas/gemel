@@ -142,6 +142,79 @@ pub fn split_into_words(s: &str, c: char) -> Vec<String> {
     }
 }
 
+/// `Filename.is_dir_sep` on this platform.
+fn is_dir_sep(c: u8) -> bool {
+    c == b'/' || (cfg!(windows) && (c == b'\\' || c == b':'))
+}
+
+/// `Filename`'s `drive_and_path` on Windows (`C:rest`); none elsewhere.
+fn drive_and_path(s: &str) -> (&str, &str) {
+    let b = s.as_bytes();
+    if cfg!(windows) && b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        s.split_at(2)
+    } else {
+        ("", s)
+    }
+}
+
+/// `Filename.dirname`: all but the last component (`"."` if there is
+/// only one; trailing separators don't count).
+pub fn filename_dirname(s: &str) -> String {
+    let (drive, name) = drive_and_path(s);
+    let b = name.as_bytes();
+    let dir = if b.is_empty() {
+        "."
+    } else {
+        // trailing_sep, then base, then intermediate_sep.
+        let mut n = b.len() as isize - 1;
+        while n >= 0 && is_dir_sep(b[n as usize]) {
+            n -= 1;
+        }
+        if n < 0 {
+            &name[..1]
+        } else {
+            while n >= 0 && !is_dir_sep(b[n as usize]) {
+                n -= 1;
+            }
+            if n < 0 {
+                "."
+            } else {
+                while n >= 0 && is_dir_sep(b[n as usize]) {
+                    n -= 1;
+                }
+                if n < 0 {
+                    &name[..1]
+                } else {
+                    &name[..n as usize + 1]
+                }
+            }
+        }
+    };
+    format!("{drive}{dir}")
+}
+
+/// `Filename.basename`: the last component (trailing separators don't
+/// count).
+pub fn filename_basename(s: &str) -> String {
+    let (_, name) = drive_and_path(s);
+    let b = name.as_bytes();
+    if b.is_empty() {
+        return ".".to_owned();
+    }
+    let mut n = b.len() as isize - 1;
+    while n >= 0 && is_dir_sep(b[n as usize]) {
+        n -= 1;
+    }
+    if n < 0 {
+        return name[..1].to_owned();
+    }
+    let end = n as usize + 1;
+    while n >= 0 && !is_dir_sep(b[n as usize]) {
+        n -= 1;
+    }
+    name[(n + 1) as usize..end].to_owned()
+}
+
 /// OCaml's `int_of_string` for the 63-bit `int`: an optional sign, an
 /// optional `0x`/`0o`/`0b`/`0u` prefix, and digits with `_` allowed after
 /// the first. Hexadecimal, octal and binary literals may use the full 63
@@ -246,5 +319,25 @@ mod tests {
         assert_eq!(lowercase_latin1(0xDF), 0xDF); // ß
         assert_eq!(nocase_cmp(b"ABC", b"abc"), Ordering::Equal);
         assert_eq!(nocase_cmp(b"ab", b"ABC"), Ordering::Less);
+    }
+    #[test]
+    fn filenames_split_like_ocaml() {
+        for (s, dir, base) in [
+            ("", ".", "."),
+            ("a", ".", "a"),
+            ("a/", ".", "a"),
+            ("a/b", "a", "b"),
+            ("a//b//", "a", "b"),
+            ("/", "/", "/"),
+            ("/a", "/", "a"),
+            ("bak/$VERSION.", "bak", "$VERSION."),
+            ("x/y/.bak.", "x/y", ".bak."),
+        ] {
+            assert_eq!(
+                (filename_dirname(s), filename_basename(s)),
+                (dir.into(), base.into()),
+                "{s}"
+            );
+        }
     }
 }

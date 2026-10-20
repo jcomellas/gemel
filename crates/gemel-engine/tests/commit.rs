@@ -12,7 +12,6 @@ use gemel_base::name::Name;
 use gemel_base::path::{Local, Path};
 use gemel_engine::archive::{self, Archive, ArchiveVersion};
 use gemel_engine::common::{UpdateContent, UpdateItem};
-use gemel_engine::globals;
 use gemel_engine::name_map::NameMap;
 use gemel_engine::tree::Tree;
 use gemel_engine::update;
@@ -370,10 +369,8 @@ fn ocaml_accepts_what_gemel_commits() {
             let osx_host = cfg!(target_os = "macos");
             case::init(p, osx_host || cfg!(windows), osx_host);
             osx::init(p, osx_host);
-            for _ in 0..2 {
-                globals::add_regexp_to_ignore(p, "Name *.unison.bak");
-            }
         });
+        s.init_backups();
         build_tree(&s.root("a"));
         build_tree(&s.root("b"));
         let found = s.find();

@@ -49,22 +49,12 @@ impl Setup {
             let osx_host = cfg!(target_os = "macos");
             case::init(p, osx_host || cfg!(windows), osx_host);
             osx::init(p, osx_host);
-            for _ in 0..2 {
-                globals::add_regexp_to_ignore(p, "Name *.unison.bak");
-            }
             let lines: Vec<String> = prefs.iter().map(|l| l.to_string()).collect();
             p.load_strings(&lines).unwrap();
             // links-aux, from links.
             gemel_fs::fileinfo::init(p, cfg!(windows));
         });
-    }
-
-    fn a(&self) -> std::path::PathBuf {
-        self.root("a")
-    }
-
-    fn b(&self) -> std::path::PathBuf {
-        self.root("b")
+        self.init_backups();
     }
 
     /// A root as given (for `prefer` and the like).

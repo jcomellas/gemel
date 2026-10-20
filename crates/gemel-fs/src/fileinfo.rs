@@ -183,7 +183,8 @@ impl Typ {
         }
     }
 
-    fn info_kind(self) -> InfoKind {
+    /// The kind of Finder information a file of this type has.
+    pub fn info_kind(self) -> InfoKind {
         match self {
             Typ::File => InfoKind::File,
             Typ::Directory => InfoKind::Dir,

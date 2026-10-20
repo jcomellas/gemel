@@ -205,6 +205,43 @@ The `Props`, `Fileinfo`, `Osx` and fingerprint types, with their Umarshal codecs
 - **`xferhint`:** copying from an identical local file.
 - **`external`:** `diff` and `merge` programs.
 
+Split, like phase 4, into:
+- **6a:** copy's local half and the stasher;
+- **6b:** `files` and `external`;
+- **6c:** `transport`, and an end-to-end sync against OCaml.
+
+**Notes (phase 6a, 2026-10-20):**
+- **Copy:** only the local branch of `Copy.file` is ported.
+  - A copy clones the file where the filesystem can (`clonefile` on macOS, `FICLONE` on Linux). Otherwise it copies in the kernel (`copy_file_range`, then `sendfile`, on Linux), and otherwise it reads and writes. It never uses `std::fs::copy`, which would carry over metadata that `setFileinfo` must set itself.
+  - The copy is synchronous, with callbacks for progress and abort checks, so `Copy.file` runs it on a blocking task.
+  - `checkForChangesToSource` and `saveTempFile` are root commands, with OCaml's codecs.
+- **Deferred to milestone 3, with remote roots:**
+  - transfers between hosts (rsync, compression, resuming, `copyprog`);
+  - the copy from an identical local file (`tryCopyMovedFile`), which OCaml only tries for remote transfers. Their preferences are registered.
+- **Not ported yet:**
+  - Windows block cloning (`FSCTL_DUPLICATE_EXTENTS_TO_FILE`, on ReFS): copies there read and write.
+  - Resource forks held in AppleDouble files: an error, as in update detection.
+  - Extended data (xattrs and ACLs), which copies don't carry yet.
+  - Progress reporting, the timers, and aborting in the middle of a copy (phase 7, which needs an abort flag shared with the UI).
+- **Stasher:** all of it.
+  - `markEqual` stashes through it by default; the hook stays, so tests can replace it.
+  - `initBackups` runs on each root's host, as in OCaml, so a host with both roots ignores old backup files twice. In loopback mode that is the loopback host, which stands in for the client's process. The tests now call it rather than adding the patterns themselves.
+  - For phase 7: OCaml calls `initBackups` after `propagatePrefs`, which would otherwise replace the server's patterns.
+  - For 6b: backups (and `backupcurr` stashes from `markEqual`) still read and copy files on the engine thread. `files` will back up every replaced file, so 6b moves them onto blocking tasks, as `checkForChangesToSource` already is.
+- **Tests:** `tests/copy.rs` covers, in both dispatch modes:
+  - the copy and its props, with an old temporary file;
+  - large files in chunks, and by reading and writing;
+  - aborting;
+  - a source changed during the sync, and a change the fast check missed;
+  - pseudo-fingerprints;
+  - the kept bad copy;
+  - trees, and resource forks on macOS;
+  - backup rotation, local backups and their ignore patterns, the naming errors, `backupcurr` through `markEqual`, and `getRecentVersion`.
+  
+  Unit tests in `copy` cover reading and writing (the path Windows takes) and resource forks. Not tested: the fall back to reading and writing after a kernel copy fails partway.
+
+  Two oracle tests compare four backup configurations with OCaml Unison: the `ignore` patterns its archive records after `initBackups`, and the backups' names and contents after overwriting files four times. CI's oracle job runs them.
+
 ### Phase 7: `gemel-ui-api` (~1.3k)
 
 - **`uicommon`:** profile choice and initialisation, root checks, the transfer and stats formatting, and the summary line.

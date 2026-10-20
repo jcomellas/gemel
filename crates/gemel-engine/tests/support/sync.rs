@@ -94,12 +94,27 @@ impl Setup {
         self.base.join(side)
     }
 
+    pub fn a(&self) -> PathBuf {
+        self.root("a")
+    }
+
+    pub fn b(&self) -> PathBuf {
+        self.root("b")
+    }
+
     pub fn this_root(&self, i: usize) -> String {
         archive::this_roots_global_name(self.host(), &self.roots.list()[i].fspath).unwrap()
     }
 
     pub fn find(&self) -> Vec<PathUpdates> {
         block_on(update::find_updates(&self.rpc, &self.roots, false, None)).unwrap()
+    }
+
+    /// `Stasher.initBackups`, as OCaml's startup runs it: on each root's
+    /// host, so twice on a host with both (which ignores old backup files
+    /// twice).
+    pub fn init_backups(&self) {
+        block_on(gemel_engine::stasher::init_backups(&self.rpc, &self.roots)).unwrap();
     }
 
     /// Changes the client's preferences and sends them to the hosts.
