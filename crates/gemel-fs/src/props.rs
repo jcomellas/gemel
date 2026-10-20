@@ -980,6 +980,59 @@ impl Props {
     pub fn same_time(&self, other: &Props, c: &PropsConfig) -> bool {
         self.time.same(other.time, c)
     }
+
+    /// `Props.same_ctime`: the same change time, on systems where it means
+    /// something.
+    pub fn same_ctime(&self, other: &Props) -> bool {
+        system::has_correct_ctime() && self.ctime == other.ctime
+    }
+
+    /// `Props.time`: the modification time.
+    pub fn time(&self) -> f64 {
+        self.time.extract()
+    }
+
+    /// `Props.setLength`.
+    pub fn set_length(&self, length: Filesize) -> Props {
+        Props {
+            length,
+            ..self.clone()
+        }
+    }
+
+    /// `Props.setTime`: these props with `other`'s modification and change
+    /// times.
+    pub fn set_time(&self, other: &Props) -> Props {
+        Props {
+            time: self.time.replace(other.time()),
+            ctime: other.ctime,
+            ..self.clone()
+        }
+    }
+
+    /// `Props.resetCTime`: these props with `other`'s change time.
+    pub fn reset_ctime(&self, other: &Props) -> Props {
+        Props {
+            ctime: other.ctime,
+            ..self.clone()
+        }
+    }
+
+    /// `Props.setDirChangeFlag`: marks a directory unchanged since the scan
+    /// with `stamp` (or changed, with [`CHANGED_DIR_STAMP`]) by storing the
+    /// stamp plus its inode in its length; also says whether that changed
+    /// the props.
+    pub fn set_dir_change_flag(&self, stamp: DirChangedStamp, inode: i64) -> (Props, bool) {
+        let stamp = stamp.wrapping_add(inode);
+        (self.set_length(stamp), self.length != stamp)
+    }
+
+    /// `Props.dirMarkedUnchanged`: whether the directory was marked
+    /// unchanged by the scan with `stamp`.
+    pub fn dir_marked_unchanged(&self, stamp: DirChangedStamp, inode: i64) -> bool {
+        let stamp = stamp.wrapping_add(inode);
+        stamp != CHANGED_DIR_STAMP && self.length == stamp
+    }
 }
 
 // ---- On disk ----

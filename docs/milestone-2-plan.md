@@ -153,6 +153,15 @@ The `Props`, `Fileinfo`, `Osx` and fingerprint types, with their Umarshal codecs
   - Known divergence: root paths that aren't UTF-8 print lossily, so their archive names differ from OCaml's.
   - For later phases: the frontend's preference set (phase 7) must register `case` and `fileinfo` preferences, which archive commands read; and since locks are released when a host is dropped, the driver (phase 8) must call `release_held_locks` before `process::exit`.
 - **4b, update detection:** scanning, fast check (inode and mtime), `dirFastCheck`, `follow` and ignore handling, fingerprinting and fpcache use.
+
+  **Notes (phase 4b, 2026-10-20):**
+  - The detection half of `update.ml` is the `update` module, with `xferhint`. A scan takes the archive, the compiled predicates and the fingerprint cache to a blocking task and brings them back, so the two roots of a local sync are scanned at the same time. What a scan leaves on the host (copying hints, the temporary-file suffix) is applied in the roots' canonical order, the order OCaml scans them in.
+  - The scan updates the archive in place. Where OCaml drops the time updates under a path whose scan then fails, gemel keeps those already made; they record only what was verified.
+  - `checkNoUpdatePredicateChange` gives every OCaml fixture archive back unchanged, with no rescan: the predicates (with `xattrignore`'s initial patterns), `rsrc`, and the global and per-path layout all match. This depends on the backup patterns that `Stasher.initBackups` adds to `ignore` on each root's host (so twice when both roots are local); phase 6 must port that, or OCaml's archives look as if the predicates changed.
+  - For M3: `xattrignore` and `xattrignorenot` are sent to the server only when the xattr feature is enabled, since a 2.52 server doesn't know them.
+  - For phase 7: the frontend must default `path` to the empty path when it is unset, as `uicommon` does, or `findUpdates` scans nothing. It must also call `case::init`, `osx::init` and `fileinfo::init` before `propagatePrefs`.
+  - Not ported yet: scanning only what a file watcher reported (path trees, `subpaths`; phase 9), status messages during the scan (phase 7), and `updatePathInArchive` (4c).
+  - A new test has OCaml Unison sync a tree twice, then checks that gemel finds no updates in its archives, directly and through the loopback, and finds the changes made after. CI's oracle job runs it.
 - **4c, commits:** `prepareCommit` and `commit`, `markEqual`, and the update of archive props after propagation.
 
 ### Phase 5: reconciliation (~1k)
