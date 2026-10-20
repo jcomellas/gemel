@@ -50,7 +50,9 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     xferhint::register_prefs(prefs)?;
     update::register_prefs(prefs)?;
     moves::register_prefs(prefs)?;
-    // copy, stasher and files go here.
+    copy::register_prefs(prefs)?;
+    stasher::register_prefs(prefs)?;
+    // files goes here.
     sortri::register_prefs(prefs)?;
     recon::register_prefs(prefs)
 }
@@ -62,5 +64,7 @@ pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
     negotiate::register_commands(rpc)?;
     globals::register_commands(rpc)?;
     archive::register_commands(rpc)?;
-    update::register_commands(rpc)
+    update::register_commands(rpc)?;
+    copy::register_commands(rpc)?;
+    stasher::register_commands(rpc)
 }

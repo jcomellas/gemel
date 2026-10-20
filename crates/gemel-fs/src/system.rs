@@ -33,7 +33,8 @@ pub struct SysError {
 }
 
 impl SysError {
-    fn new(call: &'static str, path: &[u8], error: io::Error) -> Self {
+    /// The error `error` of `call` on `path`.
+    pub fn new(call: &'static str, path: &[u8], error: io::Error) -> Self {
         SysError {
             call,
             param: String::from_utf8_lossy(path).into_owned(),
@@ -465,6 +466,38 @@ pub fn create_exclusive(p: &[u8], perm: u32) -> SysResult<()> {
     opts.open(os_path(p))
         .map(drop)
         .map_err(|e| SysError::new("open", p, e))
+}
+
+/// `open_in_bin p`: opens `p` to read. (OCaml raises `Sys_error`; see
+/// [`SysError::to_transient_sys`].)
+pub fn open_in_bin(p: &[u8]) -> SysResult<fs::File> {
+    fs::File::open(os_path(p)).map_err(|e| SysError::new("open", p, e))
+}
+
+/// `Copy.openFileOut'` for a data fork: creates `p` with `perm` to write
+/// it, failing if it exists. On Unix, where `O_EXCL` isn't supported
+/// (some NFS mounts), it truncates instead.
+pub fn open_out_new(p: &[u8], perm: u32) -> SysResult<fs::File> {
+    let open = |exclusive: bool| {
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true);
+        if exclusive {
+            opts.create_new(true);
+        } else {
+            opts.create(true).truncate(true);
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, perm);
+        #[cfg(not(unix))]
+        let _ = perm;
+        opts.open(os_path(p))
+    };
+    match open(true) {
+        #[cfg(unix)]
+        Err(e) if matches!(e.raw_os_error(), Some(libc::EOPNOTSUPP | 524)) => open(false),
+        r => r,
+    }
+    .map_err(|e| SysError::new("open", p, e))
 }
 
 /// The number of hard links to `p` (`st_nlink`).

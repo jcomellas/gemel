@@ -55,6 +55,17 @@ pub fn rmdir(f: &Fspath) -> SysResult<()> {
     system::rmdir(f.as_bytes())
 }
 
+/// `Fs.open_in_bin`.
+pub fn open_in_bin(f: &Fspath) -> SysResult<std::fs::File> {
+    system::open_in_bin(f.as_bytes())
+}
+
+/// `Fs.openfile f [O_WRONLY; O_CREAT; O_EXCL] perm`, as `Copy` opens a new
+/// data fork (see [`system::open_out_new`]).
+pub fn open_out_new(f: &Fspath, perm: u32) -> SysResult<std::fs::File> {
+    system::open_out_new(f.as_bytes(), perm)
+}
+
 /// `Fs.mkdir`.
 pub fn mkdir(f: &Fspath, perm: u32) -> SysResult<()> {
     system::mkdir(f.as_bytes(), perm)

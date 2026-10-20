@@ -46,6 +46,6 @@ jobs:
       # gemel reads replicas as this OCaml Unison does (gemel-engine/tests/reading.rs),
       # finds no updates in the archives it writes (tests/update.rs), and accepts
       # the archives gemel commits (tests/commit.rs).
-      - run: cargo test --locked -p gemel-engine --test reading --test update --test commit --test recon
+      - run: cargo test --locked -p gemel-engine --test reading --test update --test commit --test recon --test copy
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison

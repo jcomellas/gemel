@@ -17,9 +17,10 @@ operations, fingerprints), the local half of `gemel-rpc` (roots, the
 command registry, the engine thread), the engine's foundations (update
 items, ignore and other path predicates, roots and feature negotiation,
 locks, the fingerprint cache), archives (loading, storing, locking, crash
-recovery and commits, byte-compatible with OCaml's), update detection and
-reconciliation (with move detection) are done. Propagation, remote
-connections and the frontends are still to come.
+recovery and commits, byte-compatible with OCaml's), update detection,
+reconciliation (with move detection), and copying between local roots
+with backups are done. The rest of propagation, remote connections and
+the frontends are still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 

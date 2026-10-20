@@ -54,9 +54,14 @@ fn ocamls_recorded_predicates_are_unchanged() {
             prefs.set(&archive::ROOTS_NAME, roots_name.to_owned());
             // Stasher.initBackups ignores old backup files, once on each
             // root's host: twice when both roots are local.
+            let host = gemel_rpc::host::Host::client(
+                std::rc::Rc::new(std::cell::RefCell::new(prefs)),
+                std::rc::Rc::new(std::cell::RefCell::new(new_features())),
+            );
             for _ in 0..2 {
-                globals::add_regexp_to_ignore(&mut prefs, "Name *.unison.bak");
+                gemel_engine::stasher::init_backups_local(&host).unwrap();
             }
+            let mut prefs = host.prefs().replace(new_prefs());
             settings(mode).store(&mut prefs);
             // Osx.init: resource forks are synchronised when a host runs
             // macOS.
@@ -407,10 +412,8 @@ fn ocamls_archives_show_no_updates() {
             let osx_host = cfg!(target_os = "macos");
             case::init(p, osx_host || cfg!(windows), osx_host);
             osx::init(p, osx_host);
-            for _ in 0..2 {
-                globals::add_regexp_to_ignore(p, "Name *.unison.bak");
-            }
         });
+        s.init_backups();
         let found = s.find();
         assert!(archive::found_archives(&s.rpc));
         let [(fa, fb)] = &found[..] else { panic!() };

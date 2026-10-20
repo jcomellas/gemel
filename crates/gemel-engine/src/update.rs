@@ -1763,13 +1763,22 @@ pub fn mark_equal_local(
     let root = archive::this_roots_global_name(host, fspath)?;
     let mode = case::mode(&host.prefs().borrow());
     let entries = paths.flatten(Path::<Local>::empty(), &|p, n| p.child(n));
-    let stash = host.state::<Stasher>().borrow().0.clone();
-    if let Some(stash) = stash {
-        for (path, _) in &entries {
-            let local = archive::with_archive(host, &root, |a| get_path_in_archive(a, path).0)
-                .unwrap_or_else(|| path.clone());
-            stash(host, fspath, &local)?;
-        }
+    // OCaml installs the stasher's function when it loads; here it is
+    // the default.
+    let stash = host
+        .state::<Stasher>()
+        .borrow()
+        .0
+        .clone()
+        .unwrap_or_else(|| {
+            Rc::new(|host: &Host, fspath: &Fspath, path: &Path<Local>| {
+                crate::stasher::stash_current_version(host, fspath, path, None)
+            })
+        });
+    for (path, _) in &entries {
+        let local = archive::with_archive(host, &root, |a| get_path_in_archive(a, path).0)
+            .unwrap_or_else(|| path.clone());
+        stash(host, fspath, &local)?;
     }
     archive::with_archive_mut(host, &root, |archive| {
         for (path, uc) in &entries {

@@ -4,11 +4,13 @@
 //! records about files. This is the only crate that uses `unsafe`, each
 //! use in a function marked `#[allow(unsafe_code)]`: `utimensat`, user
 //! and group names, `getattrlist`/`setattrlist` on macOS, `umask`,
-//! `gethostname`, and the Windows file-information calls behind `stat`.
+//! `gethostname`, the Windows file-information calls behind `stat`, and
+//! for copying `clonefile` on macOS and `ioctl(FICLONE)`,
+//! `copy_file_range` and `sendfile64` on Linux.
 //!
 //! Not ported yet: AppleDouble files (resource forks on volumes without
-//! them), reading and setting xattrs and ACLs, and copy-on-write cloning
-//! (`reflink`, which comes with copying in phase 6 of milestone 2).
+//! them), reading and setting xattrs and ACLs, and block cloning on
+//! Windows (see [`reflink`]).
 
 pub mod fileinfo;
 pub mod fingerprint;

@@ -9,8 +9,8 @@
 //! `getattrlist`, as in `osxsupport.c`. Not ported yet: AppleDouble (`._`)
 //! files, which carry this information on filesystems without it (a macOS
 //! host syncing to a FAT or Linux volume); where one exists it is reported
-//! as an error rather than silently ignored. Resource-fork contents and
-//! fingerprints come with copying (phase 6).
+//! as an error rather than silently ignored. Resource forks are read and
+//! written through their named-fork paths (`..namedfork/rsrc`).
 
 use gemel_base::prefs::{BoolWithDefault, Category, Internal, PrefDef, Prefs, Topic};
 use gemel_base::util::Error;
@@ -267,17 +267,70 @@ pub fn ress_fingerprint(
     use crate::fingerprint::Fingerprint;
     match get_file_infos(fspath, path, kind, rsrc)?.ress_info {
         RessInfo::NoRess => Ok(Fingerprint::DUMMY),
-        RessInfo::HfsRess(_) => {
-            let names = [
-                gemel_base::name::Name::from_bytes("..namedfork")?,
-                gemel_base::name::Name::from_bytes("rsrc")?,
-            ];
-            let p = path.child(&names[0]).child(&names[1]);
-            Fingerprint::file(fspath, &p)
-        }
+        RessInfo::HfsRess(_) => Fingerprint::file(fspath, &ress_path(path)?),
         RessInfo::AppleDoubleRess(_, _, _, len, (f, offset)) => {
             Fingerprint::subfile(&f, offset as u64, len)
         }
+    }
+}
+
+/// `Osx.ressPath`: the path of a file's resource fork
+/// (`path/..namedfork/rsrc`).
+pub fn ress_path(
+    path: &Path<gemel_base::path::Local>,
+) -> Result<Path<gemel_base::path::Local>, Error> {
+    use gemel_base::name::Name;
+    Ok(path
+        .child(&Name::from_bytes("..namedfork")?)
+        .child(&Name::from_bytes("rsrc")?))
+}
+
+/// The error for a resource fork that only an AppleDouble file could hold.
+fn apple_double_unsupported(what: &str, abspath: &Fspath) -> Error {
+    Error::Transient(format!(
+        "Error in {what}:
+the volume of {abspath} has no native resource forks, and \
+         AppleDouble files are not supported yet"
+    ))
+}
+
+fn is_missing(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
+/// `Osx.openRessIn`: opens a file's resource fork to read it. (Volumes
+/// without native forks need AppleDouble files, not supported yet.)
+pub fn open_ress_in(
+    fspath: &Fspath,
+    path: &Path<gemel_base::path::Local>,
+) -> Result<std::fs::File, Error> {
+    const WHAT: &str = "reading resource fork";
+    let p = fspath.concat(&ress_path(path)?);
+    match std::fs::File::open(crate::system::os_path(p.as_bytes())) {
+        Ok(f) => Ok(f),
+        Err(e) if is_missing(&e) => Err(apple_double_unsupported(WHAT, &fspath.concat(path))),
+        Err(e) => Err(SysError::new("open", p.as_bytes(), e).to_transient(WHAT)),
+    }
+}
+
+/// `Osx.openRessOut`: opens (creating) a file's resource fork to write it.
+pub fn open_ress_out(
+    fspath: &Fspath,
+    path: &Path<gemel_base::path::Local>,
+) -> Result<std::fs::File, Error> {
+    const WHAT: &str = "writing resource fork";
+    let p = fspath.concat(&ress_path(path)?);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+    match opts.open(crate::system::os_path(p.as_bytes())) {
+        Ok(f) => Ok(f),
+        Err(e) if is_missing(&e) => Err(apple_double_unsupported(WHAT, &fspath.concat(path))),
+        Err(e) => Err(SysError::new("open", p.as_bytes(), e).to_transient(WHAT)),
     }
 }
 
