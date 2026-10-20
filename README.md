@@ -11,7 +11,10 @@ OCaml Unison:
   command line, root specifications, the feature registry, property lists,
   tracing and logging, and the Rx pattern engine.
 
-The filesystem layer, RPC, the engine and the frontends are skeletons.
+Milestone 2 is under way ([plan](docs/milestone-2-plan.md)): the oracle
+harness (`tools/oracle`) and `gemel-fs` (file metadata, `stat`, directory
+operations, fingerprints) are done. RPC, the engine and the frontends are
+skeletons.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 

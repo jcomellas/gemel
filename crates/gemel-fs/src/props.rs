@@ -36,7 +36,12 @@ use gemel_base::util::Error;
 use gemel_compat::ocaml_hash::{self, Value};
 use gemel_compat::umarshal::{self, Reader, Writer};
 
+use gemel_base::path::{Local, Path};
+
+use crate::fs;
+use crate::fspath::Fspath;
 use crate::osx;
+use crate::system::{self, Kind, Stats};
 
 /// `Uutil.Filesize.t`: a size in bytes.
 pub type Filesize = i64;
@@ -950,6 +955,284 @@ impl Props {
     pub fn same_time(&self, other: &Props, c: &PropsConfig) -> bool {
         self.time.same(other.time, c)
     }
+}
+
+// ---- On disk ----
+
+/// How props are being set (`` [`Set | `Update] ``): on a new file, or
+/// changing an existing one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetKind {
+    /// A new file: permissions are always set.
+    Set,
+    /// An existing file: only what changed (a non-empty mask) is set.
+    Update,
+}
+
+impl Perm {
+    /// `Perm.get`.
+    pub fn get(st: &Stats, c: &PropsConfig) -> Perm {
+        Perm {
+            bits: st.perm,
+            mask: c.perm_mask,
+        }
+    }
+
+    /// `Perm.set`.
+    pub fn set(self, abspath: &Fspath, kind: SetKind, dont_chmod: bool) -> Result<(), Error> {
+        if (self.mask == 0 && kind != SetKind::Set) || dont_chmod {
+            return Ok(());
+        }
+        fs::chmod(abspath, self.bits).map_err(|e| {
+            let msg = e.to_transient("setting permissions").to_string();
+            #[cfg(unix)]
+            if e.error.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                return Error::Transient(format!(
+                    "{msg}. You can use preference \"fat\",or else set preference \"perms\" \
+                     to 0 and preference \"dontchmod\" to true to avoid this error"
+                ));
+            }
+            Error::Transient(msg)
+        })
+    }
+
+    /// `Perm.check`: the permissions on disk after setting them.
+    pub fn check(self, abspath: &Fspath, st: &Stats, c: &PropsConfig) -> Result<(), Error> {
+        let disk = Perm {
+            bits: st.perm,
+            mask: self.mask,
+        };
+        if self.bits & self.mask == disk.bits & self.mask {
+            return Ok(());
+        }
+        Err(Error::Transient(format!(
+            "Failed to set permissions of file {abspath} to {}: the permissions was set to {} \
+             instead. The filesystem probably does not support all permission bits. If this is a \
+             FAT filesystem, you should set the \"fat\" option to true. Otherwise, you should \
+             probably set the \"perms\" option to 0o{:o} (or to 0 if you don't need to \
+             synchronize permissions).",
+            self.synced_parts_to_string(),
+            disk.synced_parts_to_string(),
+            c.perm_mask & !(self.bits ^ st.perm)
+        )))
+    }
+}
+
+impl Id {
+    /// `Uid.get` / `Gid.get`: by name, except for id 0 and with
+    /// `numericids`.
+    pub fn get(st: &Stats, kind: IdKind, c: &PropsConfig) -> Id {
+        if !kind.synced(c) {
+            return Id::Ignored;
+        }
+        let id = match kind {
+            IdKind::User => st.uid,
+            IdKind::Group => st.gid,
+        };
+        if id == 0 || c.numeric_ids {
+            return Id::Numeric(id);
+        }
+        match system::id_name(id, kind == IdKind::User) {
+            Some(n) => Id::Named(n),
+            None => Id::Numeric(id),
+        }
+    }
+
+    /// `extern`: the numeric id to set, or `None` for "leave it".
+    fn external(&self, kind: IdKind) -> Result<Option<i64>, Error> {
+        match self {
+            Id::Ignored => Ok(None),
+            Id::Numeric(i) => Ok(Some(*i)),
+            Id::Named(n) => {
+                let name = String::from_utf8_lossy(n);
+                let id = system::id_of_name(n, kind == IdKind::User)
+                    .ok_or_else(|| Error::Transient(format!("No {} {name}", kind.name())))?;
+                if id == 0 {
+                    return Err(Error::Transient(format!(
+                        "Trying to map the non-root {} {name} to {} 0",
+                        kind.name(),
+                        kind.name()
+                    )));
+                }
+                Ok(Some(id))
+            }
+        }
+    }
+
+    /// `Uid.set` / `Gid.set`.
+    pub fn set(&self, abspath: &Fspath, kind: IdKind) -> Result<(), Error> {
+        let Some(id) = self.external(kind)? else {
+            return Ok(());
+        };
+        let (uid, gid) = match kind {
+            IdKind::User => (id, -1),
+            IdKind::Group => (-1, id),
+        };
+        fs::chown(abspath, uid, gid).map_err(|e| e.to_transient("setting file ownership"))
+    }
+}
+
+impl Time {
+    /// `Time.get`: synchronised for regular files when `times` is set.
+    pub fn get(st: &Stats, c: &PropsConfig) -> Time {
+        if st.kind == Kind::File && c.sync_times {
+            Time::Synced(st.mtime)
+        } else {
+            Time::NotSynced(st.mtime)
+        }
+    }
+
+    /// `Time.set`: sets a synchronised time as both access and modification
+    /// time.
+    pub fn set(self, abspath: &Fspath) -> Result<(), Error> {
+        match self {
+            // utimes with both times 0 would mean "now"; a tiny non-zero
+            // atime keeps an mtime of 0 (bcpierce00/unison#223).
+            Time::Synced(v) => fs::utimes(abspath, if v == 0.0 { 1e-12 } else { v }, v)
+                .map_err(|e| e.to_transient("setting modification time")),
+            Time::NotSynced(_) => Ok(()),
+        }
+    }
+
+    /// `Time.check`.
+    pub fn check(self, abspath: &Fspath, st: &Stats, c: &PropsConfig) -> Result<(), Error> {
+        let Time::Synced(_) = self else { return Ok(()) };
+        let disk = Time::Synced(st.mtime);
+        if self.similar(disk, c) {
+            return Ok(());
+        }
+        Err(Error::Transient(format!(
+            "Failed to set modification time of file {abspath} to {}: the time was set to {} instead",
+            self.synced_parts_to_string(),
+            disk.synced_parts_to_string()
+        )))
+    }
+
+    /// `Time.syncedPartsToString`, with the time as seconds (OCaml also
+    /// prints it as a local date).
+    pub fn synced_parts_to_string(self) -> String {
+        match self {
+            Time::Synced(v) => format!("{v:.6}"),
+            Time::NotSynced(_) => String::new(),
+        }
+    }
+}
+
+/// `TypeCreator.get`: the Finder information of files and directories,
+/// when `rsrc` is on.
+pub fn type_creator_get(st: &Stats, info: &osx::Info, c: &PropsConfig) -> TypeCreator {
+    (c.rsrc && matches!(st.kind, Kind::File | Kind::Dir)).then(|| info.finfo.clone())
+}
+
+impl Props {
+    /// `Props.get'`: what `stat` alone gives.
+    pub fn get_basic(st: &Stats, c: &PropsConfig) -> Props {
+        Props {
+            perm: Perm::get(st, c),
+            uid: Id::get(st, IdKind::User, c),
+            gid: Id::get(st, IdKind::Group, c),
+            time: Time::get(st, c),
+            type_creator: None,
+            length: if st.kind == Kind::File { st.size } else { 0 },
+            ctime: CTIME_DUMMY,
+            xattr: None,
+            acl: None,
+        }
+    }
+
+    /// `Props.get`: everything, including the change time and the Finder
+    /// information. xattrs and ACLs are not read (see the module
+    /// documentation).
+    pub fn get(st: &Stats, info: &osx::Info, c: &PropsConfig) -> Props {
+        Props {
+            type_creator: type_creator_get(st, info, c),
+            ctime: st.ctime,
+            ..Props::get_basic(st, c)
+        }
+    }
+
+    /// `Props.getWithRess`.
+    pub fn get_with_ress(st: &Stats, info: &osx::Info, c: &PropsConfig) -> Props {
+        Props {
+            type_creator: type_creator_get(st, info, c),
+            ..Props::get_basic(st, c)
+        }
+    }
+
+    /// `Props.set`: owner, group, Finder information, time, then
+    /// permissions.
+    pub fn set(
+        &self,
+        fspath: &Fspath,
+        path: &Path<Local>,
+        kind: SetKind,
+        c: &PropsConfig,
+        dont_chmod: bool,
+    ) -> Result<(), Error> {
+        let abspath = fspath.concat(path);
+        let _ = c;
+        self.uid.set(&abspath, IdKind::User)?;
+        self.gid.set(&abspath, IdKind::Group)?;
+        if let Some(t) = &self.type_creator {
+            osx::set_file_infos(&abspath, t)?;
+        }
+        self.time.set(&abspath)?;
+        self.perm.set(&abspath, kind, dont_chmod)
+    }
+
+    /// `Props.check`: the props on disk after setting them.
+    pub fn check(
+        &self,
+        fspath: &Fspath,
+        path: &Path<Local>,
+        st: &Stats,
+        c: &PropsConfig,
+    ) -> Result<(), Error> {
+        let abspath = fspath.concat(path);
+        self.time.check(&abspath, st, c)?;
+        self.perm.check(&abspath, st, c)
+    }
+
+    /// `Props.fileDefault`: what a new file gets when nothing is known.
+    pub fn file_default() -> Props {
+        Props::template(Perm {
+            bits: 0o666 & !umask(),
+            mask: -1,
+        })
+    }
+
+    /// `Props.dirDefault`.
+    pub fn dir_default() -> Props {
+        Props::template(Perm {
+            bits: 0o777 & !umask(),
+            mask: -1,
+        })
+    }
+
+    /// `Props.fileSafe`: like [`Props::file_default`], private.
+    pub fn file_safe() -> Props {
+        Props::template(Perm {
+            bits: 0o600 & !umask(),
+            mask: -1,
+        })
+    }
+}
+
+/// The process umask (0o077 on Windows, where OCaml uses rw------- and
+/// rwx------ defaults).
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn umask() -> i64 {
+    // SAFETY: umask has no preconditions; it is set back at once. Not
+    // thread-safe with respect to other umask callers, as in OCaml.
+    let u = unsafe { libc::umask(0) };
+    unsafe { libc::umask(u) };
+    i64::from(u)
+}
+
+#[cfg(not(unix))]
+fn umask() -> i64 {
+    0o077
 }
 
 fn acl_to_string(a: &Acl, c: &PropsConfig) -> String {
