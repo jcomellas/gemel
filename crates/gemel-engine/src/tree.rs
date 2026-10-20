@@ -108,6 +108,29 @@ impl<A, B> Tree<A, B> {
         result
     }
 
+    /// [`Tree::flatten`], taking the nodes.
+    pub fn into_flatten<C>(self, path: C, pcons: &impl Fn(&C, &A) -> C) -> Vec<(C, B)> {
+        let mut result = Vec::new();
+        self.into_flatten_into(path, pcons, &mut result);
+        result
+    }
+
+    fn into_flatten_into<C>(self, path: C, pcons: &impl Fn(&C, &A) -> C, result: &mut Vec<(C, B)>) {
+        match self {
+            Tree::Leaf(v) => result.push((path, v)),
+            Tree::Node(children, v) => {
+                let children_paths: Vec<C> =
+                    children.iter().map(|(n, _)| pcons(&path, n)).collect();
+                if let Some(v) = v {
+                    result.push((path, v));
+                }
+                for ((_, t), p) in children.into_iter().zip(children_paths) {
+                    t.into_flatten_into(p, pcons, result);
+                }
+            }
+        }
+    }
+
     fn flatten_into<'a, C>(
         &'a self,
         path: C,
@@ -282,6 +305,7 @@ mod tests {
         let mut seen = Vec::new();
         t.iteri(String::new(), &path, &mut |p, v| seen.push((p.clone(), *v)));
         assert_eq!(seen, flat);
+        assert_eq!(t.clone().into_flatten(String::new(), &path), flat);
         let doubled = t.map(&|n: &&str| n.to_uppercase(), &|v| v * 2);
         assert_eq!(doubled.size(), 3);
         let bytes = umarshal::to_bytes(|w| {

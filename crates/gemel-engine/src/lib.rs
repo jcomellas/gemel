@@ -18,6 +18,7 @@ pub mod name_map;
 pub mod negotiate;
 pub mod pred;
 pub mod recon;
+pub mod sortri;
 pub mod stasher;
 pub mod transfer;
 pub mod transport;
@@ -31,10 +32,11 @@ use gemel_base::util::Error;
 use gemel_rpc::registry::Rpc;
 
 /// Registers the features of the engine and of `gemel-fs`, in OCaml's
-/// order (`props`, then `common`).
+/// order (`props`, `common`, then `moves`).
 pub fn register_features(features: &mut Features) -> Result<(), Error> {
     gemel_fs::props::register_features(features)?;
-    common::register_features(features)
+    common::register_features(features)?;
+    moves::register_features(features)
 }
 
 /// Registers the preferences of the engine modules ported so far (not
@@ -46,7 +48,11 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     fpcache::register_prefs(prefs)?;
     archive::register_prefs(prefs)?;
     xferhint::register_prefs(prefs)?;
-    update::register_prefs(prefs)
+    update::register_prefs(prefs)?;
+    moves::register_prefs(prefs)?;
+    // copy, stasher and files go here.
+    sortri::register_prefs(prefs)?;
+    recon::register_prefs(prefs)
 }
 
 /// Registers the remote commands of the modules ported so far.

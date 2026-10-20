@@ -1,6 +1,7 @@
 //! Checks the preference dump against one produced by Unison's own
 //! marshallers (gemel-compat's `tests/fixtures/prefs_dump.txt`).
 
+use gemel_base::features::Features;
 use gemel_base::prefs::{self, BoolWithDefault, Category, PrefDef, Prefs, Topic};
 use gemel_compat::umarshal::{self, Writer};
 
@@ -86,7 +87,7 @@ fn dump_is_byte_identical_to_ocaml() {
     .collect();
     p.parse_cmd_line(&args).unwrap();
     let dumped: Vec<_> = p
-        .dump(1)
+        .dump(1, &Features::new())
         .unwrap()
         .into_iter()
         .filter(|(name, ..)| NAMES.contains(&name.as_str()))

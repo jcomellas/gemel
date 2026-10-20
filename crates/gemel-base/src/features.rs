@@ -13,14 +13,16 @@
 
 use std::collections::BTreeMap;
 
+use crate::prefs::Prefs;
 use crate::util::Error;
 
 /// A feature's identifier: its name, as exchanged with the peer.
 pub type Id = String;
 
-/// Checks a negotiated feature set: called with the set and whether this
-/// feature is in it; returns an error message to reject the set.
-pub type Validator = Box<dyn Fn(&[Id], bool) -> Option<String> + Send + Sync>;
+/// Checks a negotiated feature set: called with the set, whether this
+/// feature is in it, and the preferences; returns an error message to
+/// reject the set.
+pub type Validator = Box<dyn Fn(&[Id], bool, &Prefs) -> Option<String> + Send + Sync>;
 
 /// A registered feature, to test with [`Features::enabled`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,13 +134,13 @@ impl Features {
     }
 
     /// `Features.validate`: runs every validator against `ids`.
-    pub fn validate(&self, ids: &[Id]) -> Result<(), Error> {
+    pub fn validate(&self, ids: &[Id], prefs: &Prefs) -> Result<(), Error> {
         let by_name: BTreeMap<_, _> = self.entries.iter().map(|e| (&e.name, e)).collect();
         for (name, e) in by_name {
             let Some(validator) = &e.validator else {
                 continue;
             };
-            if let Some(err) = validator(ids, ids.contains(name)) {
+            if let Some(err) = validator(ids, ids.contains(name), prefs) {
                 return Err(Error::Fatal(format!(
                     "Client and server are incompatible. Setting up feature \"{name}\" \
                      failed with error\n\"{err}\".\n\nIt may be possible to rectify this \
@@ -151,8 +153,8 @@ impl Features {
     }
 
     /// `Features.validateEnabled`.
-    pub fn validate_enabled(&self) -> Result<(), Error> {
-        self.validate(&self.get_enabled())
+    pub fn validate_enabled(&self, prefs: &Prefs) -> Result<(), Error> {
+        self.validate(&self.get_enabled(), prefs)
     }
 }
 
@@ -190,13 +192,13 @@ mod tests {
         f.register(
             "Sync: ACL",
             true,
-            Some(Box::new(|_, included| {
+            Some(Box::new(|_, included, _| {
                 (!included).then(|| "ACL sync requested but not supported".to_owned())
             })),
         )
         .unwrap();
-        assert!(f.validate(&["Sync: ACL".into()]).is_ok());
-        let err = f.validate(&[]).unwrap_err().to_string();
+        assert!(f.validate(&["Sync: ACL".into()], &Prefs::new()).is_ok());
+        let err = f.validate(&[], &Prefs::new()).unwrap_err().to_string();
         assert!(
             err.starts_with("Client and server are incompatible. Setting up feature \"Sync: ACL\"")
         );

@@ -2195,21 +2195,52 @@ pub fn update_size_rec(
     })
 }
 
+/// The local root's archive in the cache, which the client reads during
+/// reconciliation (OCaml's `getSubArchiveLocal` and `updateSize` look it
+/// up each time; this looks it up once and lends it out rather than
+/// copying it).
+pub struct LocalArchive {
+    host: Rc<Host>,
+    root: String,
+}
+
+impl LocalArchive {
+    /// The archive of the local root.
+    pub fn new(rpc: &Rpc, roots: &Roots) -> Result<LocalArchive, Error> {
+        let local = roots
+            .local_root()
+            .ok_or_else(|| internal("no roots are installed"))?;
+        let host = rpc.local_host().clone();
+        let root = archive::this_roots_global_name(&host, &local.fspath)?;
+        Ok(LocalArchive { host, root })
+    }
+
+    /// Runs `f` on the archive at `path` (`NoArchive` if there is none).
+    pub fn with<R>(&self, path: &Path<Global>, f: impl FnOnce(&Archive) -> R) -> R {
+        let mut f = Some(f);
+        archive::with_archive(&self.host, &self.root, |a| {
+            (f.take().expect("called once"))(get_path_in_archive(a, path).1)
+        })
+        .unwrap_or_else(|| (f.take().expect("called once"))(&NO_ARCHIVE))
+    }
+
+    /// `updateSize`: the number of items and bytes at `path` after `ui`.
+    pub fn update_size(
+        &self,
+        path: &Path<Global>,
+        ui: &UpdateItem,
+    ) -> Result<(usize, props::Filesize), Error> {
+        self.with(path, |a| update_size_rec(a, ui))
+    }
+}
+
 /// `getSubArchiveLocal`: the archive at `path` of the local root.
 pub fn get_sub_archive_local(
     rpc: &Rpc,
     roots: &Roots,
     path: &Path<Global>,
 ) -> Result<Archive, Error> {
-    let local = roots
-        .local_root()
-        .ok_or_else(|| internal("no roots are installed"))?;
-    let host = rpc.local_host();
-    let root = archive::this_roots_global_name(host, &local.fspath)?;
-    Ok(
-        archive::with_archive(host, &root, |a| get_path_in_archive(a, path).1.clone())
-            .unwrap_or(Archive::NoArchive),
-    )
+    Ok(LocalArchive::new(rpc, roots)?.with(path, Archive::clone))
 }
 
 /// `updateSize`: the number of items and bytes at `path` after `ui`, by
@@ -2220,7 +2251,7 @@ pub fn update_size(
     path: &Path<Global>,
     ui: &UpdateItem,
 ) -> Result<(usize, props::Filesize), Error> {
-    update_size_rec(&get_sub_archive_local(rpc, roots, path)?, ui)
+    LocalArchive::new(rpc, roots)?.update_size(path, ui)
 }
 
 /// `iterFiles`: runs `f` on each file in an archive.

@@ -271,7 +271,11 @@ pub async fn propagate_prefs(rpc: &Rpc, roots: &Roots) -> Result<(), Error> {
         if r.is_local() && !rpc.is_loopback() {
             continue;
         }
-        let dump = rpc.client_host().prefs().borrow().dump(1)?;
+        let dump = {
+            let client = rpc.client_host();
+            let features = client.features().borrow();
+            client.prefs().borrow().dump(1, &features)?
+        };
         rpc.call_host(&INSTALL_PREFS, &r.host, dump).await?;
     }
     Ok(())
