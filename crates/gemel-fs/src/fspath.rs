@@ -424,7 +424,12 @@ mod tests {
         assert_eq!(fs("/a/b//").as_bytes(), b"/a/b");
         assert_eq!(fs("///").as_bytes(), b"/");
         assert_eq!(fs("/").as_bytes(), b"/");
-        assert!(Fspath::from_local_string(b"").is_err());
+        // On Windows winRootFix turns "" into "/", a root (as in OCaml).
+        if WIN_STYLE {
+            assert_eq!(fs("").as_bytes(), b"/");
+        } else {
+            assert!(Fspath::from_local_string(b"").is_err());
+        }
         assert!(is_root_dir(b"/"));
         assert_eq!(is_root_dir(b"C:/"), WIN_STYLE);
         assert_eq!(is_root_dir(b"//host/share/"), WIN_STYLE);
