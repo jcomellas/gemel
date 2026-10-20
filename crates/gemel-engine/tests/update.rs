@@ -8,26 +8,20 @@ use std::path::{Path as StdPath, PathBuf};
 use std::rc::Rc;
 
 use gemel_base::case::{self, Mode};
-use gemel_base::path::{Global, Path};
-use gemel_base::prefs::Prefs;
-use gemel_engine::archive::{self, Archive, ArchiveData, ArchiveVersion};
+use gemel_base::path::Path;
+use gemel_engine::archive::{self, Archive, ArchiveData};
 use gemel_engine::common::{ContentsChange, PermChange, PrevState, UpdateContent, UpdateItem};
-use gemel_engine::globals::{self, Ignore, Roots};
-use gemel_engine::name_map::NameMap;
-use gemel_engine::update::{self, PathUpdates};
+use gemel_engine::globals::{self, Ignore};
+use gemel_engine::update;
 use gemel_engine::xferhint;
 use gemel_fs::osx;
 use gemel_fs::props::PropsConfig;
 use gemel_rpc::host::Host;
-use gemel_rpc::registry::{Dispatch, Rpc};
+use support::sync::*;
 use support::*;
 
 fn fixtures() -> PathBuf {
     StdPath::new(env!("CARGO_MANIFEST_DIR")).join("tests/archives")
-}
-
-fn global(s: &str) -> Path<Global> {
-    Path::from_bytes(s.as_bytes()).unwrap()
 }
 
 /// What OCaml records about the predicates and preferences each scan
@@ -135,194 +129,6 @@ fn paths_under_others_and_ignored_ones_are_left_out() {
 }
 
 // ---- Scans of real trees ----
-
-const T0: f64 = 1_600_000_000.0;
-
-/// A client with two local roots `a` and `b` in `dir`, archives in `dir/u`.
-struct Setup {
-    rpc: Rpc,
-    roots: Roots,
-    base: PathBuf,
-}
-
-fn setup(dir: &TempDir, loopback: bool) -> Setup {
-    setup_in(dir, loopback, Mode::Sensitive)
-}
-
-/// [`setup`] in a case mode. (Roots are canonized when installed, so the
-/// directory needn't be.)
-fn setup_in(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
-    let base = dir.0.clone();
-    let raw = ["a", "b"].map(|n| {
-        let p = base.join(n);
-        std::fs::create_dir_all(&p).unwrap();
-        p.to_str().unwrap().to_owned()
-    });
-    let unison_dir = base.join("u");
-    std::fs::create_dir_all(&unison_dir).unwrap();
-    let mut prefs = new_prefs();
-    globals::set_raw_roots(&mut prefs, &raw);
-    prefs.set(&globals::PATHS, vec![Path::empty()]);
-    prefs.set(&gemel_fs::props::TIMES, true);
-    settings(mode).store(&mut prefs);
-    let client = Rc::new(Host::client(
-        Rc::new(RefCell::new(prefs)),
-        Rc::new(RefCell::new(new_features())),
-    ));
-    client.set_unison_dir(&unison_dir);
-    client.set_warn_printer(None);
-    let dispatch = if loopback {
-        let server = Host::loopback_server(
-            &client.prefs().borrow(),
-            &client.features().borrow(),
-            new_prefs(),
-            new_features(),
-        )
-        .unwrap();
-        server.set_unison_dir(&unison_dir);
-        Dispatch::Loopback {
-            client,
-            server: Rc::new(server),
-        }
-    } else {
-        Dispatch::Direct(client)
-    };
-    let mut rpc = Rpc::new(dispatch);
-    gemel_engine::register_commands(&mut rpc).unwrap();
-    let roots = block_on(async {
-        let raw = globals::raw_roots(&rpc.client_host().prefs().borrow());
-        let roots = Roots::install(&rpc, &raw).await.unwrap();
-        archive::store_roots_name(&rpc, &roots).unwrap();
-        globals::propagate_prefs(&rpc, &roots).await.unwrap();
-        roots
-    });
-    Setup { rpc, roots, base }
-}
-
-impl Setup {
-    fn host(&self) -> &Host {
-        self.rpc.local_host()
-    }
-
-    fn root(&self, side: &str) -> PathBuf {
-        self.base.join(side)
-    }
-
-    fn this_root(&self, i: usize) -> String {
-        archive::this_roots_global_name(self.host(), &self.roots.list()[i].fspath).unwrap()
-    }
-
-    fn find(&self) -> Vec<PathUpdates> {
-        block_on(update::find_updates(&self.rpc, &self.roots, false, None)).unwrap()
-    }
-
-    /// Changes the client's preferences and sends them to the hosts.
-    fn set_prefs(&self, f: impl FnOnce(&mut Prefs)) {
-        f(&mut self.rpc.client_host().prefs().borrow_mut());
-        block_on(globals::propagate_prefs(&self.rpc, &self.roots)).unwrap();
-    }
-
-    /// Stores, for both roots, the archive the updates of the whole
-    /// replica make (as a commit would), with the hosts' props.
-    fn commit(&self, found: &[PathUpdates]) {
-        let [(fa, fb)] = found else {
-            panic!("one path")
-        };
-        let mode = case::mode(&self.host().prefs().borrow());
-        for (i, ui) in [(0, &fa.1), (1, &fb.1)] {
-            let archive = make_archive(ui, mode);
-            let props = archive::archive_props(self.host(), &self.this_root(i)).unwrap();
-            let data = ArchiveData {
-                archive,
-                hash: 7,
-                magic: b"case sensitive\x001.0".to_vec(),
-                props,
-            };
-            let (name, _) = archive::archive_name(
-                self.host(),
-                &self.roots.list()[i].fspath,
-                ArchiveVersion::MainArch,
-            )
-            .unwrap();
-            let f = self.host().file_in_unison_dir(&name);
-            archive::store_archive_local(self.host(), &f, &self.this_root(i), &data).unwrap();
-        }
-    }
-
-    /// The archive at `path` in root `i`, as cached on the host.
-    fn archived(&self, i: usize, path: &str) -> Archive {
-        archive::with_archive(self.host(), &self.this_root(i), |a| {
-            update::get_path_in_archive(a, &global(path)).1.clone()
-        })
-        .unwrap()
-    }
-}
-
-/// `makeArchive`: the archive a commit of these updates makes from
-/// nothing.
-fn make_archive(ui: &UpdateItem, mode: Mode) -> Archive {
-    match ui {
-        UpdateItem::NoUpdates | UpdateItem::Error(_) => Archive::NoArchive,
-        UpdateItem::Updates(uc, _) => match uc {
-            UpdateContent::Absent => Archive::NoArchive,
-            UpdateContent::File(desc, ContentsChange::Updated(fp, stamp, ress)) => {
-                Archive::File(desc.clone(), fp.clone(), *stamp, ress.clone())
-            }
-            UpdateContent::File(_, ContentsChange::Same) => panic!("no previous file"),
-            UpdateContent::Symlink(l) => Archive::Symlink(l.clone()),
-            UpdateContent::Dir(desc, children, _, _) => Archive::Dir(
-                desc.clone(),
-                NameMap::from_bindings(
-                    mode,
-                    children
-                        .iter()
-                        .map(|(n, ui)| (n.clone(), make_archive(ui, mode)))
-                        .filter(|(_, a)| *a != Archive::NoArchive),
-                ),
-            ),
-        },
-    }
-}
-
-fn children(ui: &UpdateItem) -> Vec<(String, &UpdateItem)> {
-    match ui {
-        UpdateItem::Updates(UpdateContent::Dir(_, ch, _, _), _) => ch
-            .iter()
-            .map(|(n, ui)| (String::from_utf8_lossy(n.as_bytes()).into_owned(), ui))
-            .collect(),
-        other => panic!("not a directory: {other:?}"),
-    }
-}
-
-fn child<'a>(ui: &'a UpdateItem, name: &str) -> &'a UpdateItem {
-    children(ui)
-        .into_iter()
-        .find(|(n, _)| n == name)
-        .unwrap_or_else(|| panic!("no update for {name} in {ui:?}"))
-        .1
-}
-
-fn names(ui: &UpdateItem) -> Vec<String> {
-    children(ui).into_iter().map(|(n, _)| n).collect()
-}
-
-fn md5(s: &str) -> Vec<u8> {
-    <md5::Md5 as md5::Digest>::digest(s.as_bytes()).to_vec()
-}
-
-/// The replica: files, an empty directory and (on Unix) a symbolic link,
-/// all with times in the past; directories' times are set last.
-fn build_tree(root: &StdPath) {
-    write(root, "README", "read me", T0);
-    write(root, "src/main.c", "int main(void) { return 0; }", T0 + 1.0);
-    write(root, "src/deep/x", "x", T0 + 2.0);
-    std::fs::create_dir_all(root.join("empty")).unwrap();
-    #[cfg(unix)]
-    std::os::unix::fs::symlink("README", root.join("link")).unwrap();
-    for d in ["src/deep", "src", "empty", ""] {
-        set_mtime(&root.join(d), T0 + 10.0);
-    }
-}
 
 #[test]
 fn scans_find_changes_against_the_archive() {

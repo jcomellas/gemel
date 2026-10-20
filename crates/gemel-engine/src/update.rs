@@ -46,7 +46,7 @@ use gemel_fs::fileinfo::{self, FsConfig, Info, Stamp, Typ};
 use gemel_fs::fspath::Fspath;
 use gemel_fs::os::{self, FullFingerprint, TempNames};
 use gemel_fs::osx;
-use gemel_fs::props::{self, DirChangedStamp, FEATURE_XATTR, Props};
+use gemel_fs::props::{self, DirChangedStamp, FEATURE_XATTR, Props, PropsConfig};
 use gemel_rpc::host::Host;
 use gemel_rpc::registry::{RootCmd, Rpc};
 use gemel_rpc::runtime;
@@ -60,6 +60,7 @@ use crate::fpcache::{self, FpCache};
 use crate::globals::{self, Ignore, Roots};
 use crate::name_map::{NameMap, PathMap};
 use crate::pred::{self, Compiled, Pred};
+use crate::tree::Tree;
 use crate::xferhint;
 
 // ---- Preferences ----
@@ -385,7 +386,44 @@ type Translated = Vec<(Path<Global>, Path<Local>, bool)>;
 /// it has ignored children in the archive.
 type ChildrenScan = (bool, Vec<(Name, UpdateItem)>, bool, bool);
 
+/// The props settings scans use on `host`.
+fn scan_props(host: &Host) -> gemel_fs::props::PropsConfig {
+    let prefs = host.prefs().borrow();
+    gemel_fs::props::PropsConfig::from_prefs(&prefs).with_features(&host.features().borrow())
+}
+
 impl Scan {
+    /// A scan of the root at `fspath` with `host`'s settings.
+    fn new(
+        host: &Host,
+        fspath: &Fspath,
+        info: ScanInfo,
+        temp_names: TempNames,
+        fpcache: FpCache,
+    ) -> Result<Scan, Error> {
+        let prefs = host.prefs().borrow();
+        let mode = case::mode(&prefs);
+        let mut fs = FsConfig::from_prefs(&prefs);
+        fs.props = fs.props.with_features(&host.features().borrow());
+        Ok(Scan {
+            fspath: fspath.clone(),
+            info,
+            fs,
+            mode,
+            ignore: Ignore::new(&prefs, mode)?,
+            follow: pred::FOLLOW.compiled(&prefs, mode)?,
+            atomic: globals::ATOMIC.compiled(&prefs, mode)?,
+            immutable: IMMUTABLE.compiled(&prefs, mode)?,
+            immutable_not: IMMUTABLE_NOT.compiled(&prefs, mode)?,
+            some_host_is_running_windows: *prefs.read(&globals::SOME_HOST_IS_RUNNING_WINDOWS),
+            xfer_by_copying: *prefs.read(&xferhint::XFER_BY_COPYING),
+            faster_check_unsafe: *prefs.read(&fpcache::FASTER_CHECK_UNSAFE),
+            temp_names,
+            fpcache,
+            hints: Vec::new(),
+        })
+    }
+
     fn follow_link(&self) -> impl Fn(&Path<Local>) -> bool + '_ {
         |p| self.follow.test(p.as_bytes())
     }
@@ -1325,39 +1363,20 @@ pub async fn find_local(host: &Host, fspath: &Fspath, args: FindArgs) -> Result<
     temp_names.include(&arch_hash);
     let (_, this_root) = archive::archive_name(host, fspath, ArchiveVersion::MainArch)?;
     let (rescan_props, dir_stamp) = check_no_update_predicate_change(host, &this_root, &path_list)?;
-    let mut scan = {
-        let prefs = host.prefs().borrow();
-        let features = host.features().borrow();
-        let mode = case::mode(&prefs);
-        let mut fs = FsConfig::from_prefs(&prefs);
-        fs.props = fs.props.with_features(&features);
-        let fast_check = use_fast_checking(&prefs);
+    let fast_check = use_fast_checking(&host.prefs().borrow());
+    let info = ScanInfo {
+        fast_check,
+        dir_fast_check: fast_check && cfg!(unix),
+        dir_stamp,
+        rescan_props,
+    };
+    let fpcache = {
         let (cache_name, _) = archive::archive_name(host, fspath, ArchiveVersion::FpCache)?;
         let cache_file = gemel_fs::system::os_path(&host.file_in_unison_dir(&cache_name));
-        let ignore_archives = *prefs.read(&archive::IGNORE_ARCHIVES);
-        Scan {
-            fspath: fspath.clone(),
-            info: ScanInfo {
-                fast_check,
-                dir_fast_check: fast_check && cfg!(unix),
-                dir_stamp,
-                rescan_props,
-            },
-            fs,
-            mode,
-            ignore: Ignore::new(&prefs, mode)?,
-            follow: pred::FOLLOW.compiled(&prefs, mode)?,
-            atomic: globals::ATOMIC.compiled(&prefs, mode)?,
-            immutable: IMMUTABLE.compiled(&prefs, mode)?,
-            immutable_not: IMMUTABLE_NOT.compiled(&prefs, mode)?,
-            some_host_is_running_windows: *prefs.read(&globals::SOME_HOST_IS_RUNNING_WINDOWS),
-            xfer_by_copying: *prefs.read(&xferhint::XFER_BY_COPYING),
-            faster_check_unsafe: *prefs.read(&fpcache::FASTER_CHECK_UNSAFE),
-            temp_names: temp_names.clone(),
-            fpcache: FpCache::init(fast_check, ignore_archives, &cache_file, fs.props),
-            hints: Vec::new(),
-        }
+        let ignore_archives = *host.prefs().borrow().read(&archive::IGNORE_ARCHIVES);
+        FpCache::init(fast_check, ignore_archives, &cache_file, scan_props(host))
     };
+    let mut scan = Scan::new(host, fspath, info, temp_names.clone(), fpcache)?;
     // Without a watcher, every path is scanned. Errors and ignored paths
     // are reported against the archive as loaded.
     let paths: Translated = {
@@ -1571,10 +1590,754 @@ pub fn filter_paths(
     acc
 }
 
+// ---- Changing the archive ----
+
+fn internal(what: &str) -> Error {
+    Error::Fatal(format!("Internal error: {what}"))
+}
+
+/// What [`update_path_in_archive`] does to the archive at a path, given
+/// the path as the archive spells it.
+pub type ArchiveAction<'a> = dyn FnMut(&mut Archive, &Path<Local>) -> Result<(), Error> + 'a;
+
+/// `updatePathInArchive`: runs `action` on the archive at `rest` (below
+/// `here`), creating the directories on the way. A directory made up on
+/// the way (with dummy props, where the archive had something else) goes
+/// away again if it ends up empty. If `action` fails, the archive is as it
+/// was.
+pub fn update_path_in_archive<S>(
+    archive: &mut Archive,
+    here: &Path<Local>,
+    rest: &Path<S>,
+    mode: Mode,
+    action: &mut ArchiveAction<'_>,
+) -> Result<(), Error> {
+    let Some((name, rest2)) = rest.deconstruct() else {
+        return action(archive, here);
+    };
+    match archive {
+        Archive::Dir(desc, children) => {
+            // The archive's spelling of the name.
+            let (name2, mut child) = match children.find_key_value(&name).map(|(k, _)| k.clone()) {
+                Some(k) => {
+                    let c = children.remove(&k).expect("just found");
+                    (k, c)
+                }
+                None => (name.clone(), Archive::NoArchive),
+            };
+            let r = update_path_in_archive(&mut child, &here.child(&name2), &rest2, mode, action);
+            if child != Archive::NoArchive {
+                children.add(name2, child);
+            } else if r.is_ok() && children.is_empty() && *desc == Props::dummy() {
+                // OCaml compares with Props.dummy physically: only the
+                // directories it made up have exactly these props.
+                *archive = Archive::NoArchive;
+            }
+            r
+        }
+        _ => {
+            let mut child = Archive::NoArchive;
+            update_path_in_archive(&mut child, &here.child(&name), &rest2, mode, action)?;
+            *archive = if child == Archive::NoArchive {
+                Archive::NoArchive
+            } else {
+                Archive::Dir(
+                    Props::dummy(),
+                    NameMap::from_bindings(mode, [(name, child)]),
+                )
+            };
+            Ok(())
+        }
+    }
+}
+
+/// `updateArchiveRec`: the archive after applying `ui` to `archive`.
+pub fn update_archive_rec(ui: &UpdateItem, archive: Archive, mode: Mode) -> Result<Archive, Error> {
+    let uc = match ui {
+        UpdateItem::NoUpdates => return Ok(archive),
+        UpdateItem::Error(_) => return Ok(Archive::NoArchive),
+        UpdateItem::Updates(uc, _) => uc,
+    };
+    Ok(match uc {
+        UpdateContent::Absent => Archive::NoArchive,
+        UpdateContent::File(desc, ContentsChange::Same) => match archive {
+            Archive::File(_, fp, stamp, ress) => Archive::File(desc.clone(), fp, stamp, ress),
+            _ => return Err(internal("unchanged contents without a file in the archive")),
+        },
+        UpdateContent::File(desc, ContentsChange::Updated(fp, stamp, ress)) => {
+            Archive::File(desc.clone(), fp.clone(), *stamp, ress.clone())
+        }
+        UpdateContent::Symlink(l) => Archive::Symlink(l.clone()),
+        UpdateContent::Dir(desc, children, _, _) => {
+            let mut ch = match archive {
+                Archive::Dir(_, ch) => ch,
+                _ => NameMap::new(mode),
+            };
+            // fold_right: the last child first.
+            for (nm, ui) in children.iter().rev() {
+                let child = ch.remove(nm).unwrap_or(Archive::NoArchive);
+                let child = update_archive_rec(ui, child, mode)?;
+                if child != Archive::NoArchive {
+                    ch.add(nm.clone(), child);
+                }
+            }
+            Archive::Dir(desc.clone(), ch)
+        }
+    })
+}
+
+/// `makeArchive`: the archive `ui` makes from nothing.
+pub fn make_archive(ui: &UpdateItem, mode: Mode) -> Result<Archive, Error> {
+    update_archive_rec(ui, Archive::NoArchive, mode)
+}
+
+/// `stripArchive`: the archive without ignored paths, and with only the
+/// props that are synchronised.
+pub fn strip_archive(
+    path: &Path<Local>,
+    archive: &Archive,
+    ignore: &Ignore,
+    c: &PropsConfig,
+) -> Archive {
+    if ignore.test(path) {
+        return Archive::NoArchive;
+    }
+    match archive {
+        Archive::Dir(desc, children) => {
+            let kept: Vec<_> = children
+                .iter()
+                .map(|(nm, a)| (nm.clone(), strip_archive(&path.child(nm), a, ignore, c)))
+                .filter(|(_, a)| *a != Archive::NoArchive)
+                .collect();
+            Archive::Dir(desc.strip(c), NameMap::from_bindings(children.mode(), kept))
+        }
+        Archive::File(desc, fp, stamp, ress) => {
+            Archive::File(desc.strip(c), fp.clone(), *stamp, ress.clone())
+        }
+        Archive::Symlink(_) | Archive::NoArchive => archive.clone(),
+    }
+}
+
+/// `updateArchive`: the root's archive at `path`, stripped, with `ui`
+/// applied.
+pub fn update_archive(
+    host: &Host,
+    fspath: &Fspath,
+    path: &Path<Local>,
+    ui: &UpdateItem,
+) -> Result<Archive, Error> {
+    let root = archive::this_roots_global_name(host, fspath)?;
+    let (mode, ignore) = {
+        let prefs = host.prefs().borrow();
+        let mode = case::mode(&prefs);
+        (mode, Ignore::new(&prefs, mode)?)
+    };
+    let c = scan_props(host);
+    let stripped = archive::with_archive(host, &root, |a| {
+        strip_archive(path, get_path_in_archive(a, path).1, &ignore, &c)
+    })
+    .unwrap_or(Archive::NoArchive);
+    update_archive_rec(ui, stripped, mode)
+}
+
+/// `stashCurrentVersion`: backs up the current version of a file (set by
+/// the stasher).
+pub type StashFn = Rc<dyn Fn(&Host, &Fspath, &Path<Local>) -> Result<(), Error>>;
+
+#[derive(Default)]
+struct Stasher(Option<StashFn>);
+
+/// `setStasherFun`.
+pub fn set_stasher_fun(host: &Host, f: StashFn) {
+    host.state::<Stasher>().borrow_mut().0 = Some(f);
+}
+
+/// `markEqualLocal`: records in the root's archive that the paths, changed
+/// in the same way on both roots, are now as `paths` says (backing up their
+/// current versions first). If a backup fails, the archive is unchanged.
+pub fn mark_equal_local(
+    host: &Host,
+    fspath: &Fspath,
+    paths: &Tree<Name, UpdateContent>,
+) -> Result<(), Error> {
+    let root = archive::this_roots_global_name(host, fspath)?;
+    let mode = case::mode(&host.prefs().borrow());
+    let entries = paths.flatten(Path::<Local>::empty(), &|p, n| p.child(n));
+    let stash = host.state::<Stasher>().borrow().0.clone();
+    if let Some(stash) = stash {
+        for (path, _) in &entries {
+            let local = archive::with_archive(host, &root, |a| get_path_in_archive(a, path).0)
+                .unwrap_or_else(|| path.clone());
+            stash(host, fspath, &local)?;
+        }
+    }
+    archive::with_archive_mut(host, &root, |archive| {
+        for (path, uc) in &entries {
+            let ui = UpdateItem::Updates((*uc).clone(), PrevState::New);
+            update_path_in_archive(archive, &Path::empty(), path, mode, &mut |a, _| {
+                *a = update_archive_rec(&ui, std::mem::replace(a, Archive::NoArchive), mode)?;
+                Ok(())
+            })?;
+        }
+        Ok(())
+    })
+}
+
+/// `markEqualOnRoot`.
+pub static MARK_EQUAL: RootCmd<Tree<Name, UpdateContent>, ()> = RootCmd::new(
+    "markEqual",
+    |t, w, f| {
+        let c = Codec::new(f);
+        t.marshal(w, &|w, n: &Name| n.marshal(w), &|w, uc: &UpdateContent| {
+            uc.marshal(w, &c)
+        });
+    },
+    |r, f| {
+        let c = Codec::new(f);
+        Tree::unmarshal(r, &Name::unmarshal, &|r| UpdateContent::unmarshal(r, &c))
+    },
+    |(), _, _| {},
+    |_, _| Ok(()),
+    |host, fspath, paths| Box::pin(async move { mark_equal_local(&host, &fspath, &paths) }),
+);
+
+/// `markEqual`: records on both roots that these paths changed in the same
+/// way (each node: the name and the contents on each root).
+pub async fn mark_equal(
+    rpc: &Rpc,
+    roots: &Roots,
+    equals: &Tree<(Name, Name), (UpdateContent, UpdateContent)>,
+) -> Result<(), Error> {
+    if equals.is_empty() {
+        return Ok(());
+    }
+    let sides = vec![
+        equals.map(&|(n, _)| n.clone(), &|(u, _)| u.clone()),
+        equals.map(&|(_, n)| n.clone(), &|(_, u)| u.clone()),
+    ];
+    roots
+        .iter2(
+            |r, t| async move { rpc.call_root(&MARK_EQUAL, r, t).await },
+            sides,
+        )
+        .await
+}
+
+/// `replaceArchiveLocal`: puts `new` at `path` in the root's archive.
+pub fn replace_archive_local<S>(
+    host: &Host,
+    fspath: &Fspath,
+    path: &Path<S>,
+    new: Archive,
+) -> Result<(), Error> {
+    let root = archive::this_roots_global_name(host, fspath)?;
+    let mode = case::mode(&host.prefs().borrow());
+    let mut new = Some(new);
+    archive::with_archive_mut(host, &root, |archive| {
+        update_path_in_archive(archive, &Path::empty(), path, mode, &mut |a, _| {
+            *a = new.take().expect("one path");
+            Ok(())
+        })
+    })
+}
+
+/// `replaceArchiveOnRoot`. The archive is decoded in the order it was sent
+/// and sorted under the host's case mode (codecs have no mode).
+pub static REPLACE_ARCHIVE: RootCmd<(Path<Global>, Archive), ()> = RootCmd::new(
+    "replaceArchive",
+    |(p, a), w, f| {
+        p.marshal(w);
+        a.marshal(w, &Codec::new(f).props);
+    },
+    |r, f| {
+        Ok((
+            Path::unmarshal(r)?,
+            Archive::unmarshal(r, &Codec::new(f).props, Mode::Sensitive)?,
+        ))
+    },
+    |(), _, _| {},
+    |_, _| Ok(()),
+    |host, fspath, (path, archive)| {
+        Box::pin(async move {
+            let mode = case::mode(&host.prefs().borrow());
+            replace_archive_local(&host, &fspath, &path, archive.with_mode(mode))
+        })
+    },
+);
+
+/// `replaceArchive`.
+pub async fn replace_archive(
+    rpc: &Rpc,
+    root: &gemel_rpc::root::Root,
+    path: Path<Global>,
+    archive: Archive,
+) -> Result<(), Error> {
+    rpc.call_root(&REPLACE_ARCHIVE, root, (path, archive)).await
+}
+
+/// `doUpdateProps`: brings `archive` up to the state `ui` saw on disk,
+/// with the props propagated from the other replica (`props`), if any. On
+/// an (internal) error, the archive is unchanged.
+pub fn do_update_props(
+    archive: &mut Archive,
+    props: Option<&Props>,
+    ui: &UpdateItem,
+    mode: Mode,
+    c: &PropsConfig,
+) -> Result<(), Error> {
+    let shape_ok = match ui {
+        UpdateItem::Updates(UpdateContent::File(_, ContentsChange::Same), _) => {
+            matches!(archive, Archive::File(..))
+        }
+        UpdateItem::Updates(UpdateContent::File(..) | UpdateContent::Dir(..), _) => true,
+        UpdateItem::NoUpdates => {
+            props.is_none() || matches!(archive, Archive::File(..) | Archive::Dir(..))
+        }
+        UpdateItem::Updates(..) | UpdateItem::Error(_) => false,
+    };
+    if !shape_ok {
+        return Err(internal("doUpdateProps on an update it can't apply"));
+    }
+    match ui {
+        UpdateItem::Updates(UpdateContent::File(desc, ContentsChange::Same), _) => {
+            if let Archive::File(d, ..) = archive {
+                *d = desc.clone();
+            }
+        }
+        UpdateItem::Updates(
+            UpdateContent::File(desc, ContentsChange::Updated(fp, stamp, ress)),
+            _,
+        ) => {
+            *archive = Archive::File(desc.clone(), fp.clone(), *stamp, ress.clone());
+        }
+        UpdateItem::Updates(UpdateContent::Dir(desc, ..), _) => match archive {
+            Archive::Dir(d, _) => *d = desc.clone(),
+            _ => *archive = Archive::Dir(desc.clone(), NameMap::new(mode)),
+        },
+        _ => {}
+    }
+    if let Some(p) = props
+        && let Archive::File(d, ..) | Archive::Dir(d, _) = archive
+    {
+        *d = d.override_with(p, c);
+    }
+    Ok(())
+}
+
+/// `updateProps`: records in the root's archive the props at `path` after
+/// propagation.
+pub fn update_props(
+    host: &Host,
+    fspath: &Fspath,
+    path: &Path<Local>,
+    props: Option<&Props>,
+    ui: &UpdateItem,
+) -> Result<(), Error> {
+    let root = archive::this_roots_global_name(host, fspath)?;
+    let mode = case::mode(&host.prefs().borrow());
+    let c = scan_props(host);
+    archive::with_archive_mut(host, &root, |archive| {
+        update_path_in_archive(archive, &Path::empty(), path, mode, &mut |a, _| {
+            do_update_props(a, props, ui, mode, &c)
+        })
+    })
+}
+
+// ---- Checking that nothing changed ----
+
+/// `fastCheckMiss`: whether fast checking could have missed this change
+/// (same time and length).
+fn fast_check_miss(
+    use_fast_check: bool,
+    path: &Path<Local>,
+    desc: &Props,
+    ress: &gemel_fs::osx::RessStamp,
+    old_desc: &Props,
+    old_ress: &gemel_fs::osx::RessStamp,
+    c: &PropsConfig,
+) -> bool {
+    use_fast_check
+        && desc.same_time(old_desc, c)
+        && desc.length() == old_desc.length()
+        && !fpcache::excel_file(path)
+        && osx::ress_unchanged(old_ress, ress, None, true)
+}
+
+fn do_mark_possibly_updated(archive: &mut Archive) {
+    match archive {
+        Archive::File(_, _, stamp, _) => *stamp = Stamp::Rescan,
+        Archive::Dir(desc, _) => *desc = desc.set_dir_change_flag(props::CHANGED_DIR_STAMP, 0).0,
+        // Shouldn't happen.
+        Archive::Symlink(_) | Archive::NoArchive => {}
+    }
+}
+
+/// `markPossiblyUpdated`: makes the next scan read `path` again.
+pub fn mark_possibly_updated(
+    host: &Host,
+    fspath: &Fspath,
+    path: &Path<Local>,
+) -> Result<(), Error> {
+    let root = archive::this_roots_global_name(host, fspath)?;
+    let mode = case::mode(&host.prefs().borrow());
+    archive::with_archive_mut(host, &root, |archive| {
+        update_path_in_archive(archive, &Path::empty(), path, mode, &mut |a, _| {
+            do_mark_possibly_updated(a);
+            Ok(())
+        })
+    })
+}
+
+fn mark_possibly_updated_rec(
+    host: &Host,
+    fspath: &Fspath,
+    path: &Path<Local>,
+    ui: &UpdateItem,
+    use_fast_check: bool,
+    c: &PropsConfig,
+) -> Result<(), Error> {
+    match ui {
+        UpdateItem::Updates(
+            UpdateContent::File(desc, ContentsChange::Updated(_, _, ress)),
+            PrevState::File(old_desc, _, _, old_ress),
+        ) => {
+            if fast_check_miss(use_fast_check, path, desc, ress, old_desc, old_ress, c) {
+                mark_possibly_updated(host, fspath, path)?;
+            }
+            Ok(())
+        }
+        UpdateItem::Updates(UpdateContent::Dir(_, children, _, _), _) => {
+            for (nm, ui) in children {
+                mark_possibly_updated_rec(host, fspath, &path.child(nm), ui, use_fast_check, c)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn report_update(warn_fast_check: bool, explanation: String) -> Result<(), Error> {
+    let mut msg = format!("Destination updated during synchronization\n{explanation}");
+    if warn_fast_check {
+        msg.push_str(
+            "  (if this happens repeatedly on a file that has not been changed, \n  \
+             try running once with 'fastcheck' set to false)",
+        );
+    }
+    Err(Error::Transient(msg))
+}
+
+/// `explainUpdate`: fails with what changed, if anything did.
+fn explain_update(
+    path: &Path<Local>,
+    ui: &UpdateItem,
+    use_fast_check: bool,
+    c: &PropsConfig,
+) -> Result<(), Error> {
+    let p = String::from_utf8_lossy(path.as_bytes()).into_owned();
+    match ui {
+        UpdateItem::NoUpdates => Ok(()),
+        UpdateItem::Error(err) => Err(Error::Transient(format!(
+            "Could not check destination:\n{err}"
+        ))),
+        UpdateItem::Updates(uc, prev) => match (uc, prev) {
+            (UpdateContent::Absent, _) => {
+                report_update(false, format!("The file {p} has been deleted\n"))
+            }
+            (UpdateContent::File(_, ContentsChange::Same), _) => report_update(
+                false,
+                format!("The properties of file {p} have been modified\n"),
+            ),
+            (
+                UpdateContent::File(desc, ContentsChange::Updated(_, _, ress)),
+                PrevState::File(old_desc, old_fp, _, old_ress),
+            ) => {
+                if old_fp.is_pseudo() {
+                    Ok(())
+                } else {
+                    report_update(
+                        fast_check_miss(use_fast_check, path, desc, ress, old_desc, old_ress, c),
+                        format!("The contents of file {p} have been modified\n"),
+                    )
+                }
+            }
+            (UpdateContent::File(_, ContentsChange::Updated(..)), _) => {
+                report_update(false, format!("The file {p} has been created\n"))
+            }
+            (UpdateContent::Symlink(_), PrevState::Symlink) => {
+                report_update(false, format!("The symlink {p} has been modified\n"))
+            }
+            (UpdateContent::Symlink(_), _) => {
+                report_update(false, format!("The symlink {p} has been created\n"))
+            }
+            (UpdateContent::Dir(_, _, PermChange::Updated, _), PrevState::Dir(_)) => report_update(
+                false,
+                format!("The properties of directory {p} have been modified\n"),
+            ),
+            (UpdateContent::Dir(_, _, PermChange::Updated, _), _) => {
+                report_update(false, format!("The directory {p} has been created\n"))
+            }
+            (UpdateContent::Dir(_, children, PermChange::Same, _), _) => {
+                for (nm, ui) in children {
+                    explain_update(&path.child(nm), ui, use_fast_check, c)?;
+                }
+                Ok(())
+            }
+        },
+    }
+}
+
+/// `checkNoUpdates`: checks that the replica at `path_in_archive` is as the
+/// root's archive with `ui` applied says (before something is written
+/// there), and returns that archive. A file whose change fast checking may
+/// have missed is marked to be read again by the next scan; then the
+/// change is reported as a transient error.
+pub async fn check_no_updates(
+    host: &Host,
+    fspath: &Fspath,
+    path_in_archive: &Path<Local>,
+    ui: &UpdateItem,
+    fast_check: bool,
+) -> Result<Archive, Error> {
+    let root = archive::this_roots_global_name(host, fspath)?;
+    let mode = case::mode(&host.prefs().borrow());
+    let (local_path, sub) = archive::with_archive(host, &root, |a| {
+        let (p, s) = get_path_in_archive(a, path_in_archive);
+        (p, s.clone())
+    })
+    .unwrap_or_else(|| (path_in_archive.clone(), Archive::NoArchive));
+    // What we believe is on disk...
+    let expected = update_archive_rec(ui, sub, mode)?;
+    // ...checked against what is there.
+    let info = ScanInfo {
+        fast_check,
+        dir_fast_check: false,
+        dir_stamp: props::CHANGED_DIR_STAMP,
+        rescan_props: true,
+    };
+    let c = scan_props(host);
+    let temp_names = host.state::<TempNames>().borrow().clone();
+    let mut scan = Scan::new(host, fspath, info, temp_names, FpCache::disabled(c))?;
+    let mut copy = expected.clone();
+    let (scan, ui_new) = runtime::blocking(move || {
+        let r = scan.build_update_rec(&mut copy, &local_path);
+        (scan, r)
+    })
+    .await;
+    for h in scan.hints {
+        xferhint::insert_entry(host, h);
+    }
+    let (_, ui_new) = ui_new?;
+    let use_fast = use_fast_checking(&host.prefs().borrow());
+    mark_possibly_updated_rec(host, fspath, path_in_archive, &ui_new, use_fast, &c)?;
+    explain_update(path_in_archive, &ui_new, use_fast, &c)?;
+    Ok(expected)
+}
+
+// ---- Sizes ----
+
+fn file_size(desc: &Props, ress: &gemel_fs::osx::RessStamp) -> (usize, props::Filesize) {
+    (1, desc.length().wrapping_add(osx::ress_length(ress)))
+}
+
+fn size_add(a: (usize, props::Filesize), b: (usize, props::Filesize)) -> (usize, props::Filesize) {
+    (a.0 + b.0, a.1.wrapping_add(b.1))
+}
+
+/// `archiveSize`: the number of items and bytes in an archive.
+pub fn archive_size(archive: &Archive) -> (usize, props::Filesize) {
+    match archive {
+        Archive::NoArchive => (0, 0),
+        Archive::Dir(_, children) => children
+            .iter()
+            .fold((1, 0), |size, (_, a)| size_add(size, archive_size(a))),
+        Archive::File(desc, _, _, ress) => file_size(desc, ress),
+        Archive::Symlink(_) => (1, 0),
+    }
+}
+
+/// `updateSizeRec`: the number of items and bytes after `ui`.
+pub fn update_size_rec(
+    archive: &Archive,
+    ui: &UpdateItem,
+) -> Result<(usize, props::Filesize), Error> {
+    let uc = match ui {
+        UpdateItem::NoUpdates => return Ok(archive_size(archive)),
+        UpdateItem::Error(_) => return Ok((0, 0)),
+        UpdateItem::Updates(uc, _) => uc,
+    };
+    Ok(match uc {
+        UpdateContent::Absent => (0, 0),
+        UpdateContent::File(desc, ContentsChange::Same) => match archive {
+            Archive::File(_, _, _, ress) => file_size(desc, ress),
+            _ => return Err(internal("unchanged contents without a file in the archive")),
+        },
+        UpdateContent::File(desc, ContentsChange::Updated(_, _, ress)) => file_size(desc, ress),
+        UpdateContent::Symlink(_) => (1, 0),
+        UpdateContent::Dir(_, children, _, _) => match archive {
+            Archive::Dir(_, arc_ch) => {
+                let mut size = (1, 0);
+                for (nm, a) in arc_ch.iter() {
+                    if !children.iter().any(|(n, _)| n.eq_in(nm, arc_ch.mode())) {
+                        size = size_add(size, archive_size(a));
+                    }
+                }
+                for (nm, ui) in children {
+                    let a = arc_ch.find(nm).unwrap_or(&NO_ARCHIVE);
+                    size = size_add(size, update_size_rec(a, ui)?);
+                }
+                size
+            }
+            _ => children.iter().try_fold((1, 0), |size, (_, ui)| {
+                Ok::<_, Error>(size_add(size, update_size_rec(&NO_ARCHIVE, ui)?))
+            })?,
+        },
+    })
+}
+
+/// `getSubArchiveLocal`: the archive at `path` of the local root.
+pub fn get_sub_archive_local(
+    rpc: &Rpc,
+    roots: &Roots,
+    path: &Path<Global>,
+) -> Result<Archive, Error> {
+    let local = roots
+        .local_root()
+        .ok_or_else(|| internal("no roots are installed"))?;
+    let host = rpc.local_host();
+    let root = archive::this_roots_global_name(host, &local.fspath)?;
+    Ok(
+        archive::with_archive(host, &root, |a| get_path_in_archive(a, path).1.clone())
+            .unwrap_or(Archive::NoArchive),
+    )
+}
+
+/// `updateSize`: the number of items and bytes at `path` after `ui`, by
+/// the local root's archive.
+pub fn update_size(
+    rpc: &Rpc,
+    roots: &Roots,
+    path: &Path<Global>,
+    ui: &UpdateItem,
+) -> Result<(usize, props::Filesize), Error> {
+    update_size_rec(&get_sub_archive_local(rpc, roots, path)?, ui)
+}
+
+/// `iterFiles`: runs `f` on each file in an archive.
+pub fn iter_files(
+    fspath: &Fspath,
+    path: &Path<Local>,
+    archive: &Archive,
+    f: &mut dyn FnMut(&Fspath, &Path<Local>, &FullFingerprint),
+) {
+    match archive {
+        Archive::Dir(_, children) => {
+            for (nm, a) in children.iter() {
+                iter_files(fspath, &path.child(nm), a, f);
+            }
+        }
+        Archive::File(_, fp, _, _) => f(fspath, path, fp),
+        _ => {}
+    }
+}
+
+// ---- Committing ----
+
+/// `prepareCommitLocal`: writes the root's archive (with the magic) to the
+/// scratch archive, and returns its hash.
+pub fn prepare_commit_local(
+    host: &Host,
+    fspath: &Fspath,
+    magic: &[u8],
+) -> Result<Option<i64>, Error> {
+    let (name, root) = archive::archive_name(host, fspath, ArchiveVersion::ScratchArch)?;
+    let file = host.file_in_unison_dir(&name);
+    let mode = case::mode(&host.prefs().borrow());
+    let c = gemel_fs::props::PropsConfig::default().with_features(&host.features().borrow());
+    let mut props =
+        archive::archive_props(host, &root).unwrap_or_else(|| ArchiveProps::empty(mode));
+    archive::with_archive(host, &root, |a| {
+        let hash = archive::check_archive(a, mode, &c)?;
+        purge_props_for_paths(a, &mut props);
+        archive::extern_archive_propsdata(host, a, &mut props.props);
+        archive::store_archive_ref(
+            host,
+            &file,
+            &root,
+            archive::ArchiveRef {
+                archive: a,
+                hash,
+                magic,
+                props: &props,
+            },
+        )?;
+        Ok(Some(hash))
+    })
+    .unwrap_or_else(|| Err(internal(&format!("no archive loaded for {root}"))))
+}
+
+/// `prepareCommitOnRoot`.
+pub static PREPARE_COMMIT: RootCmd<Vec<u8>, Option<i64>> = RootCmd::new(
+    "prepareCommit",
+    |m, w, _| w.string(m),
+    |r, _| r.string(),
+    |h, w, _| w.option(h.as_ref(), |w, h| w.int(*h)),
+    |r, _| r.option(Reader::int),
+    |host, fspath, magic| Box::pin(async move { prepare_commit_local(&host, &fspath, &magic) }),
+);
+
+/// `commitUpdates`: writes both roots' archives, with a joint commit (see
+/// [`archive::do_archive_crash_recovery`]): each host writes a scratch
+/// archive, and only if they have the same hash are they made the new and
+/// then the main archives. All under the archive locks.
+pub async fn commit_updates(rpc: &Rpc, roots: &Roots) -> Result<(), Error> {
+    archive::lock_archives(rpc, roots).await?;
+    let r = async {
+        let mode = case::mode(&rpc.client_host().prefs().borrow());
+        let magic = format!(
+            "{}\0{:.0}.{}",
+            mode.desc(),
+            gemel_fs::system::gettimeofday(),
+            std::process::id()
+        )
+        .into_bytes();
+        let checksums = roots
+            .map(|r| rpc.call_root(&PREPARE_COMMIT, r, magic.clone()))
+            .await?;
+        if archive::archives_identical(&checksums) {
+            roots
+                .iter(|r| rpc.call_root(&archive::COMMIT_ARCHIVE, r, ()))
+                .await?;
+            roots
+                .iter(|r| rpc.call_root(&archive::POST_COMMIT_ARCHIVE, r, ()))
+                .await?;
+            roots
+                .iter(|r| rpc.call_root(&archive::REMOVE_ARCHIVE, r, ArchiveVersion::NewArch))
+                .await
+        } else {
+            // OCaml also dumps the archives here (`dumpArchive`, not
+            // ported yet).
+            archive::unlock_archives(rpc, roots).await?;
+            Err(Error::Fatal(
+                "Internal error: New archives are not identical.\nRetaining original \
+                 archives.  Please run Unison again to bring them up to date.\n"
+                    .into(),
+            ))
+        }
+    }
+    .await;
+    // Remote.Thread.unwindProtect, then the unlock after.
+    archive::unlock_archives(rpc, roots).await?;
+    r
+}
+
 /// Registers this module's commands.
 pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
     let r = rpc.registry_mut();
     r.register_root(&TRANSLATE_PATH)?;
     r.register_root(&FIND)?;
-    r.register_root(&PROPS_DATA)
+    r.register_root(&PROPS_DATA)?;
+    r.register_root(&MARK_EQUAL)?;
+    r.register_root(&REPLACE_ARCHIVE)?;
+    r.register_root(&PREPARE_COMMIT)
 }

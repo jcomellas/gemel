@@ -164,6 +164,17 @@ The `Props`, `Fileinfo`, `Osx` and fingerprint types, with their Umarshal codecs
   - A new test has OCaml Unison sync a tree twice, then checks that gemel finds no updates in its archives, directly and through the loopback, and finds the changes made after. CI's oracle job runs it.
 - **4c, commits:** `prepareCommit` and `commit`, `markEqual`, and the update of archive props after propagation.
 
+  **Notes (phase 4c, 2026-10-20):**
+  - The rest of `update.ml` is in `update`:
+    - `prepareCommit`, `commitUpdates`, and the props-data prune;
+    - `updatePathInArchive`, `updateArchive`, `markEqual`, `replaceArchive` and `updateProps`;
+    - `checkNoUpdates`, `markPossiblyUpdated`, the size functions, and `iterFiles`.
+  - A commit stores the cached archive by reference rather than copying it.
+  - `replaceArchive` decodes its archive in the order sent and sorts it under the host's case mode, since codecs have no mode. Sorting out-of-order maps is now O(n log n), and later bindings still win.
+  - The stasher's hook for `markEqual` is a host slot (`set_stasher_fun`). All of a mark's backups are made before the archive changes, so a failed backup leaves the archive as it was.
+  - Not ported: `inspectFilesystem`, which OCaml registers but never calls. `dumparchives` is still to come; meanwhile a hash mismatch at commit is reported without the dump.
+  - Done criterion met: OCaml Unison (2.54.0 on macOS, 8772d26 on Linux) runs on archives gemel committed and accepts them. It has nothing to do, with fast checking and also with `-fastcheck false` (which checks every fingerprint). The checkArchive hash it stores when it commits again is gemel's, and it syncs on from there. CI's oracle job runs this test.
+
 ### Phase 5: reconciliation (~1k)
 
 - **`recon`:** directions, conflicts, and `prefer`, `force`, `preferpartial` and `forcepartial`.

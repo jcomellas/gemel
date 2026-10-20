@@ -16,9 +16,9 @@ harness (`tools/oracle`), `gemel-fs` (file metadata, `stat`, directory
 operations, fingerprints), the local half of `gemel-rpc` (roots, the
 command registry, the engine thread), the engine's foundations (update
 items, ignore and other path predicates, roots and feature negotiation,
-locks, the fingerprint cache), archives (loading, storing, locking and
-crash recovery, byte-compatible with OCaml's) and update detection are
-done. Commits, reconciliation, propagation, remote connections and the
+locks, the fingerprint cache), archives (loading, storing, locking, crash
+recovery and commits, byte-compatible with OCaml's) and update detection
+are done. Reconciliation, propagation, remote connections and the
 frontends are still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).

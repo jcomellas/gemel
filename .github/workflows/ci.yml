@@ -44,7 +44,8 @@ jobs:
       - run: make -C unison-src tui
       - run: cargo run --locked -p gemel-oracle -- --reference unison-src/src/unison --count 20
       # gemel reads replicas as this OCaml Unison does (gemel-engine/tests/reading.rs),
-      # and finds no updates in the archives it writes (tests/update.rs).
-      - run: cargo test --locked -p gemel-engine --test reading --test update
+      # finds no updates in the archives it writes (tests/update.rs), and accepts
+      # the archives gemel commits (tests/commit.rs).
+      - run: cargo test --locked -p gemel-engine --test reading --test update --test commit
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison

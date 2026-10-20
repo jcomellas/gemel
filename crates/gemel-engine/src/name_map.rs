@@ -91,21 +91,34 @@ impl<K: ModeKey, V> ModeMap<K, V> {
     /// one: a later binding for an equal key replaces the earlier one, key
     /// and value.
     pub fn from_bindings(mode: Mode, bindings: impl IntoIterator<Item = (K, V)>) -> Self {
-        let mut map: ModeMap<K, V> = ModeMap::new(mode);
-        for (k, v) in bindings {
-            // Archives are written in ascending order, so this is the
-            // usual case.
-            let ascending = map
-                .entries
-                .last()
-                .is_none_or(|(last, _)| last.compare_in(&k, mode) == Ordering::Less);
-            if ascending {
-                map.entries.push((k, v));
-            } else {
-                map.add(k, v);
+        let mut entries: Vec<(K, V)> = bindings.into_iter().collect();
+        // Archives are written in ascending order, so this is the usual
+        // case.
+        let ascending = entries
+            .windows(2)
+            .all(|w| w[0].0.compare_in(&w[1].0, mode) == Ordering::Less);
+        if !ascending {
+            // Stable, so the last of equal keys is the latest; keep it.
+            entries.sort_by(|a, b| a.0.compare_in(&b.0, mode));
+            let mut kept: Vec<(K, V)> = Vec::with_capacity(entries.len());
+            for e in entries {
+                match kept.last_mut() {
+                    Some(last) if last.0.compare_in(&e.0, mode) == Ordering::Equal => *last = e,
+                    _ => kept.push(e),
+                }
             }
+            entries = kept;
         }
-        map
+        ModeMap { mode, entries }
+    }
+
+    /// The same bindings ordered by `mode` (as [`ModeMap::from_bindings`]).
+    pub fn with_mode(self, mode: Mode) -> Self {
+        if mode == self.mode {
+            self
+        } else {
+            ModeMap::from_bindings(mode, self.entries)
+        }
     }
 
     /// The mode the keys are ordered by.
