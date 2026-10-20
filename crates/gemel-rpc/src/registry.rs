@@ -263,8 +263,18 @@ pub struct Rpc {
 }
 
 impl Rpc {
-    /// An RPC with no commands registered.
+    /// An RPC with no commands registered. In loopback mode the server
+    /// host's warnings are shown on the client, as a server sends them
+    /// (`showWarningOnClient`).
     pub fn new(dispatch: Dispatch) -> Rpc {
+        if let Dispatch::Loopback { client, server } = &dispatch {
+            let client = Rc::downgrade(client);
+            server.set_warn_printer(Some(Rc::new(move |s| {
+                if let Some(c) = client.upgrade() {
+                    c.warn(s);
+                }
+            })));
+        }
         Rpc {
             registry: Registry::new(),
             dispatch,

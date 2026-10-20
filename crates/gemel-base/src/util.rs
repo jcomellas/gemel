@@ -99,6 +99,25 @@ pub fn split_at_string<'a>(s: &'a str, sep: &str, reverse: bool) -> (&'a str, Op
     }
 }
 
+/// `Util.splitIntoWordsByString`: the parts between occurrences of `sep`
+/// (empty parts included).
+pub fn split_into_words_by_string<'a>(s: &'a str, sep: &str) -> Vec<&'a str> {
+    let mut words = Vec::new();
+    let mut rest = s;
+    loop {
+        match split_at_string(rest, sep, false) {
+            (before, Some(after)) => {
+                words.push(before);
+                rest = after;
+            }
+            (last, None) => {
+                words.push(last);
+                return words;
+            }
+        }
+    }
+}
+
 /// `Util.splitIntoWords`: splits at runs of `c`, with `\\` escaping the
 /// next character (a final lone `\\` is dropped).
 pub fn split_into_words(s: &str, c: char) -> Vec<String> {
@@ -187,6 +206,11 @@ mod tests {
             (" a", Some("b -> c "))
         );
         assert_eq!(split_at_string("a", " -> ", true), ("a", None));
+        assert_eq!(
+            split_into_words_by_string("a -> b ->  -> c", " -> "),
+            ["a", "b", "", "c"]
+        );
+        assert_eq!(split_into_words_by_string("", " -> "), [""]);
         assert_eq!(
             split_into_words("  include  my\\ file ", ' '),
             ["include", "my file"]

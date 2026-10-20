@@ -154,21 +154,44 @@ impl Proplist {
 
     /// `Proplist.m`: unmarshals a list. Every name must be registered.
     pub fn unmarshal(r: &mut Reader<'_>, registry: &Registry) -> Result<Proplist, Error> {
-        let corrupt = |e: umarshal::Error| Error::Fatal(format!("Property lists: {e}"));
-        let n = r.int().map_err(corrupt)?;
+        Proplist::read(r, registry).map_err(|e| match e {
+            ReadError::Umarshal(e) => Error::Fatal(format!("Property lists: {e}")),
+            ReadError::Fatal(e) => e,
+        })
+    }
+
+    /// Like [`Proplist::unmarshal`], but keeps decoding errors apart from
+    /// unregistered names (which OCaml raises as `Util.Fatal`).
+    pub fn read(r: &mut Reader<'_>, registry: &Registry) -> Result<Proplist, ReadError> {
+        let n = r.int()?;
         let mut list = Proplist::new();
         for _ in 0..n {
-            let name = r.string().map_err(corrupt)?;
+            let name = r.string()?;
             let name = String::from_utf8_lossy(&name).into_owned();
             let Some((read, write)) = registry.keys.get(name.as_str()) else {
-                return Err(Error::Fatal(format!(
+                return Err(ReadError::Fatal(Error::Fatal(format!(
                     "Property lists: {name} not yet registered!"
-                )));
+                ))));
             };
-            let value = read(r).map_err(corrupt)?;
+            let value = read(r)?;
             list.entries.insert(name, (value, write.clone()));
         }
         Ok(list)
+    }
+}
+
+/// Why [`Proplist::read`] failed.
+#[derive(Debug)]
+pub enum ReadError {
+    /// The encoding is invalid (`Umarshal.Error`, or `End_of_file`).
+    Umarshal(umarshal::Error),
+    /// A name isn't registered.
+    Fatal(Error),
+}
+
+impl From<umarshal::Error> for ReadError {
+    fn from(e: umarshal::Error) -> Self {
+        ReadError::Umarshal(e)
     }
 }
 

@@ -8,9 +8,10 @@
 //! depending on whether either replica's filesystem is case-insensitive.
 //! Both hosts must use the same [`Mode`]: it decides which names are the
 //! same file, the order of names in archives, and the hashes in
-//! `checkArchive`. The mode is derived from preferences at startup
-//! ([`Settings::init`]); the resulting [`Settings`] travel to the server with
-//! the other preferences.
+//! `checkArchive`. The client derives it from preferences at startup
+//! ([`init`]) and records it in pseudo-preferences, which travel to the
+//! server with the other preferences. Each host reads its mode from its own
+//! preferences ([`mode`]).
 //!
 //! Invariant (from case.ml): if `compare(s, s2)` is equal, then
 //! `hash(s) == hash(s2)`, and `normalize_matched_string` gives strings that
@@ -21,30 +22,104 @@ use std::cmp::Ordering;
 
 use gemel_compat::{ocaml_hash, unicode};
 
-use crate::prefs::BoolWithDefault;
-use crate::util::{lowercase_latin1, nocase_cmp};
+use crate::prefs::{BoolWithDefault, Category, Internal, PrefDef, Prefs, Topic};
+use crate::util::{Error, lowercase_latin1, nocase_cmp};
 
-/// Name of the `ignorecase` preference: treat names differing only in case
-/// as the same file (`true`/`false`/`default`). With `default`, names are
-/// case-insensitive if either host is.
-pub const PREF_IGNORE_CASE: &str = "ignorecase";
+/// `ignorecase`: treat names differing only in case as the same file.
+/// With `default`, names are case-insensitive if either host is.
+pub static IGNORE_CASE: PrefDef<BoolWithDefault> = PrefDef::new(
+    "ignorecase",
+    Category::Advanced(Topic::Sync),
+    BoolWithDefault::default,
+    "identify upper/lowercase filenames (true/false/default)",
+    "When set to {\\tt true}, this flag causes Unison to treat \
+     filenames as case insensitive---i.e., files in the two \
+     replicas whose names differ in (upper- and lower-case) `spelling' \
+     are treated as the same file.  When the flag is set to {\\tt false}, Unison \
+     will treat all filenames as case sensitive.  Ordinarily, when the flag is \
+     set to {\\tt default}, \
+     filenames are automatically taken to be case-insensitive if \
+     either host is running Windows or OSX.  In rare circumstances it may be  \
+     useful to set the flag manually.",
+);
 
-/// Name of the `unicode` preference: assume UTF-8 names in case-insensitive
-/// mode, and compare up to decomposition when a host runs macOS
-/// (`true`/`false`/`default`; `default` means `true`).
-pub const PREF_UNICODE: &str = "unicode";
+/// `someHostIsInsensitive`, behind [`Settings::some_host_is_insensitive`].
+pub static SOME_HOST_IS_INSENSITIVE: PrefDef<bool> = PrefDef::new(
+    "someHostIsInsensitive",
+    Category::Internal(Internal::Pseudo),
+    || false,
+    "*Pseudo-preference for internal use only",
+    "",
+);
 
-/// Name of the internal pseudo-preference behind
-/// [`Settings::some_host_is_insensitive`].
-pub const PREF_SOME_HOST_IS_INSENSITIVE: &str = "someHostIsInsensitive";
+/// `unicode`: assume UTF-8 names in case-insensitive mode, and compare up
+/// to decomposition when a host runs macOS (`default` means `true`).
+pub static UNICODE: PrefDef<BoolWithDefault> = PrefDef::new(
+    "unicode",
+    Category::Advanced(Topic::General),
+    BoolWithDefault::default,
+    "assume Unicode encoding in case insensitive mode",
+    "When set to {\\tt true}, this flag causes Unison to perform \
+     case insensitive file comparisons assuming Unicode encoding.  \
+     This is the default.  When the flag is set to {\\tt false}, \
+     Latin 1 encoding is assumed (this means that all bytes that are \
+     not letters in Latin 1 encoding will be compared byte-for-byte, \
+     even if they may be valid characters in some other encoding).  \
+     When Unison runs in case sensitive mode, this flag only makes \
+     a difference if one host is running Mac OS X.  \
+     Under Mac OS X, it selects whether comparing the filenames up to \
+     decomposition, or byte-for-byte.",
+);
 
-/// Name of the internal pseudo-preference behind
-/// [`Settings::unicode_encoding`].
-pub const PREF_UNICODE_ENCODING: &str = "unicodeEnc";
+/// `unicodeEnc`, behind [`Settings::unicode_encoding`].
+pub static UNICODE_ENCODING: PrefDef<bool> = PrefDef::new(
+    "unicodeEnc",
+    Category::Internal(Internal::Pseudo),
+    || false,
+    "*Pseudo-preference for internal use only",
+    "",
+);
 
-/// Name of the internal, host-local pseudo-preference behind
-/// [`Settings::unicode_case_sensitive`].
-pub const PREF_UNICODE_CASE_SENSITIVE: &str = "unicodeCS";
+/// `unicodeCS`, behind [`Settings::unicode_case_sensitive`]. Marked local, so
+/// servers that don't know it ignore it.
+pub static UNICODE_CASE_SENSITIVE: PrefDef<bool> = PrefDef::new(
+    "unicodeCS",
+    Category::Internal(Internal::Pseudo),
+    || false,
+    "*Pseudo-preference for internal use only",
+    "",
+)
+.local();
+
+/// Registers this module's preferences.
+pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
+    prefs.register(&IGNORE_CASE)?;
+    prefs.register(&SOME_HOST_IS_INSENSITIVE)?;
+    prefs.register(&UNICODE)?;
+    prefs.register(&UNICODE_ENCODING)?;
+    prefs.register(&UNICODE_CASE_SENSITIVE)
+}
+
+/// `Case.init`: sets the pseudo-preferences once the client knows whether
+/// any root is on a case-insensitive filesystem and whether any host runs
+/// macOS.
+pub fn init(prefs: &mut Prefs, some_host_is_case_insensitive: bool, some_host_running_osx: bool) {
+    Settings::init(
+        *prefs.read(&IGNORE_CASE),
+        *prefs.read(&UNICODE),
+        some_host_is_case_insensitive,
+        some_host_running_osx,
+    )
+    .store(prefs);
+}
+
+/// `Case.ops`: the mode in effect on this host.
+pub fn mode(prefs: &Prefs) -> Mode {
+    Settings::read(prefs).mode()
+}
+
+/// `Case.caseSensitiveModeDesc`.
+pub const CASE_SENSITIVE_MODE_DESC: &str = "case sensitive";
 
 /// How names are compared, hashed and normalised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,7 +139,7 @@ impl Mode {
     /// compares it on load to notice a change of mode, so it must not change.
     pub fn desc(self) -> &'static str {
         match self {
-            Mode::Sensitive => "case sensitive",
+            Mode::Sensitive => CASE_SENSITIVE_MODE_DESC,
             Mode::Insensitive => "Latin-1 case insensitive",
             Mode::UnicodeSensitive => "Unicode case sensitive",
             Mode::UnicodeInsensitive => "Unicode case insensitive",
@@ -140,7 +215,8 @@ pub struct Settings {
     pub some_host_is_insensitive: bool,
     /// `unicodeEnc`, sent to the server.
     pub unicode_encoding: bool,
-    /// `unicodeCS`, local to each host.
+    /// `unicodeCS`, sent to the server (but ignored by those that don't
+    /// know it).
     pub unicode_case_sensitive: bool,
 }
 
@@ -161,6 +237,22 @@ impl Settings {
             unicode_case_sensitive: use_unicode && some_host_running_osx,
             unicode_encoding: use_unicode,
         }
+    }
+
+    /// The settings in `prefs`.
+    pub fn read(prefs: &Prefs) -> Self {
+        Settings {
+            some_host_is_insensitive: *prefs.read(&SOME_HOST_IS_INSENSITIVE),
+            unicode_encoding: *prefs.read(&UNICODE_ENCODING),
+            unicode_case_sensitive: *prefs.read(&UNICODE_CASE_SENSITIVE),
+        }
+    }
+
+    /// Sets the pseudo-preferences in `prefs`.
+    pub fn store(self, prefs: &mut Prefs) {
+        prefs.set(&SOME_HOST_IS_INSENSITIVE, self.some_host_is_insensitive);
+        prefs.set(&UNICODE_ENCODING, self.unicode_encoding);
+        prefs.set(&UNICODE_CASE_SENSITIVE, self.unicode_case_sensitive);
     }
 
     /// `Case.ops`: the mode these settings select.
@@ -194,6 +286,28 @@ mod tests {
         assert_eq!(mode(Auto, False, false, true), Mode::Sensitive);
         assert_eq!(mode(True, True, false, false), Mode::UnicodeInsensitive);
         assert_eq!(mode(False, Auto, true, false), Mode::Sensitive);
+    }
+
+    #[test]
+    fn init_stores_the_mode_in_pseudo_preferences() {
+        let mut prefs = Prefs::new();
+        register_prefs(&mut prefs).unwrap();
+        assert_eq!(mode(&prefs), Mode::Sensitive);
+        init(&mut prefs, true, true);
+        assert_eq!(mode(&prefs), Mode::UnicodeInsensitive);
+        prefs.set(&UNICODE, False);
+        init(&mut prefs, true, false);
+        assert_eq!(mode(&prefs), Mode::Insensitive);
+        prefs.set(&IGNORE_CASE, False);
+        prefs.set(&UNICODE, Auto);
+        init(&mut prefs, true, true);
+        assert_eq!(mode(&prefs), Mode::UnicodeSensitive);
+        // All three travel to the server; unicodeCS as optional.
+        let dump = prefs.dump(1).unwrap();
+        for name in ["someHostIsInsensitive", "unicodeEnc", "unicodeCS"] {
+            let (_, optional, _) = dump.iter().find(|(n, _, _)| n == name).unwrap();
+            assert_eq!(*optional, name == "unicodeCS");
+        }
     }
 
     #[test]

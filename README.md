@@ -14,10 +14,12 @@ OCaml Unison:
 Milestone 2 is under way ([plan](docs/milestone-2-plan.md)): the oracle
 harness (`tools/oracle`), `gemel-fs` (file metadata, `stat`, directory
 operations, fingerprints), the local half of `gemel-rpc` (roots, the
-command registry, the engine thread) and the engine's foundations (update
+command registry, the engine thread), the engine's foundations (update
 items, ignore and other path predicates, roots and feature negotiation,
-locks, the fingerprint cache) are done. Update detection, reconciliation,
-propagation, remote connections and the frontends are still to come.
+locks, the fingerprint cache) and archives (loading, storing, locking and
+crash recovery, byte-compatible with OCaml's) are done. Update detection,
+reconciliation, propagation, remote connections and the frontends are
+still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 

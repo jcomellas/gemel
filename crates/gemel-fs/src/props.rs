@@ -1269,6 +1269,23 @@ fn acl_to_string(a: &Acl, c: &PropsConfig) -> String {
     }
 }
 
+// ---- Directory change stamps ----
+
+/// `Props.dirChangedStamp`: stored in a directory's length to mark it
+/// unchanged since the last scan.
+pub type DirChangedStamp = Filesize;
+
+/// `Props.changedDirStamp`: marks every directory as possibly changed.
+pub const CHANGED_DIR_STAMP: DirChangedStamp = 0;
+
+/// `Props.freshDirStamp`: a stamp no earlier run has used.
+pub fn fresh_dir_stamp() -> DirChangedStamp {
+    let t =
+        (system::gettimeofday() + std::f64::consts::SQRT_2 * f64::from(std::process::id())) * 1000.;
+    // Int64.of_float truncates.
+    t as DirChangedStamp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
