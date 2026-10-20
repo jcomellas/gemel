@@ -12,9 +12,10 @@ OCaml Unison:
   tracing and logging, and the Rx pattern engine.
 
 Milestone 2 is under way ([plan](docs/milestone-2-plan.md)): the oracle
-harness (`tools/oracle`) and `gemel-fs` (file metadata, `stat`, directory
-operations, fingerprints) are done. RPC, the engine and the frontends are
-skeletons.
+harness (`tools/oracle`), `gemel-fs` (file metadata, `stat`, directory
+operations, fingerprints) and the local half of `gemel-rpc` (roots, the
+command registry, the engine thread) are done. Remote connections, the
+engine and the frontends are skeletons.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 

@@ -20,6 +20,7 @@ gemel-engine = { path = "crates/gemel-engine" }
 gemel-ui-api = { path = "crates/gemel-ui-api" }
 md-5 = "0.11"
 libc = "0.2"
+tokio = { version = "1.54.0", default-features = false, features = ["rt", "sync"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
 
 [workspace.lints.rust]
@@ -31,4 +32,7 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 todo = "deny"
+# The engine runs on a single-threaded runtime with RefCell state; a borrow
+# held across an await can panic when another task on the thread borrows.
+await_holding_refcell_ref = "deny"
 unimplemented = "deny"

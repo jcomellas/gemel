@@ -179,6 +179,69 @@ let prefs_dump oc =
     ("unicode", false, dumper mbooldef `Default ["unicode"]) ] in
   Printf.fprintf oc "dump %s\n" (hex (Umarshal.to_string mdumpedPrefs dump))
 
+(* RPC framing pieces from src/remote.ml, repeated verbatim: intHash and
+   encodeInt (over bytes here instead of a Bytearray), and mheader. *)
+let intSize = 5
+
+let intHash x = ((x * 791538121) lsr 23 + 17) land 255
+
+let encodeInt m =
+  let int_buf = Bytes.create intSize in
+  Bytes.set int_buf 0 (Char.chr ( m         land 0xff));
+  Bytes.set int_buf 1 (Char.chr ((m lsr 8)  land 0xff));
+  Bytes.set int_buf 2 (Char.chr ((m lsr 16) land 0xff));
+  Bytes.set int_buf 3 (Char.chr ((m lsr 24) land 0xff));
+  Bytes.set int_buf 4 (Char.chr (intHash m));
+  Bytes.to_string int_buf
+
+type header =
+    NormalResult
+  | TransientExn of string
+  | FatalExn of string
+  | Request of string
+  | Stream of string
+  | StreamAbort
+
+let mheader = Umarshal.(sum6 unit string string string string unit
+                          (function
+                           | NormalResult -> I61 ()
+                           | TransientExn a -> I62 a
+                           | FatalExn a -> I63 a
+                           | Request a -> I64 a
+                           | Stream a -> I65 a
+                           | StreamAbort -> I66 ())
+                          (function
+                           | I61 () -> NormalResult
+                           | I62 a -> TransientExn a
+                           | I63 a -> FatalExn a
+                           | I64 a -> Request a
+                           | I65 a -> Stream a
+                           | I66 () -> StreamAbort))
+
+(* canonizeOnServer's argument and result codecs. *)
+let mcanonizeArgs = Umarshal.(prod2 (option string) bool id id)
+let mcanonizeRes = Umarshal.(prod2 string string id id)
+
+let rpc oc =
+  header oc "RPC";
+  List.iter (fun n -> Printf.fprintf oc "int %d %s\n" n (hex (encodeInt n)))
+    [ 0; 1; 5; 255; 256; 65535; 65536; 1 lsl 24; (1 lsl 31) - 1; 1 lsl 31;
+      (1 lsl 32) - 1; 123456789 ];
+  let h name v =
+    Printf.fprintf oc "header_%s %s\n" name (hex (Umarshal.to_string mheader v)) in
+  h "normal" NormalResult;
+  h "transient" (TransientExn "oops");
+  h "fatal" (FatalExn "bad");
+  h "request" (Request "canonizeOnServer");
+  h "stream" (Stream "x");
+  h "abort" StreamAbort;
+  Printf.fprintf oc "canonize_args_some %s\n"
+    (hex (Umarshal.to_string mcanonizeArgs (Some "/tmp/x", true)));
+  Printf.fprintf oc "canonize_args_none %s\n"
+    (hex (Umarshal.to_string mcanonizeArgs (None, true)));
+  Printf.fprintf oc "canonize_res %s\n"
+    (hex (Umarshal.to_string mcanonizeRes ("host", "/a/b")))
+
 let () =
   let dir = Sys.argv.(1) in
   let with_file name f =
@@ -188,4 +251,5 @@ let () =
   in
   with_file "umarshal.txt" umarshal;
   with_file "ocaml_hash.txt" ocaml_hash;
-  with_file "prefs_dump.txt" prefs_dump
+  with_file "prefs_dump.txt" prefs_dump;
+  with_file "rpc.txt" rpc

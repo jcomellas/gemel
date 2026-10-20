@@ -12,6 +12,7 @@ publish.workspace = true
 gemel-compat.workspace = true
 gemel-base.workspace = true
 gemel-fs.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
