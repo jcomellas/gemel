@@ -1297,12 +1297,33 @@ impl Props {
 }
 
 /// The process umask (0o077 on Windows, where OCaml uses rw------- and
-/// rwx------ defaults).
+/// rwx------ defaults), read once, as OCaml reads it when it starts.
+///
+/// Reading it means setting it (to 0) and back, and a file another thread
+/// creates in between gets the wrong mode, so it isn't read again. On
+/// Linux it is read from `/proc/self/status`, without setting it.
+#[cfg(unix)]
+fn umask() -> i64 {
+    static UMASK: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *UMASK.get_or_init(|| proc_umask().unwrap_or_else(swap_umask))
+}
+
+#[cfg(target_os = "linux")]
+fn proc_umask() -> Option<i64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find_map(|l| l.strip_prefix("Umask:"))?;
+    i64::from_str_radix(line.trim(), 8).ok()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn proc_umask() -> Option<i64> {
+    None
+}
+
 #[cfg(unix)]
 #[allow(unsafe_code)]
-fn umask() -> i64 {
-    // SAFETY: umask has no preconditions; it is set back at once. Not
-    // thread-safe with respect to other umask callers, as in OCaml.
+fn swap_umask() -> i64 {
+    // SAFETY: umask has no preconditions; it is set back at once.
     let u = unsafe { libc::umask(0) };
     unsafe { libc::umask(u) };
     i64::from(u)
@@ -1454,5 +1475,12 @@ mod tests {
             };
             assert_eq!(back, expected);
         }
+    }
+
+    /// Linux's record of the umask is the umask.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_umask_is_read_without_setting_it() {
+        assert_eq!(proc_umask(), Some(swap_umask()));
     }
 }
