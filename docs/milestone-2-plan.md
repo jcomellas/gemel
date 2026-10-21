@@ -1,6 +1,6 @@
 # Milestone 2: local engine and text UI
 
-*Status: proposed (2026-10-19) · Follows milestone 1 (compat and base, PRs #2–#6) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: done (2026-10-21), but for the optional phase 9 · Proposed 2026-10-19 · Follows milestone 1 (compat and base, PRs #2–#6) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 2 is step 2 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): a local↔local engine plus the text UI. It ends with `gemel` synchronising two local directories, with OCaml Unison's results and archive format.
 
@@ -15,18 +15,28 @@ On macOS, Linux and Windows, for generated replica trees and change scripts:
 3. **Profiles behave the same.** A `.prf` profile works in both.
 4. **The text UI is usable interactively,** and the interactive mode is covered by tests.
 
+**Met (close-out, 2026-10-21):**
+- **1, and 2's second half:** the oracle harness (`tools/oracle`) with gemel as the candidate.
+  - CI's oracle job runs 100 generated scenarios on Linux against 8772d26. Before the close-out they agreed locally too: 100 on macOS against Homebrew's 2.54.0, and 200 in Docker against 8772d26 built with OCaml 5.3.
+  - Each scenario ends with OCaml rerunning on gemel's final state: it loads gemel's archives and reports nothing to do but the conflicts the last sync skipped.
+  - Windows has no OCaml build, so it replays 100 outcomes recorded from 8772d26 (`tools/oracle/recorded/windows.txt`, scenarios without permission changes or links), and gemel rechecks its own archives. CI's macOS job, which has no OCaml either, replays them too. The oracle job checks that the recording is still what the pinned reference does, and that gemel on Linux agrees with it.
+- **2's first half:** `gemel-engine`'s `tests/archives.rs` loads real OCaml archives on all three systems, checks their order and `checkArchive` hash, and stores them back byte for byte. `tests/update.rs` runs update detection against the archives OCaml writes.
+- **3:** `gemel-ui-api`'s `tests/startup.rs` runs whole syncs from a `.prf` profile and compares them with OCaml's.
+- **4:** `bins/gemel`'s `tests/interactive.rs` and `tests/terminal.rs` (a pty, on Unix).
+- Not done in M2: synchronising xattrs and ACLs (M5), and watch mode (phase 9, optional).
+
 Out of scope, and how each behaves until it is done:
 
 | Cut | Behaviour in M2 | When |
 |---|---|---|
 | Remote roots (ssh, socket) | `parse_root` accepts them; connecting fails with a clear error | M3 |
 | `transfer.ml` (rsync deltas) | Not needed: local copies go through `Copy.localFile` and cloning | M3 |
-| Synchronising xattrs and ACLs | The features `Sync: xattr` and `Sync: ACL` **are** registered, for their archive format (see below), but the `xattrs` and `acl` preferences are not, so nothing is synchronised | Later in M2 if time allows, else M5 |
-| Move detection (feature `Sync: Moves`) | The feature is not registered | Later in M2 if time allows, else M5 |
-
-**Correction (phase 1a, 2026-10-19):** this plan first said not to register the xattr and ACL features. Real archives showed that OCaml Unison 2.54 enables both whenever the two sides support them, even with the `xattrs` and `acl` preferences off. Its archives therefore always record the change time, xattr and ACL fields, and name both features in their header. If gemel left the features unregistered, it would refuse every archive OCaml writes.
+| Synchronising xattrs and ACLs | The features `Sync: xattr` and `Sync: ACL` **are** registered, for their archive format (see below), but the `xattrs` and `acl` preferences are not, so nothing is synchronised | M5 (not done in M2) |
+| Move detection (feature `Sync: Moves`) | Registered; `moves-experimental` turns detection on, as in OCaml | Done in phase 5 |
 | Watch mode / `gemel-fsmonitor` | `-repeat watch` is rejected | Last phase, optional |
 | GUI | Untouched (fake engine) | M4 |
+
+**Correction (phase 1a, 2026-10-19):** this plan first said not to register the xattr and ACL features. Real archives showed that OCaml Unison 2.54 enables both whenever the two sides support them, even with the `xattrs` and `acl` preferences off. Its archives therefore always record the change time, xattr and ACL fields, and name both features in their header. If gemel left the features unregistered, it would refuse every archive OCaml writes.
 
 ## Design decisions
 
@@ -450,7 +460,7 @@ Unison has no FSEvents watcher on macOS, so gemel's helper would be an improveme
 - **Codecs and hashes:** OCaml golden vectors, as in milestone 1. They are regenerated with `scripts/gen-ocaml-fixtures.sh`, and must be identical on OCaml 4.13 and 5.3.
 - **Behaviour:** the phase 0 oracle, on every PR from phase 4 on, comparing proposed actions, final trees and cross-loaded archives.
 - **Loopback dispatch:** the whole engine suite also runs with every root call marshalled.
-- **Platforms:** CI on Linux, macOS and Windows. The oracle runs on Linux and macOS, while Windows checks against recorded oracle results until a Windows OCaml build is set up.
+- **Platforms:** CI on Linux, macOS and Windows. In CI the oracle runs live on Linux, and macOS and Windows replay recorded oracle results (`tools/oracle/recorded/`). Live runs on macOS, against Homebrew's build, are local.
 
 ## Risks and open questions
 

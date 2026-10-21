@@ -26,11 +26,18 @@ jobs:
       - run: cargo test --workspace
       - run: ./scripts/check-no-gui-deps.sh
         shell: bash
+      # There is no OCaml Unison on Windows, nor on the macOS runner: gemel
+      # replays the outcomes the oracle job checks are still the pinned
+      # reference's.
+      - if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          cargo build --locked -p gemel
+          cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt --candidate target/debug/gemel${{ runner.os == 'Windows' && '.exe' || '' }}
 
   oracle:
-    # Self-test of the differential harness (tools/oracle) against OCaml
-    # Unison built from the pinned source that the fixtures also come from.
-    # Once gemel can sync, this job runs it as the candidate.
+    # The differential harness (tools/oracle) against OCaml Unison built
+    # from the pinned source that the fixtures also come from.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,7 +49,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ocaml make
       - run: make -C unison-src tui
+      # The harness's self-test, then gemel on generated scenarios.
       - run: cargo run --locked -p gemel-oracle -- --reference unison-src/src/unison --count 20
+      - run: cargo build --locked -p gemel
+      - run: cargo run --locked -p gemel-oracle -- --reference unison-src/src/unison --candidate target/debug/gemel --count 100
+      # The outcomes Windows replays are still the reference's, and gemel
+      # agrees with them here too.
+      - run: cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt --candidate unison-src/src/unison
+      - run: cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt --candidate target/debug/gemel
       # gemel reads replicas as this OCaml Unison does (gemel-engine/tests/reading.rs),
       # finds no updates in the archives it writes (tests/update.rs), and accepts
       # the archives gemel commits (tests/commit.rs).
