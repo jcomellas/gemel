@@ -66,9 +66,14 @@ impl<C: Send + 'static, E: Send + 'static> EngineThread<C, E> {
     }
 
     /// Stops sending commands and waits for the engine thread to finish.
+    /// The events not taken, and any sent from now on, are dropped: so an
+    /// engine waiting for an answer carried by one (a channel it holds the
+    /// other end of) sees it dropped, and doesn't wait forever.
     pub fn join(mut self) -> std::thread::Result<()> {
         let (tx, _) = mpsc::unbounded_channel();
         drop(std::mem::replace(&mut self.commands, tx));
+        self.events.close();
+        while self.events.try_recv().is_ok() {}
         self.thread.take().map_or(Ok(()), JoinHandle::join)
     }
 }

@@ -321,7 +321,7 @@ Decided now for 7c, because 7a's callbacks depend on it:
 - **The session runs on the engine thread** and owns the `Rpc`, the installed roots (`None` until `initRoots`, and again after `initPrefs`, as `Globals.uninstallRoots`) and the items. Frontends reach it through `EngineThread`: commands in, events out. Events carry snapshots of items (`Send`), not the engine's own values.
 - **Questions to the user are requests with a reply channel,** not events: roots when none are given, the warning panel, dangerous paths, merge confirmation, and (milestone 3) passwords. So `initPrefs`'s `promptForRoots` is async.
 - **A sync runs as a task of its own** on the engine thread, so the session still reads commands during it. Abort is the one command it then accepts; it sets a flag shared with the copies' blocking tasks.
-- **To decide in 7c:** whether an item's remaining bytes, added when it finishes (`bytesToTransfer - bytesTransferred`), may be negative, as for a merge in OCaml, or are clamped at 0.
+- **To decide in 7c:** whether an item's remaining bytes, added when it finishes (`bytesToTransfer - bytesTransferred`), may be negative, as for a merge in OCaml, or are clamped at 0. (Decided: as in OCaml, so that the bytes transferred end equal to the total.)
 
 **Notes (phase 7a, 2026-10-21):**
 - **`uicommon`:** all of it but the self-tests (`selftest`, whose `Test` module isn't ported) and turning on GC messages.
@@ -358,6 +358,32 @@ Decided now for 7c, because 7a's callbacks depend on it:
   - a merge's log entries, and its explanation on stderr only when log entries go there.
   
   Copy's unit tests abort a copy midway from another thread, through the flag.
+
+**Notes (phase 7c, 2026-10-21):**
+- **`gemel_ui_api::session`:** `spawn` starts a session on its own engine thread, with the client, the installed roots and the items. Frontends send `Command`s and get `Event`s, which carry snapshots (`ItemView`, `Progress`, `Summary`); every command but `Abort` and `Log` ends with one reply event, or `Event::Error`. A command refused because a sync is running gets `Event::Refused`, which is never a reply, so a frontend waiting for the sync's can't mistake it.
+- **The steps are those `uimacbridge` and `uitext` share**, and what they do differently is left to them:
+  - `Start` (`uiInitClRootsAndProfile` and `scanProfiles`), `ScanProfiles`, `NewProfile` (`unisonProfileInit`), and `LoadProfile` (`initPrefs`), which replies with the settings a frontend needs;
+  - `Update`: connects the roots, finds the updates (with `allowPartial` as asked), reconciles, and commits at once without archives;
+  - `SetAction` (left, right, skip, merge, older, newer, revert), `Ignore` (path, name or extension, then `unisonUpdateForIgnore`), and `Diff`;
+  - `Synchronize`: everything not propagated yet, deletions last, between `transportStart` and `transportFinish`, with each item's transient error its failure; `Commit`; `Abort`; and `Log`.
+  
+  The session shows no status text of its own beyond the engine's ("Looking for changes" is both interfaces'), and logs no summary: the Mac interface's "Everything is up to date" and the text interface's "Nothing to do", its `-repeat` commit policy, and its summary lines are theirs, with `Command::Log`. A text interface's batch run is `Start`, `LoadProfile`, `Update`, then `Synchronize` unless every item is skipped, and `Commit`.
+- **Questions** (`Event::Ask`) carry a oneshot for the answer; dropping it answers no. Roots when none are given, a warning, and a merge's result with `confirmmerge` (not in batch mode; otherwise the result is just shown, `Event::Merge`).
+- **Warnings** are kept, since the engine's callback is synchronous (and often runs with the preferences borrowed), and asked about at the end of the step that gave them, before anything is committed: at the end of each of `Start`, `LoadProfile`, connecting, finding updates, reconciling, a sync and a commit. A loopback server's warnings reach the session too (a real server's come with remote roots). In batch mode they are only shown. Stopping unlocks the archives and ends the session (`Event::Exit`). Logging them ("Warning: …", as the Mac interface does) is `Config::log_warnings`.
+- **Quitting with a question unanswered:** `EngineThread::join` now closes the event channel and drops the events not taken, so a reply channel left in one is dropped and the question is answered no (a warning then stops the session, unlocking the archives). Before, the engine waited for the answer forever, and `join` with it.
+- **A sync** is a future polled alongside the command channel and the progress reports, rather than a spawned task: the same effect without sharing the session. Abort gets through even while the sync waits for the user; other commands are refused until it ends.
+- **Progress:** the reports from the copies' blocking tasks come through a channel and are applied on the engine thread; an item's own are applied before its remainder is added. `Event::Progress` comes when an item's percentage changes, an item finishes, or 0.1 seconds have passed, with the rate and the time left (`Stats`). `ItemView` has `uimacbridge`'s accessors (`unisonRiToLeft`, `…ToDirection`, `…ToProgress`, `canDiff`, `changedFromDefault`) and the text interface's line and details.
+- **`Summary`:** the items transferred, skipped (with why), failed, partial and not started, whether everything was aborted, the paths still to sync (`unsynchronizedPaths`, for the next `Update`), and the text interface's exit code.
+- **Not ported:** `Update`'s `paths` are passed to update detection, which scans everything until the watcher (phase 9). Remote connections (`openConnection*` and the password prompts) are milestone 3.
+- **Tests:** `tests/session.rs` drives a session from the test thread:
+  - the two profile scenarios of `startup.rs` (now shared, in `tests/ui_support`), through the session, against OCaml's `-batch`, in both dispatch modes;
+  - profiles, and roots asked for (and not given);
+  - warnings shown in batch mode, and asked about otherwise, stopping (archives unlocked, session ended) or going on;
+  - each action, and reverting;
+  - progress up to each item's length, outcomes, a failure (a file changed after the scan), a skipped conflict, and the summary;
+  - an abort while the sync waits for a merge's confirmation (with another command refused), and a merge not confirmed. The merge itself then finishes where its result is cloned back (APFS) and is aborted where it is copied (Linux), as in OCaml;
+  - ignoring an extension, diffs, status events and the scanned paths, and a command before the roots are connected;
+  - quitting with a question unread: the session ends, with the archives unlocked.
 
 ### Phase 8: text UI, `bins/gemel` (~2.1k)
 
