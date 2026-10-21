@@ -1,11 +1,11 @@
-//! The text user interface, in batch mode.
+//! The text user interface.
 //!
 //! Ports Unison `src/uitext.ml`: its startup (`start` and `start2`), one
 //! sync and its retries (`synchronizeOnce`, `synchronizeUntilNoFailures`),
-//! the items as batch mode lists them (`interact`, `displayri`), the
-//! propagation with its progress line and summary
-//! (`interactAndPropagateChanges`, `doTransport`), the warning printers
-//! and `handleException`.
+//! going through the items ([`interact`]), the propagation with its
+//! progress line and summary (`interactAndPropagateChanges`,
+//! `doTransport`), the questions (warnings, dangerous deletions, merges),
+//! the terminal's raw mode, interrupts, and `handleException`.
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 //!
@@ -13,29 +13,46 @@
 //! runs, only the engine writes to stderr (log entries, statuses, the
 //! wait message), through the trace, and only this thread writes to
 //! stdout; so this thread's own messages to stderr come between steps.
+//! This thread waits on one channel ([`Input`]) for the session's events,
+//! the keys typed and the signals caught. Events that come while the user
+//! is asked something wait until the answer, as OCaml's whole program
+//! waits for it.
 //!
-//! Not ported yet (phase 8b): interactive mode (the prompts, the terminal's
-//! raw mode, interrupts), `-repeat`, the profile manager (`-i`), and the
-//! timers of the whole propagation.
+//! Interrupts: Ctrl-C stops the program (`Sys.catch_break`), except
+//! during a sync, where it and `SIGTERM` abort the sync, and a fourth
+//! stops the program. Stopping interrupts the session's step, which ends
+//! at its next wait (work handed to other threads, such as a directory
+//! being scanned, finishes first), and the session's end releases the
+//! locks held.
+//!
+//! Not ported yet (phase 8c): `-repeat`, the profile manager (`-i`).
 
-use std::io::IsTerminal;
-use std::sync::Mutex;
+mod interact;
+
+use std::collections::VecDeque;
+use std::io::{self, IsTerminal, Write};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Instant;
 
 use gemel_base::path::{Global, Path};
 use gemel_base::prefs::BoolWithDefault;
 use gemel_base::trace::Trace;
 use gemel_base::util::{self, MY_NAME};
+use gemel_fs::signal::{self, Signal};
 use gemel_fs::system;
+use gemel_fs::terminal::{self, Output, TerminalState};
 use gemel_rpc::runtime::EngineThread;
 use gemel_ui_api::cli::Interface;
 use gemel_ui_api::exit_code::ExitCode;
 use gemel_ui_api::session::{
     self, Command, Config, Event, ItemView, LogKind, Outcome, Overrides, Progress, Question,
-    Settings, Summary, Updates,
+    RootNames, Settings, Summary, Updates,
 };
 use gemel_ui_api::uicommon::{self, Action, Repeat};
 
 use crate::infos::{self, Infos};
+use crate::input::{self, Input, Read};
+use interact::{Choice, Entry, Proceed};
 
 /// `profmgrUsageMsg`.
 fn profmgr_usage_msg() -> String {
@@ -48,6 +65,21 @@ enum Stop {
     Error(String),
     /// The program exits with this code.
     Exit(i32),
+    /// `Sys.Break`: the user stopped it.
+    Break,
+}
+
+/// Why no key was read.
+enum NoKey {
+    /// A signal came during a raw read (`EINTR`): the question is asked
+    /// again.
+    Interrupted,
+    /// The end of the input.
+    Eof,
+    /// The read failed.
+    Os(io::Error),
+    /// The program stops.
+    Stop(Stop),
 }
 
 /// The colours (`color`).
@@ -65,6 +97,9 @@ enum Color {
     ARtoLf,
     ARtoLt,
     AMerge,
+    DiffAdd,
+    DiffDel,
+    DiffLoc,
 }
 
 /// How `interactAndPropagateChanges` went: whether any items were
@@ -86,11 +121,32 @@ struct ProgressLine {
     logged: f64,
 }
 
+/// The terminal in raw mode (`cbreakMode`), shared with the thread that
+/// suspends and resumes the program.
+type Cbreak = Arc<Mutex<Option<Arc<TerminalState>>>>;
+
+fn cbreak_state(c: &Cbreak) -> Option<Arc<TerminalState>> {
+    c.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 struct Text {
     session: EngineThread<Command, Event>,
+    inputs: mpsc::Receiver<Input>,
+    /// Events that came while the user was being asked something.
+    deferred: VecDeque<Event>,
+    /// Where to ask for a read.
+    reads: mpsc::Sender<Read>,
+    /// A read was asked for, in raw mode or not, and hasn't come.
+    reading: Option<bool>,
+    /// A read that came while no key was wanted.
+    ready: Option<(bool, io::Result<Option<Vec<u8>>>)>,
+    /// What is left of the last read (`inputBuffer`).
+    buffer: Vec<u8>,
+    cbreak: Cbreak,
     infos: Infos,
     args: Vec<String>,
     settings: Option<Settings>,
+    roots: Option<RootNames>,
     /// `colorEnabled`.
     colors: bool,
     /// The warnings after the roots are connected are shown as `start2`
@@ -102,6 +158,14 @@ struct Text {
     failed: Vec<Path<Global>>,
     partial: Vec<Path<Global>>,
     progress: Option<ProgressLine>,
+    /// A sync is running, and Ctrl-C and `SIGTERM` abort it.
+    in_sync: bool,
+    /// The interrupts during syncs (`intrcount`).
+    interrupts: usize,
+    /// The session was told to interrupt its step.
+    interrupted: bool,
+    /// And it has.
+    stopped: bool,
 }
 
 /// `formatStatus`: a status, with its detail on the next line, or the
@@ -130,10 +194,41 @@ fn hms() -> String {
     }
 }
 
-/// `Uitext.start`: starts a session, syncs once (with retries) in batch
-/// mode, and returns the exit code.
+/// `Sys.catch_break true`, and `suspend` and `resume` in raw mode: the
+/// signals for this thread go to `inputs`.
+fn catch_signals(inputs: mpsc::Sender<Input>, cbreak: Cbreak) {
+    let listening = signal::listen(move |s| match s {
+        // `suspend`.
+        Signal::Suspend => {
+            if let Some(t) = cbreak_state(&cbreak) {
+                let _ = t.restore();
+            }
+            let _ = signal::set_default(Signal::Suspend);
+            signal::raise(Signal::Suspend);
+        }
+        // `resume`.
+        Signal::Resume => {
+            let _ = signal::catch(Signal::Suspend);
+            if let Some(t) = cbreak_state(&cbreak) {
+                let _ = t.raw();
+            }
+        }
+        s => {
+            let _ = inputs.send(Input::Signal(s));
+        }
+    });
+    if listening.is_ok() {
+        let _ = signal::catch(Signal::Interrupt);
+    }
+}
+
+/// `Uitext.start`: starts a session, syncs once (with retries), and
+/// returns the exit code.
 pub fn start(args: Vec<String>, interface: Interface) -> i32 {
     let infos = Infos::default();
+    let (tx, inputs) = mpsc::channel();
+    let cbreak: Cbreak = Arc::default();
+    catch_signals(tx.clone(), cbreak.clone());
     if interface != Interface::Text {
         infos.msg(&format!(
             "This {MY_NAME} binary only provides the text GUI...\n"
@@ -141,7 +236,7 @@ pub fn start(args: Vec<String>, interface: Interface) -> i32 {
     }
     let mut trace = Trace::with_sinks(Box::new(std::io::stdout()), Box::new(infos.stderr()));
     trace.set_status_formatter(Some(format_status()));
-    let session = match session::spawn(Config {
+    let started = session::spawn(Config {
         unison_dir: gemel_fs::os::unison_dir(),
         args: args.clone(),
         trace,
@@ -150,7 +245,17 @@ pub fn start(args: Vec<String>, interface: Interface) -> i32 {
         scan_status: true,
         log_warnings: false,
         print_wait_message: true,
-    }) {
+        complete_progress: false,
+    })
+    .and_then(|mut s| {
+        let events = tx.clone();
+        s.forward_events(move |e| {
+            let e = e.map_or(Input::Ended, |e| Input::Event(Box::new(e)));
+            events.send(e).is_ok()
+        })?;
+        Ok((s, input::spawn_reader(tx)?))
+    });
+    let (session, reads) = match started {
         Ok(s) => s,
         Err(e) => {
             infos.msg(&format!("Error: {e}\n"));
@@ -159,25 +264,48 @@ pub fn start(args: Vec<String>, interface: Interface) -> i32 {
     };
     let mut ui = Text {
         session,
+        inputs,
+        deferred: VecDeque::new(),
+        reads,
+        reading: None,
+        ready: None,
+        buffer: Vec::new(),
+        cbreak,
         infos,
         args,
         settings: None,
+        roots: None,
         colors: false,
         running: false,
         asked_roots: false,
         failed: Vec::new(),
         partial: Vec::new(),
         progress: None,
+        in_sync: false,
+        interrupts: 0,
+        interrupted: false,
+        stopped: false,
     };
     let code = match ui.run() {
         Ok(code) | Err(Stop::Exit(code)) => code,
         Err(Stop::Error(e)) => {
-            ui.handle_exception(&e);
+            ui.stop_session();
+            ui.handle_exception(Some(&e));
+            ExitCode::Fatal as i32
+        }
+        Err(Stop::Break) => {
+            ui.stop_session();
+            ui.handle_exception(None);
             ExitCode::Fatal as i32
         }
     };
+    // Put the terminal back in "sane" mode, if necessary.
+    ui.restore_terminal();
     // So that what was asked to be logged is.
-    let Text { session, .. } = ui;
+    let Text {
+        session, inputs, ..
+    } = ui;
+    drop(inputs);
     let _ = session.join();
     code
 }
@@ -199,6 +327,10 @@ impl Text {
         self.settings.as_ref().is_some_and(|s| s.terse)
     }
 
+    fn dumbtty(&self) -> bool {
+        self.settings.as_ref().is_some_and(|s| s.dumbtty)
+    }
+
     /// The progress line and the scanned paths are shown only without
     /// `terse` or debugging.
     fn show_infos(&self) -> bool {
@@ -214,6 +346,31 @@ impl Text {
         }
     }
 
+    /// `displayWhenInteractive`: unless in batch mode.
+    fn display_when_interactive(&self, s: &str) {
+        if !self.batch() {
+            infos::print(s);
+        }
+    }
+
+    fn raw(&self) -> bool {
+        cbreak_state(&self.cbreak).is_some()
+    }
+
+    /// `newLine`: in raw mode; in a dumb terminal the user has typed one.
+    fn new_line(&self) {
+        if self.raw() {
+            self.display("\n");
+        }
+    }
+
+    /// `overwrite`.
+    fn overwrite(&self) {
+        if self.raw() {
+            self.display("\r");
+        }
+    }
+
     fn color(&self, c: Color) -> &'static str {
         if !self.colors {
             return "";
@@ -224,10 +381,12 @@ impl Text {
             Color::Success | Color::ALtoRf => "\x1b[1;32m",
             Color::Information | Color::ARtoLf => "\x1b[1;34m",
             Color::Failure => "\x1b[1;31m",
-            Color::AError => "\x1b[31m",
+            Color::AError | Color::DiffDel => "\x1b[31m",
             Color::ASkip => "\x1b[1;35m",
             Color::ALtoRt | Color::ARtoLt => "\x1b[1;33m",
             Color::AMerge => "\x1b[1;36m",
+            Color::DiffAdd => "\x1b[32m",
+            Color::DiffLoc => "\x1b[36m",
         }
     }
 
@@ -236,13 +395,48 @@ impl Text {
         let s = self.settings();
         let env_ok = std::env::var_os("NO_COLOR").is_none();
         let term_ok = std::env::var_os("TERM").is_none_or(|t| t != "dumb");
-        let tty_ok = std::io::stdout().is_terminal() && std::io::stderr().is_terminal();
+        let tty_ok = io::stdout().is_terminal() && io::stderr().is_terminal();
         let ok = env_ok && term_ok && tty_ok && !s.dumbtty;
         self.colors = match s.color {
             BoolWithDefault::True => true,
             BoolWithDefault::False => false,
-            BoolWithDefault::Default => ok,
+            BoolWithDefault::Default => {
+                ok && (!cfg!(windows)
+                    || (terminal::vt_capable(Output::Stdout)
+                        && terminal::vt_capable(Output::Stderr)))
+            }
         };
+    }
+
+    /// `setupTerminal`: raw mode, unless `dumbtty` or stdin isn't a
+    /// terminal.
+    fn setup_terminal(&mut self) {
+        if self.dumbtty() {
+            return;
+        }
+        let Ok(t) = TerminalState::new() else {
+            return self.restore_terminal();
+        };
+        let t = Arc::new(t);
+        *self.cbreak.lock().unwrap_or_else(|e| e.into_inner()) = Some(t.clone());
+        if signal::supported() {
+            let _ = signal::catch(Signal::Resume);
+            let _ = signal::catch(Signal::Suspend);
+        }
+        if t.raw().is_err() {
+            self.restore_terminal();
+        }
+    }
+
+    /// `restoreTerminal`.
+    fn restore_terminal(&mut self) {
+        if signal::supported() && !self.dumbtty() {
+            let _ = signal::set_default(Signal::Resume);
+        }
+        let t = self.cbreak.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(t) = t {
+            let _ = t.restore();
+        }
     }
 
     fn send(&self, c: Command) {
@@ -257,31 +451,243 @@ impl Text {
         self.log(LogKind::Status, s.to_owned());
     }
 
+    /// `Sys.Break`, or an error here: tells the session to stop its step
+    /// at once (before a question's answer is dropped, which would answer
+    /// it).
+    fn brk(&mut self) -> Stop {
+        if !self.interrupted {
+            self.send(Command::Interrupt);
+            self.interrupted = true;
+        }
+        Stop::Break
+    }
+
+    /// Has the session stop its step, and waits until it has: the
+    /// progress of a sync goes on being shown meanwhile.
+    fn stop_session(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
+        if !self.interrupted {
+            self.brk();
+        }
+        loop {
+            let e = match self.deferred.pop_front() {
+                Some(e) => e,
+                None => match self.inputs.recv() {
+                    Ok(Input::Event(e)) => *e,
+                    Ok(Input::Ended) | Err(_) => return,
+                    Ok(_) => continue,
+                },
+            };
+            match e {
+                Event::Interrupted | Event::Exit(_) => return,
+                Event::Progress(p) => self.show_progress(&p),
+                _ => {}
+            }
+        }
+    }
+
+    /// A signal: during a sync, Ctrl-C and `SIGTERM` abort it
+    /// (`sigtermHandler` and `ctrlCHandler`) until the fourth; otherwise
+    /// Ctrl-C stops the program.
+    fn on_signal(&mut self, s: Signal) -> Result<(), Stop> {
+        match s {
+            Signal::Interrupt | Signal::Terminate if self.in_sync => {
+                if self.interrupts >= 3 {
+                    return Err(self.brk());
+                }
+                self.send(Command::Abort);
+                self.interrupts += 1;
+                if s == Signal::Interrupt && self.interrupts == 1 {
+                    let mut out = io::stdout().lock();
+                    let _ = out.write_all(
+                        b"\n\nUpdate propagation interrupted. It may take a while to stop.\n\
+                          If the process doesn't stop soon then wait or press Ctrl-C\n\
+                          3 more times to force immediate termination.\n\n\n",
+                    );
+                    let _ = out.flush();
+                }
+                Ok(())
+            }
+            Signal::Interrupt => Err(self.brk()),
+            _ => Ok(()),
+        }
+    }
+
     /// Sends `c` and handles the events up to its reply.
     fn call(&mut self, c: Command) -> Result<Event, Stop> {
         let sync = matches!(c, Command::Synchronize);
         self.send(c);
         loop {
-            let Some(e) = self.session.recv_blocking() else {
-                return Err(Stop::Error("The session stopped unexpectedly".to_owned()));
+            let e = match self.deferred.pop_front() {
+                Some(e) => e,
+                None => match self.inputs.recv() {
+                    Ok(Input::Event(e)) => *e,
+                    Ok(Input::Signal(s)) => {
+                        self.on_signal(s)?;
+                        continue;
+                    }
+                    Ok(Input::Key(k)) => {
+                        self.ready = self.reading.take().map(|raw| (raw, k));
+                        continue;
+                    }
+                    Ok(Input::Ended) | Err(_) => {
+                        return Err(Stop::Error("The session stopped unexpectedly".to_owned()));
+                    }
+                },
             };
             match e {
                 Event::Error(e) => return Err(Stop::Error(e)),
                 Event::Exit(code) => return Err(Stop::Exit(code as i32)),
                 Event::Warning(w) => self.warn(&w),
-                Event::Ask(q) => self.answer(q),
+                Event::Ask(q) => self.answer(q)?,
                 Event::Scanning(p) => self.show_scanning(&p),
                 Event::Progress(p) => self.show_progress(&p),
                 Event::Item(_, v) if sync => self.item_done(&v),
-                Event::Merge { text, .. } => self.verify_merge(&text),
+                Event::Merge { text, .. } => self.show_merge(&text),
                 Event::Status(_) | Event::Contacting(_) | Event::Refused(_) => {}
                 e => return Ok(e),
             }
         }
     }
 
+    /// `readInput`: a line, or in raw mode what one read gives. Events
+    /// that come meanwhile wait.
+    ///
+    /// A signal is handled at once. It interrupts a raw read
+    /// (`Unix.read`, `EINTR`), and the question is asked again; a line is
+    /// read on (`input_line`). (OCaml 4.14's runtime handles one only once
+    /// the read has returned; OCaml 5's, as `uitext` expects, at once.)
+    fn read_input(&mut self) -> Result<Vec<u8>, NoKey> {
+        let (raw, r) = match self.ready.take() {
+            Some(r) => r,
+            None => {
+                if self.reading.is_none() {
+                    let t = cbreak_state(&self.cbreak);
+                    self.reading = Some(t.is_some());
+                    let _ = self.reads.send(t.map_or(Read::Line, Read::Raw));
+                }
+                loop {
+                    match self.inputs.recv() {
+                        Ok(Input::Key(k)) => break (self.reading.take().unwrap_or(false), k),
+                        Ok(Input::Event(e)) => self.deferred.push_back(*e),
+                        Ok(Input::Signal(s)) => {
+                            self.on_signal(s).map_err(NoKey::Stop)?;
+                            if self.reading == Some(true) {
+                                return Err(NoKey::Interrupted);
+                            }
+                        }
+                        Ok(Input::Ended) | Err(_) => {
+                            return Err(NoKey::Stop(Stop::Error(
+                                "The session stopped unexpectedly".to_owned(),
+                            )));
+                        }
+                    }
+                }
+            }
+        };
+        match r {
+            Ok(Some(b)) if raw && b.first() == Some(&3) => Err(NoKey::Stop(self.brk())),
+            Ok(Some(b)) => Ok(b),
+            Ok(None) => Err(NoKey::Eof),
+            Err(e) => Err(NoKey::Os(e)),
+        }
+    }
+
+    /// `getInput`: the next key, echoed.
+    fn get_input(&mut self) -> Result<String, NoKey> {
+        let s = if self.buffer.is_empty() {
+            self.read_input()?
+        } else {
+            std::mem::take(&mut self.buffer)
+        };
+        let (t, rest) = input::split_token(&s);
+        self.buffer = rest;
+        let c = input::token_string(&t);
+        if !c.is_empty() && !c.starts_with('\x1b') {
+            self.display(&c);
+        }
+        Ok(c)
+    }
+
+    /// `selectAction`: asks for one of `choices` (`batch` answers
+    /// without asking), with `again` to show the question again.
+    fn select_action<A: Copy>(
+        &mut self,
+        batch: Option<&str>,
+        choices: &[Choice<A>],
+        again: &dyn Fn(&Text),
+    ) -> Result<A, Stop> {
+        loop {
+            let a = match batch {
+                Some(a) => Some(a.to_owned()),
+                None => {
+                    self.display("[");
+                    for c in choices {
+                        if c.names[0].is_empty() {
+                            self.display(&input::format_name(c.names[1]));
+                        }
+                    }
+                    self.display("] ");
+                    match self.get_input() {
+                        Ok(a) => Some(a),
+                        // Restart an interrupted read.
+                        Err(NoKey::Interrupted) => None,
+                        Err(NoKey::Eof) => return Err(self.read_failure("End of file")),
+                        Err(NoKey::Os(e)) => {
+                            return Err(self.read_failure(&input::error_message(&e)));
+                        }
+                        Err(NoKey::Stop(s)) => return Err(s),
+                    }
+                }
+            };
+            let Some(a) = a else {
+                again(self);
+                continue;
+            };
+            if a == "?" || a == input::KEY_F1 {
+                self.new_line();
+                self.display("Commands:\n");
+                for c in choices {
+                    let n = c
+                        .names
+                        .iter()
+                        .map(|n| input::format_name(n))
+                        .collect::<Vec<_>>()
+                        .join(" or ");
+                    let space = " ".repeat(22usize.saturating_sub(n.len()).max(2));
+                    self.display(&format!("  {n}{space}{}\n", c.doc));
+                }
+                again(self);
+                continue;
+            }
+            if let Some(c) = choices.iter().find(|c| c.names.contains(&a.as_str())) {
+                return Ok(c.act);
+            }
+            self.new_line();
+            if a.is_empty() {
+                self.display("No default command [type '?' or F1 for help]\n");
+            } else {
+                self.display(&format!(
+                    "Unrecognized command '{}': try again  [type '?' or F1 for help]\n",
+                    input::escaped(&a)
+                ));
+            }
+            again(self);
+        }
+    }
+
+    /// `handleExn`: stdin can't be read.
+    fn read_failure(&self, s: &str) -> Stop {
+        // So that the error starts on its own line, not after the prompt.
+        infos::print("\n");
+        Stop::Error(format!("Failure reading from the standard input ({s})\n"))
+    }
+
     /// The warning printers: `setWarnPrinterForInitialization`, then
-    /// `setWarnPrinter`'s (which asks, outside batch mode: phase 8b).
+    /// `setWarnPrinter`'s.
     fn warn(&self, w: &str) {
         if self.running {
             self.infos.set("", "");
@@ -292,12 +698,39 @@ impl Text {
         }
     }
 
-    fn answer(&mut self, q: Question) {
+    /// A question's answer, or why there is none: then the session is
+    /// interrupted before the reply is dropped, which would answer no.
+    fn asked<T>(&mut self, r: Result<T, Stop>) -> Result<T, Stop> {
+        if r.is_err() {
+            self.brk();
+        }
+        r
+    }
+
+    fn answer(&mut self, q: Question) -> Result<(), Stop> {
         match q {
-            // Only shown at initialisation; asking is phase 8b.
             Question::Warning(w, r) => {
                 self.warn(&w);
-                r.send(true);
+                if !self.running {
+                    r.send(true);
+                    return Ok(());
+                }
+                // `setWarnPrinter`, outside batch mode.
+                self.display("Press return to continue.");
+                let go = self.select_action(
+                    None,
+                    &[
+                        Choice::new(&["", "", " ", "y"], "Continue", true),
+                        Choice::new(&["n", "q", "x"], "Exit", false),
+                    ],
+                    &|t| t.display("Press return to continue."),
+                );
+                let go = self.asked(go)?;
+                self.new_line();
+                if !go {
+                    self.restore_terminal();
+                }
+                r.send(go);
             }
             // `promptForRoots`: an error, after the session's reply.
             Question::Roots(r) => {
@@ -305,16 +738,34 @@ impl Text {
                 drop(r);
             }
             Question::Merge { text, reply, .. } => {
-                self.verify_merge(&text);
-                reply.send(true);
+                let keep = self.verify_merge(&text);
+                reply.send(self.asked(keep)?);
             }
         }
+        Ok(())
     }
 
-    /// `verifyMerge`, in batch mode: shows the merge's output and goes on.
-    fn verify_merge(&self, text: &str) {
+    /// A merge's output, when it needn't be confirmed (`verifyMerge` in
+    /// batch mode, or without `confirmmerge`).
+    fn show_merge(&self, text: &str) {
         self.infos.set("", "");
         infos::print(&format!("{text}\n"));
+    }
+
+    /// `verifyMerge`, with `confirmmerge`: keep the merge's result?
+    fn verify_merge(&mut self, text: &str) -> Result<bool, Stop> {
+        self.show_merge(text);
+        self.display("Commit results of merge? ");
+        let keep = self.select_action(
+            None,
+            &[
+                Choice::new(&["y", "g"], "Yes: commit", true),
+                Choice::new(&["n"], "No: leave this file unchanged", false),
+            ],
+            &|t| t.display("Commit results of merge? "),
+        )?;
+        self.new_line();
+        Ok(keep)
     }
 
     /// `showStatus`: the path being scanned, with a spinner.
@@ -327,7 +778,7 @@ impl Text {
             return;
         }
         let c = b"-\\|/"[(4. * system::gettimeofday() % 4.) as usize % 4] as char;
-        let nowrap = std::io::stdout().is_terminal()
+        let nowrap = terminal::vt_capable(Output::Stdout)
             && !std::env::var("TERM").is_ok_and(|s| {
                 s == "dumb"
                     || s == "emacs"
@@ -335,7 +786,7 @@ impl Text {
                         .iter()
                         .any(|p| s.starts_with(p))
             });
-        if nowrap && !self.settings().dumbtty {
+        if nowrap && !self.dumbtty() {
             self.infos
                 .set(&format!("{c} \x1b[?7l{path}\x1b[?7h"), "\r\x1b[K\r");
         } else {
@@ -353,11 +804,16 @@ impl Text {
         Stop::Exit(1)
     }
 
-    /// `handleException`.
-    fn handle_exception(&self, e: &str) {
+    /// `handleException`: for an error, or (`None`) `Sys.Break`.
+    fn handle_exception(&mut self, e: Option<&str>) {
+        // Keep the current status line, if any, and don't show it again.
         infos::print("\n");
         self.infos.set("", "");
-        let msg = format!("Error: {e}");
+        self.restore_terminal();
+        let msg = match e {
+            Some(e) => format!("Error: {e}"),
+            None => "Terminated!".to_owned(),
+        };
         self.log(LogKind::Log, format!("{msg}\n"));
         // Unless log entries go to stderr too.
         if self.silent() {
@@ -425,15 +881,19 @@ impl Text {
 
     /// `start2`: connects the roots, then syncs.
     fn start2(&mut self) -> Result<i32, Stop> {
-        self.call(Command::Connect)?;
+        match self.call(Command::Connect)? {
+            Event::Connected(r) => self.roots = Some(r),
+            e => return Err(Stop::Error(format!("unexpected {e:?}"))),
+        }
         if self.settings().test_server {
             return Ok(0);
         }
         if self.settings().run_tests {
             return Err(self.unsupported("-selftest"));
         }
+        // Put the terminal in cbreak mode if possible.
         if !self.batch() {
-            return Err(self.unsupported("Interactive mode (use -batch)"));
+            self.setup_terminal();
         }
         self.running = true;
         self.synchronize_until_no_failures()
@@ -484,8 +944,8 @@ impl Text {
         Ok((code as i32, p.failed))
     }
 
-    /// `checkForDangerousPath`, in batch mode: aborts.
-    fn check_for_dangerous_path(&self, u: &Updates) -> Result<(), Stop> {
+    /// `checkForDangerousPath`: aborts in batch mode, and otherwise asks.
+    fn check_for_dangerous_path(&mut self, u: &Updates) -> Result<(), Stop> {
         let Some(msg) = &u.dangerous_message else {
             return Ok(());
         };
@@ -495,9 +955,24 @@ impl Text {
         self.log(LogKind::Log, format!("{msg}\n"));
         if self.batch() {
             infos::print("Aborting...\n");
+            self.restore_terminal();
             return Err(Stop::Exit(ExitCode::Fatal as i32));
         }
-        Ok(())
+        self.display_when_interactive("Do you really want to proceed? ");
+        let go = self.select_action(
+            None,
+            &[
+                Choice::new(&["y"], "Continue", true),
+                Choice::new(&["n", "q", "x", ""], "Exit", false),
+            ],
+            &|t| t.display("Do you really want to proceed? "),
+        )?;
+        if go {
+            return Ok(());
+        }
+        infos::print("\n");
+        self.restore_terminal();
+        Err(Stop::Exit(ExitCode::Fatal as i32))
     }
 
     /// `displayri`: an item on a line.
@@ -532,120 +1007,219 @@ impl Text {
         }
     }
 
-    /// `displayDetails`.
-    fn display_details(&self, v: &ItemView) {
-        if self.silent() {
-            return;
-        }
+    /// `alwaysDisplayDetails`.
+    fn always_display_details(&self, v: &ItemView) {
         infos::print(&format!("{}\n", v.details));
-        for e in &v.errors1 {
-            infos::print(&format!("[root 1]: {e}\n"));
-        }
-        for e in &v.errors2 {
-            infos::print(&format!("[root 2]: {e}\n"));
+        if v.problem.is_none() {
+            for e in &v.errors1 {
+                infos::print(&format!("[root 1]: {e}\n"));
+            }
+            for e in &v.errors2 {
+                infos::print(&format!("[root 2]: {e}\n"));
+            }
         }
     }
 
-    /// `interact`, in batch mode: lists the items.
-    fn interact(&self, items: &[ItemView]) {
-        let auto = self.settings().auto;
-        for v in items {
-            self.display_ri(v);
-            if let Some(p) = &v.problem {
-                infos::print(&format!("\n{p}\n"));
-                continue;
-            }
-            let conflict = matches!(v.action, Action::Skip(_));
-            if auto && !conflict {
-                self.display("\n");
-                continue;
-            }
-            if self.silent() && conflict {
-                infos::print("\n");
-            }
-            self.display("\n");
-            if !self.terse() {
-                self.display_details(v);
-            }
+    /// `displayDetails`.
+    fn display_details(&self, v: &ItemView) {
+        if !self.silent() {
+            self.always_display_details(v);
         }
     }
 
     /// The skipped items, as the summary lists them.
-    fn log_skipped(&self, items: &[ItemView]) {
-        for v in items {
-            if let Some(r) = &v.skip_reason {
+    fn log_skipped(&self, items: &[Entry]) {
+        for e in items {
+            if let Some(r) = &e.v.skip_reason {
                 self.log(
                     LogKind::Log,
-                    format!("  skipped: {} ({r})\n", v.path_string),
+                    format!("  skipped: {} ({r})\n", e.v.path_string),
                 );
             }
         }
     }
 
-    /// `interactAndPropagateChanges`, in batch mode.
+    /// `interactAndPropagateChanges`: goes through the items, then
+    /// propagates them once the user says so.
     fn interact_and_propagate(&mut self, u: &Updates) -> Result<Propagated, Stop> {
         use Color::*;
-        self.interact(&u.items);
-        let (mut to_do, mut skipped, mut to_root1, mut to_root2) = (0, 0, 0, 0);
-        for v in &u.items {
-            if v.problematic {
-                skipped += 1;
-                continue;
+        let mut prev = Vec::new();
+        let mut ril: VecDeque<Entry> = u
+            .items
+            .iter()
+            .enumerate()
+            .map(|(i, v)| Entry { i, v: v.clone() })
+            .collect();
+        'interact: loop {
+            let (proceed, mut list) = self.interact(prev, ril)?;
+            let (mut to_do, mut skipped, mut to_root1, mut to_root2) = (0, 0, 0, 0);
+            for e in &list {
+                if e.v.problematic {
+                    skipped += 1;
+                    continue;
+                }
+                to_do += 1;
+                match e.v.action {
+                    Action::LtoR(_) => to_root2 += e.v.length,
+                    Action::RtoL(_) => to_root1 += e.v.length,
+                    _ => {}
+                }
             }
-            to_do += 1;
-            match v.action {
-                Action::LtoR(_) => to_root2 += v.length,
-                Action::RtoL(_) => to_root1 += v.length,
-                _ => {}
-            }
-        }
-        let (root1, root2) = &u.roots.full;
-        if !self.terse() && (to_do > 0 || skipped > 0) {
-            self.log(
-                LogKind::LogColor,
-                format!(
-                    "\n{}{to_do}{} items will be synced, {}{skipped}{} skipped\n\
-                     {} to be synced from {root1} to {root2}\n\
-                     {} to be synced from {root2} to {root1}\n",
-                    self.color(Focus),
-                    self.color(Reset),
-                    self.color(Information),
-                    self.color(Reset),
-                    util::bytes2string(to_root2),
-                    util::bytes2string(to_root1),
-                ),
-            );
-        }
-        if to_do == 0 {
-            if u.found_archives && self.settings().repeat == Repeat::NoRepeat {
-                self.call(Command::Commit)?;
-            }
-            self.display("No updates to propagate\n");
-            if skipped > 0 {
+            let (root1, root2) = &u.roots.full;
+            if !self.terse() && (to_do > 0 || skipped > 0) {
                 self.log(
                     LogKind::LogColor,
                     format!(
-                        "Synchronization {}complete{} at {}  (0 items transferred, {}{skipped} \
-                         skipped{}, 0 failed)\n",
-                        self.color(Success),
+                        "\n{}{to_do}{} items will be synced, {}{skipped}{} skipped\n\
+                         {} to be synced from {root1} to {root2}\n\
+                         {} to be synced from {root2} to {root1}\n",
+                        self.color(Focus),
                         self.color(Reset),
-                        hms(),
                         self.color(Information),
                         self.color(Reset),
+                        util::bytes2string(to_root2),
+                        util::bytes2string(to_root1),
                     ),
                 );
-                self.log_skipped(&u.items);
             }
-            return Ok(Propagated {
-                skipped: skipped > 0,
-                ..Propagated::default()
-            });
+            if to_do == 0 {
+                if u.found_archives && self.settings().repeat == Repeat::NoRepeat {
+                    self.call(Command::Commit)?;
+                }
+                self.display("No updates to propagate\n");
+                if skipped > 0 {
+                    self.log(
+                        LogKind::LogColor,
+                        format!(
+                            "Synchronization {}complete{} at {}  (0 items transferred, \
+                             {}{skipped} skipped{}, 0 failed)\n",
+                            self.color(Success),
+                            self.color(Reset),
+                            hms(),
+                            self.color(Information),
+                            self.color(Reset),
+                        ),
+                    );
+                    self.log_skipped(&list);
+                }
+                return Ok(Propagated {
+                    skipped: skipped > 0,
+                    ..Propagated::default()
+                });
+            }
+            if proceed == Proceed::Immediately {
+                return self.doit(&list, to_do, skipped);
+            }
+            // `askagain`.
+            loop {
+                self.display_when_interactive("\nProceed with propagating updates? ");
+                let batch = self.batch().then_some("y");
+                let a = self.select_action(
+                    batch,
+                    &[
+                        Choice::new(
+                            &["y", "g"],
+                            "Yes: proceed with updates as selected above",
+                            Ask::Yes,
+                        ),
+                        Choice::new(
+                            &["n"],
+                            "No: go through reconciliation process again",
+                            Ask::No,
+                        ),
+                        Choice::new(
+                            &["p", "b"],
+                            "go back to the last item of the reconciliation",
+                            Ask::Back,
+                        ),
+                        Choice::new(&["N"], "sort by Name", Ask::Sort(session::SortKind::Name)),
+                        Choice::new(&["S"], "sort by Size", Ask::Sort(session::SortKind::Size)),
+                        Choice::new(
+                            &["W"],
+                            "sort neW first (toggle)",
+                            Ask::Sort(session::SortKind::NewFirst),
+                        ),
+                        Choice::new(
+                            &["D"],
+                            "Default ordering",
+                            Ask::Sort(session::SortKind::Default),
+                        ),
+                        Choice::new(&["R"], "Reverse the sort order", Ask::Reverse),
+                        Choice::new(
+                            &["q", input::KEY_ESC],
+                            format!("exit {MY_NAME} without propagating any changes"),
+                            Ask::Quit,
+                        ),
+                    ],
+                    &|t| t.display("Proceed with propagating updates? "),
+                )?;
+                match a {
+                    Ask::Yes => return self.doit(&list, to_do, skipped),
+                    Ask::No | Ask::Back => {
+                        self.new_line();
+                        self.call(Command::Configure(Overrides {
+                            auto: Some(false),
+                            ..Overrides::default()
+                        }))?;
+                        if let Some(s) = &mut self.settings {
+                            s.auto = false;
+                        }
+                        prev = Vec::new();
+                        ril = list.into();
+                        if a == Ask::Back {
+                            prev = ril.drain(..ril.len().saturating_sub(1)).collect();
+                        }
+                        continue 'interact;
+                    }
+                    Ask::Sort(kind) => {
+                        self.arrange(&mut list)?;
+                        list = match self.call(Command::Sort(kind))? {
+                            Event::Items { items, .. } => items
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, v)| Entry { i, v })
+                                .collect(),
+                            e => return Err(Stop::Error(format!("unexpected {e:?}"))),
+                        };
+                    }
+                    Ask::Reverse => list.reverse(),
+                    Ask::Quit => {
+                        self.new_line();
+                        return Err(self.brk());
+                    }
+                }
+            }
         }
-        // `doit`.
+    }
+
+    /// Makes the session's items these, in this order; they are numbered
+    /// again.
+    fn arrange(&mut self, list: &mut [Entry]) -> Result<(), Stop> {
+        let order = list.iter().map(|e| e.i).collect();
+        match self.call(Command::Arrange(order))? {
+            Event::Items { .. } => {}
+            e => return Err(Stop::Error(format!("unexpected {e:?}"))),
+        }
+        for (i, e) in list.iter_mut().enumerate() {
+            e.i = i;
+        }
+        Ok(())
+    }
+
+    /// `doit`: propagates, commits, and logs the summary.
+    fn doit(&mut self, list: &[Entry], to_do: usize, skipped: usize) -> Result<Propagated, Stop> {
+        use Color::*;
+        let mut list = list.to_vec();
+        self.arrange(&mut list)?;
+        if !(self.batch() || self.terse()) {
+            self.new_line();
+        }
         if !self.terse() {
             self.status("Propagating updates");
         }
+        let timer = self.start_timer("Transmitting all files");
         let summary = self.do_transport()?;
+        self.show_timer(timer);
         if !self.terse() {
             self.status("Saving synchronizer state");
         }
@@ -697,7 +1271,7 @@ impl Text {
         );
         self.log(LogKind::LogColor, format!("{line}\n"));
         if skipped > 0 {
-            self.log_skipped(&u.items);
+            self.log_skipped(&list);
         }
         for p in &self.partial {
             self.log(
@@ -711,6 +1285,10 @@ impl Text {
                 format!("  failed: {}\n", uicommon::path_string(p)),
             );
         }
+        // Make sure repeat mode is stopped.
+        if self.interrupts > 0 {
+            return Err(self.brk());
+        }
         Ok(Propagated {
             skipped: skipped > 0,
             partial: partials > 0,
@@ -720,8 +1298,26 @@ impl Text {
         })
     }
 
-    /// `doTransport`: propagates, with the progress line, and the failures
-    /// as they come.
+    /// `Trace.startTimer`.
+    fn start_timer(&self, desc: &'static str) -> (&'static str, Instant) {
+        if self.settings().timers {
+            self.log(LogKind::Message, format!("{desc}..."));
+        }
+        (desc, Instant::now())
+    }
+
+    /// `Trace.showTimer`.
+    fn show_timer(&self, (desc, t0): (&'static str, Instant)) {
+        if self.settings().timers {
+            self.log(
+                LogKind::Message,
+                format!("{desc} ({:.2} seconds)", t0.elapsed().as_secs_f64()),
+            );
+        }
+    }
+
+    /// `doTransport`: propagates, with the progress line, the failures as
+    /// they come, and Ctrl-C and `SIGTERM` aborting it (`stopAtIntr`).
     fn do_transport(&mut self) -> Result<Summary, Stop> {
         self.failed.clear();
         self.partial.clear();
@@ -731,29 +1327,49 @@ impl Text {
             items: 0,
             logged: now,
         });
+        let term = signal::catch(Signal::Terminate).ok();
+        self.in_sync = true;
         if self.show_infos() {
             self.infos.set("Starting...", "");
         }
         let r = self.call(Command::Synchronize);
-        self.progress = None;
-        self.infos.set("", "");
-        match r {
-            Ok(Event::Synchronized(s)) => Ok(s),
-            Ok(e) => Err(Stop::Error(format!("unexpected {e:?}"))),
-            Err(Stop::Error(e)) => {
-                self.log(
-                    LogKind::LogColor,
-                    format!(
-                        "\nSynchronization {}failed{} at {} due to a fatal error\n\n",
-                        self.color(Color::Failure),
-                        self.color(Color::Reset),
-                        hms()
-                    ),
-                );
-                Err(Stop::Error(e))
-            }
-            Err(e) => Err(e),
+        if matches!(r, Err(Stop::Break)) {
+            self.stop_session();
         }
+        self.in_sync = false;
+        if let Some(p) = term {
+            signal::restore(Signal::Terminate, &p);
+        }
+        self.progress = None;
+        let r = match r {
+            Ok(Event::Synchronized(s)) => {
+                self.infos.set("", "");
+                return Ok(s);
+            }
+            Ok(e) => Stop::Error(format!("unexpected {e:?}")),
+            Err(e) => e,
+        };
+        let why = match &r {
+            Stop::Break => "interrupted",
+            Stop::Error(_) => "failed",
+            Stop::Exit(_) => return Err(r),
+        };
+        let how = if matches!(r, Stop::Break) {
+            "by user request"
+        } else {
+            "due to a fatal error"
+        };
+        self.infos.set("", "");
+        self.log(
+            LogKind::LogColor,
+            format!(
+                "\nSynchronization {}{why}{} at {} {how}\n\n",
+                self.color(Color::Failure),
+                self.color(Color::Reset),
+                hms()
+            ),
+        );
+        Err(r)
     }
 
     /// An item propagated: a failure is shown at once.
@@ -818,6 +1434,17 @@ impl Text {
             self.log(LogKind::LogOnly, format!("{s}\n"));
         }
     }
+}
+
+/// The proceed menu's choices (`askagain`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Yes,
+    No,
+    Back,
+    Sort(session::SortKind),
+    Reverse,
+    Quit,
 }
 
 /// `shorten`: a path of at most 70 bytes, with its middle left out.

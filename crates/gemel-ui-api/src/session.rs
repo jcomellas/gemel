@@ -46,6 +46,7 @@
 //! archives are unlocked and the session ends ([`Event::Exit`]).
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::pin::pin;
 use std::rc::Rc;
@@ -62,7 +63,7 @@ use gemel_engine::abort::Abort;
 use gemel_engine::common::{self, Direction, ReconItem, Replicas, Status};
 use gemel_engine::recon::{self, Choice, Strength};
 use gemel_engine::transport::{self, Task};
-use gemel_engine::{archive, globals, update, uutil, with_trace};
+use gemel_engine::{archive, globals, sortri, update, uutil, with_trace};
 use gemel_fs::fileinfo::Typ;
 use gemel_fs::props::Filesize;
 use gemel_rpc::runtime::{Commands, EngineThread, Events};
@@ -98,6 +99,10 @@ pub struct Config {
     /// through the trace (unless `silent`), as the text interface shows
     /// it; otherwise it comes as [`Event::Contacting`].
     pub print_wait_message: bool,
+    /// Once an item has been propagated, its progress is made up to its
+    /// length, as the Mac interface does; otherwise only once it has
+    /// failed, as the text interface does (`doTransport`).
+    pub complete_progress: bool,
 }
 
 /// What a frontend asks the session to do.
@@ -156,6 +161,19 @@ pub enum Command {
     Ignore(usize, IgnoreKind),
     /// `showDiffs` on an item. Replies [`Event::Diff`].
     Diff(usize),
+    /// Keeps only these items, in this order: the text interface's list
+    /// once the user has been through it, with some dropped for this
+    /// session and the order changed. Replies [`Event::Items`].
+    Arrange(Vec<usize>),
+    /// Changes `Sortri`'s settings, and sorts the items again
+    /// (`sortReconItems`). Replies [`Event::Items`].
+    Sort(SortKind),
+    /// `Sys.Break`: stops the command running at its next wait, including
+    /// one waiting for an answer, or a sync. Work already handed to other
+    /// threads (a directory being scanned) finishes first. Replies
+    /// [`Event::Interrupted`]. The frontend then ends the session, which
+    /// releases the locks held. (Taken at any time.)
+    Interrupt,
     /// Writes to the log, or shows a status. No reply. (Taken during a
     /// sync.)
     Log(LogKind, String),
@@ -178,6 +196,24 @@ pub enum SetAction {
     Newer,
     /// Back to the default (`unisonRiRevert`).
     Revert,
+    /// The older version wins if the item is a conflict, or its default is
+    /// one; nothing otherwise (`setDirectionIfConflict`).
+    OlderIfConflict,
+    /// The same, for the newer version.
+    NewerIfConflict,
+}
+
+/// How [`Command::Sort`] sorts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKind {
+    /// By name (`sortByName`).
+    Name,
+    /// By size (`sortBySize`).
+    Size,
+    /// New files first, or not, in turn (`sortNewFirst`).
+    NewFirst,
+    /// As the profile has it (`restoreDefaultSettings`).
+    Default,
 }
 
 /// What to ignore of an item's path.
@@ -202,6 +238,8 @@ pub enum LogKind {
     LogOnly,
     /// `Trace.status`: a status message.
     Status,
+    /// `Trace.message`: a message, as the timers show theirs.
+    Message,
 }
 
 /// What the session tells the frontend.
@@ -234,6 +272,7 @@ pub enum Event {
     Item(usize, ItemView),
     /// [`Command::Ignore`]'s reply: the items left, and the index of the
     /// first one at or after the ignored one (`unisonUpdateForIgnore`).
+    /// Also [`Command::Arrange`]'s and [`Command::Sort`]'s, from 0.
     Items {
         /// The items.
         items: Vec<ItemView>,
@@ -265,6 +304,9 @@ pub enum Event {
     Error(String),
     /// A command was refused, because a sync is running: not a reply.
     Refused(Command),
+    /// [`Command::Interrupt`]'s reply: the command running, if any, was
+    /// stopped, and sends no reply of its own.
+    Interrupted,
     /// The session has ended: the user chose to stop at a warning.
     Exit(ExitCode),
 }
@@ -322,6 +364,8 @@ pub struct RootNames {
     pub full: (String, String),
     /// `roots2string`: the headings of the columns.
     pub headings: String,
+    /// The hosts' names (`root2hostname`): `local`, or the server's.
+    pub hosts: (String, String),
 }
 
 /// The settings a frontend needs, once a profile is loaded.
@@ -329,6 +373,8 @@ pub struct RootNames {
 pub struct Settings {
     /// The profile's name.
     pub profile: String,
+    /// Its file (`profilePathname`).
+    pub profile_path: PathBuf,
     /// The roots, as given.
     pub roots: Vec<String>,
     /// `batch`.
@@ -361,6 +407,8 @@ pub struct Settings {
     pub run_tests: bool,
     /// `testserver`.
     pub test_server: bool,
+    /// `timers`.
+    pub timers: bool,
 }
 
 /// [`Command::Update`]'s result.
@@ -437,6 +485,12 @@ pub struct ItemView {
     pub errors1: Vec<String>,
     /// The same, in the second.
     pub errors2: Vec<String>,
+    /// Only properties changed, in one replica or both (the text
+    /// interface's `ispropschanged`).
+    pub props_only: bool,
+    /// The contents changed in one replica and only properties in the
+    /// other: the action that keeps the contents (`setdirchanged`).
+    pub favor_changed: Option<SetAction>,
 }
 
 /// How propagating an item went (`Util.confirmation`).
@@ -519,20 +573,64 @@ pub async fn run(config: Config, mut commands: Commands<Command>, events: Events
             return;
         }
     };
-    while let Some(c) = commands.recv().await {
+    let mut pending = VecDeque::new();
+    loop {
+        let c = match pending.pop_front() {
+            Some(c) => c,
+            None => match commands.recv().await {
+                Some(c) => c,
+                None => return,
+            },
+        };
         let r = match c {
+            Command::Interrupt => Err(Stop::Interrupted),
             Command::Synchronize => s.synchronize(&mut commands).await,
-            c => s.command(c).await,
+            c => interruptible(s.command(c), &mut commands, &mut pending)
+                .await
+                .unwrap_or(Err(Stop::Interrupted)),
         };
         match r {
             Ok(()) => {}
             Err(Stop::Error(e)) => s.send(Event::Error(uicommon::exn2string(&e))),
+            Err(Stop::Interrupted) => s.send(Event::Interrupted),
             Err(Stop::Exit) => {
                 s.send(Event::Exit(ExitCode::Fatal));
                 return;
             }
         }
     }
+}
+
+/// Runs `step`, taking the commands that come meanwhile: an interrupt
+/// drops it at its next wait (`None`), and the others wait in `pending`.
+/// It is started all the same, so that one sent before the interrupt is
+/// done if it doesn't wait.
+async fn interruptible<T>(
+    step: impl Future<Output = T>,
+    commands: &mut Commands<Command>,
+    pending: &mut VecDeque<Command>,
+) -> Option<T> {
+    let mut step = pin!(step);
+    let mut started = false;
+    let mut open = true;
+    std::future::poll_fn(|cx| {
+        if !started {
+            started = true;
+            if let Poll::Ready(r) = step.as_mut().poll(cx) {
+                return Poll::Ready(Some(r));
+            }
+        }
+        while open {
+            match commands.poll_recv(cx) {
+                Poll::Ready(Some(Command::Interrupt)) => return Poll::Ready(None),
+                Poll::Ready(Some(c)) => pending.push_back(c),
+                Poll::Ready(None) => open = false,
+                Poll::Pending => break,
+            }
+        }
+        step.as_mut().poll(cx).map(Some)
+    })
+    .await
 }
 
 // ---- The session ----
@@ -543,6 +641,8 @@ enum Stop {
     Error(Error),
     /// The user chose to stop at a warning.
     Exit,
+    /// [`Command::Interrupt`].
+    Interrupted,
 }
 
 impl From<Error> for Stop {
@@ -577,6 +677,7 @@ struct Session {
     scan_status: bool,
     log_warnings: bool,
     print_wait_message: bool,
+    complete_progress: bool,
     profile: String,
     items: RefCell<Vec<Item>>,
     warnings: Rc<RefCell<Vec<String>>>,
@@ -610,6 +711,7 @@ impl Session {
             scan_status: config.scan_status,
             log_warnings: config.log_warnings,
             print_wait_message: config.print_wait_message,
+            complete_progress: config.complete_progress,
             profile: String::new(),
             items: RefCell::new(Vec::new()),
             warnings,
@@ -697,7 +799,7 @@ impl Session {
                 paths,
             } => self.update(allow_partial, paths).await?,
             Command::SetAction(i, a) => self.set_action(i, a)?,
-            Command::Synchronize => unreachable!("run handles it"),
+            Command::Synchronize | Command::Interrupt => unreachable!("run handles it"),
             Command::Abort => self.abort(),
             Command::Commit => {
                 let r = update::commit_updates(self.rpc(), self.roots()?).await;
@@ -707,6 +809,8 @@ impl Session {
             }
             Command::Ignore(i, kind) => self.ignore(i, kind).await?,
             Command::Diff(i) => self.diff(i).await?,
+            Command::Arrange(order) => self.arrange(&order)?,
+            Command::Sort(kind) => self.sort(kind)?,
             Command::Log(kind, s) => self.log(kind, &s)?,
         }
         Ok(())
@@ -718,7 +822,49 @@ impl Session {
             LogKind::LogColor => t.log_color(p, s),
             LogKind::LogOnly => t.log_only(p, s),
             LogKind::Status => t.status(p, s),
+            LogKind::Message => t.message(p, s),
         })
+    }
+
+    fn arrange(&self, order: &[usize]) -> Result<(), Error> {
+        {
+            let mut items = self.items.borrow_mut();
+            let mut seen = vec![false; items.len()];
+            for &i in order {
+                match seen.get_mut(i) {
+                    None => return Err(Error::Fatal(format!("There is no item {i}"))),
+                    Some(true) => return Err(Error::Fatal(format!("Item {i} is given twice"))),
+                    Some(s) => *s = true,
+                }
+            }
+            let mut old: Vec<Option<Item>> = items.drain(..).map(Some).collect();
+            items.extend(order.iter().filter_map(|&i| old[i].take()));
+        }
+        self.send(Event::Items {
+            items: self.views(),
+            next: 0,
+        });
+        Ok(())
+    }
+
+    fn sort(&self, kind: SortKind) -> Result<(), Error> {
+        let client = self.rpc().client_host();
+        match kind {
+            SortKind::Name => sortri::sort_by_name(client),
+            SortKind::Size => sortri::sort_by_size(client),
+            SortKind::NewFirst => sortri::sort_new_first(client),
+            SortKind::Default => sortri::restore_default_settings(client),
+        }
+        {
+            let prefs = client.prefs().borrow();
+            let cmp = sortri::compare_recon_items(&prefs)?;
+            self.items.borrow_mut().sort_by(|a, b| cmp(&a.ri, &b.ri));
+        }
+        self.send(Event::Items {
+            items: self.views(),
+            next: 0,
+        });
+        Ok(())
     }
 
     /// Shows the warnings kept, or (unless in batch mode) asks whether to
@@ -777,6 +923,9 @@ impl Session {
         let prefs = self.rpc().client_host().prefs().borrow();
         Settings {
             profile: self.profile.clone(),
+            profile_path: prefs
+                .profile_pathname(&self.profile, true)
+                .unwrap_or_default(),
             roots: globals::raw_roots(&prefs),
             batch: *prefs.read(&globals::BATCH),
             auto: *prefs.read(&uicommon::AUTO),
@@ -793,6 +942,7 @@ impl Session {
             debug: prefs.read(&trace::DEBUG).clone(),
             run_tests: *prefs.read(&uicommon::RUN_TESTS),
             test_server: *prefs.read(&uicommon::TEST_SERVER),
+            timers: *prefs.read(&trace::TIMERS),
         }
     }
 
@@ -802,6 +952,7 @@ impl Session {
             short: uicommon::roots_to_nice_strings(32, roots),
             full: uicommon::root_suffixes(roots),
             headings: uicommon::roots_to_string(roots),
+            hosts: (host_name(roots.0), host_name(roots.1)),
         })
     }
 
@@ -903,6 +1054,20 @@ impl Session {
                     recon::set_direction(&prefs, &mut ri, dir, Strength::Force)?;
                 }
                 SetAction::Revert => recon::revert_to_default_direction(&mut ri),
+                SetAction::OlderIfConflict | SetAction::NewerIfConflict => {
+                    let dir = if a == SetAction::OlderIfConflict {
+                        Choice::Older
+                    } else {
+                        Choice::Newer
+                    };
+                    let strength = if d.direction.is_conflict() {
+                        Strength::Force
+                    } else {
+                        Strength::Prefer
+                    };
+                    let prefs = self.rpc().client_host().prefs().borrow();
+                    recon::set_direction(&prefs, &mut ri, dir, strength)?;
+                }
             }
         }
         self.items.borrow_mut()[i].ri = ri;
@@ -1046,6 +1211,24 @@ impl Session {
             },
             errors1,
             errors2,
+            props_only: match &ri.replicas {
+                Replicas::Different(d) => matches!(
+                    (&d.rc1.status, &d.rc2.status),
+                    (
+                        Status::PropsChanged,
+                        Status::PropsChanged | Status::Unchanged
+                    ) | (Status::Unchanged, Status::PropsChanged)
+                ),
+                Replicas::Problem(_) => false,
+            },
+            favor_changed: match &ri.replicas {
+                Replicas::Different(d) => match (&d.rc1.status, &d.rc2.status) {
+                    (Status::Modified, Status::PropsChanged) => Some(SetAction::Right),
+                    (Status::PropsChanged, Status::Modified) => Some(SetAction::Left),
+                    _ => None,
+                },
+                Replicas::Problem(_) => None,
+            },
         }
     }
 
@@ -1087,8 +1270,9 @@ impl Session {
                 })
                 .await;
                 match next {
-                    Ok(r) => break r,
+                    Ok(r) => break r.map_err(Stop::from),
                     Err(Some(Command::Abort)) => self.abort(),
+                    Err(Some(Command::Interrupt)) => break Err(Stop::Interrupted),
                     Err(Some(Command::Log(kind, s))) => {
                         if let Err(e) = self.log(kind, &s) {
                             self.send(Event::Error(uicommon::exn2string(&e)));
@@ -1100,6 +1284,20 @@ impl Session {
                 }
             }
         };
+        if matches!(r, Err(Stop::Interrupted)) {
+            // The items being propagated count as done, as the text
+            // interface counts them while the interrupt goes through.
+            self.drain_progress();
+            let in_flight: Vec<usize> = (self.items.borrow().iter().enumerate())
+                .filter(|(_, it)| {
+                    it.started && it.outcome.is_none() && !common::problematic(&it.ri)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            for i in in_flight {
+                self.item_done(i);
+            }
+        }
         uutil::set_progress_printer(client, None);
         self.drain_progress();
         *self.progress.borrow_mut() = None;
@@ -1257,22 +1455,28 @@ impl Session {
             Err(Error::Transient(s)) => Outcome::Failed(s),
             Err(e) => return Err(e),
         };
+        // `progressItem`, then what is left (as the text interface does).
+        if !common::problematic(ri) {
+            self.item_done(i);
+        }
         let rem = {
             let items = self.items.borrow();
             items[i].to_transfer - items[i].transferred
         };
-        if rem != 0 {
+        if rem != 0 && (self.complete_progress || matches!(outcome, Outcome::Failed(_))) {
             self.report(i, rem);
-        }
-        if !common::problematic(ri) {
-            if let Some(t) = self.totals.borrow_mut().as_mut() {
-                t.items_done += 1;
-            }
-            self.report(i, 0);
         }
         self.items.borrow_mut()[i].outcome = Some(outcome);
         self.send(Event::Item(i, self.view(i)));
         Ok(())
+    }
+
+    /// `progressItem`: one more item done.
+    fn item_done(&self, i: usize) {
+        if let Some(t) = self.totals.borrow_mut().as_mut() {
+            t.items_done += 1;
+        }
+        self.report(i, 0);
     }
 
     /// The failures, partial transfers and skipped items, as both
@@ -1316,6 +1520,14 @@ impl Session {
             .map(unsynced)
             .collect();
         s
+    }
+}
+
+/// `root2hostname`.
+fn host_name(r: &gemel_rpc::root::Root) -> String {
+    match &r.host {
+        gemel_rpc::root::Host::Local => "local".to_owned(),
+        gemel_rpc::root::Host::Remote(h) => h.clone(),
     }
 }
 

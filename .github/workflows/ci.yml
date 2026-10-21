@@ -53,7 +53,7 @@ jobs:
       - run: cargo test --locked -p gemel-ui-api --test startup --test session
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
-      # The gemel program in batch mode, against `unison -ui text`.
-      - run: cargo test --locked -p gemel --test batch
+      # The gemel program, in batch and interactive mode, against `unison -ui text`.
+      - run: cargo test --locked -p gemel --test batch --test interactive --test terminal
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison

@@ -15,6 +15,7 @@
 //! and `-socket`; then the text interface, whatever `-ui` asks for.
 
 mod infos;
+mod input;
 mod text;
 
 use gemel_base::uarg::UsageError;

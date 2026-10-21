@@ -273,3 +273,34 @@ fn engine_thread_runs_commands_and_blocking_work() {
     assert_eq!(engine.recv_blocking(), Some(552));
     engine.join().unwrap();
 }
+
+#[test]
+fn engine_thread_forwards_events_to_another_thread() {
+    let mut engine: EngineThread<u64, u64> =
+        EngineThread::spawn(|mut commands, events| async move {
+            while let Some(n) = commands.recv().await {
+                let _ = events.send(n * 2);
+            }
+        })
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    engine.forward_events(move |e| tx.send(e).is_ok()).unwrap();
+    assert!(engine.send(4));
+    assert_eq!(rx.recv().unwrap(), Some(8));
+    // Events no longer wanted are dropped, and the engine still ends.
+    drop(rx);
+    let mut engine2: EngineThread<u64, u64> = EngineThread::spawn(|_, events| async move {
+        let _ = events.send(1);
+    })
+    .unwrap();
+    let (tx, rx2) = std::sync::mpsc::channel();
+    engine2.forward_events(move |e| tx.send(e).is_ok()).unwrap();
+    // The end is told.
+    assert_eq!(rx2.recv().unwrap(), Some(1));
+    assert_eq!(rx2.recv().unwrap(), None);
+    engine2.join().unwrap();
+    assert!(engine.send(5));
+    assert!(engine.send(6));
+    assert_eq!(engine.try_recv(), None);
+    engine.join().unwrap();
+}
