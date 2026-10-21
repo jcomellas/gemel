@@ -912,19 +912,25 @@ mod tests {
             if self.lost.contains(path) {
                 return Err(WatchError::Lost);
             }
-            self.log.push(format!("add {} {root}", path.display()));
+            self.log.push(format!("add {} {root}", slashes(path)));
             self.watching.insert(path.to_path_buf());
             Ok(())
         }
 
         fn release_watch(&mut self, path: &Path, _root: bool) {
-            self.log.push(format!("release {}", path.display()));
+            self.log.push(format!("release {}", slashes(path)));
             self.watching.remove(path);
         }
 
         fn resolve(&self) -> Resolve {
             self.resolve.unwrap_or(Resolve::Watched)
         }
+    }
+
+    /// Paths with `/` on every system: Windows joins names with `\`, as
+    /// `Filename.concat` does there.
+    fn slashes(p: &Path) -> String {
+        p.display().to_string().replace('\\', "/")
     }
 
     fn core() -> Core<Fake> {
@@ -935,7 +941,9 @@ mod tests {
         for l in lines {
             c.line(l.as_bytes(), time).unwrap();
         }
-        String::from_utf8(std::mem::take(&mut c.out)).unwrap()
+        String::from_utf8(std::mem::take(&mut c.out))
+            .unwrap()
+            .replace("%5C", "/")
     }
 
     /// A replica `/r` with `a` and `a/b` scanned, at time 0.
