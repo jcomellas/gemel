@@ -65,6 +65,33 @@ impl<C: Send + 'static, E: Send + 'static> EngineThread<C, E> {
         self.events.try_recv().ok()
     }
 
+    /// Hands the events to `f` from now on, on a thread of their own, for
+    /// a frontend that waits for other things too (keys, signals): then
+    /// `None` once the engine has stopped. Once `f` returns false the
+    /// events are dropped, as by [`join`].
+    ///
+    /// [`join`]: EngineThread::join
+    pub fn forward_events(
+        &mut self,
+        mut f: impl FnMut(Option<E>) -> bool + Send + 'static,
+    ) -> std::io::Result<()> {
+        let (_, closed) = mpsc::unbounded_channel();
+        let mut events = std::mem::replace(&mut self.events, closed);
+        std::thread::Builder::new()
+            .name("gemel-events".into())
+            .spawn(move || {
+                while let Some(e) = events.blocking_recv() {
+                    if !f(Some(e)) {
+                        events.close();
+                        while events.try_recv().is_ok() {}
+                        return;
+                    }
+                }
+                f(None);
+            })?;
+        Ok(())
+    }
+
     /// Stops sending commands and waits for the engine thread to finish.
     /// The events not taken, and any sent from now on, are dropped: so an
     /// engine waiting for an answer carried by one (a channel it holds the

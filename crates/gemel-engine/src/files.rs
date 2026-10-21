@@ -1788,7 +1788,8 @@ async fn copy_back(
     .await
 }
 
-/// The merge's working files, next to the file.
+/// The merge's working files, next to the file, and how the copies
+/// between them report their progress, for the item, and are aborted.
 struct MergeFiles {
     working_dir: Fspath,
     working1: Path<Local>,
@@ -1797,6 +1798,9 @@ struct MergeFiles {
     new1: Path<Local>,
     new2: Path<Local>,
     new_arch: Path<Local>,
+    id: FileId,
+    printer: Option<crate::uutil::ProgressPrinter>,
+    abort: abort::AllFlag,
 }
 
 impl MergeFiles {
@@ -1822,20 +1826,27 @@ impl MergeFiles {
         for (src, trg) in pairs {
             self.delete(ctx, trg)?;
             let info = fileinfo::get(false, &self.working_dir, src, &|_| false, &ctx.fs)?;
-            copy::Progress::none(|p| {
-                copy::local_file(
-                    ctx,
-                    &self.working_dir,
-                    src,
-                    &self.working_dir,
-                    trg,
-                    trg,
-                    Replacing::Copy,
-                    &info.desc,
-                    gemel_fs::osx::ress_length(&info.os_x.ress_info),
-                    p,
-                )
-            })?;
+            let mut progress = |n| {
+                if let Some(p) = &self.printer {
+                    p(self.id, n, "l");
+                }
+            };
+            let check = || self.abort.check();
+            copy::local_file(
+                ctx,
+                &self.working_dir,
+                src,
+                &self.working_dir,
+                trg,
+                trg,
+                Replacing::Copy,
+                &info.desc,
+                gemel_fs::osx::ress_length(&info.os_x.ress_info),
+                &mut copy::Progress {
+                    progress: &mut progress,
+                    check: &check,
+                },
+            )?;
         }
         Ok(())
     }
@@ -2010,6 +2021,13 @@ pub async fn merge(
         new2: temp("mergenew2-"),
         new_arch: temp("mergenewarch-"),
         working_dir,
+        id,
+        printer: crate::uutil::progress_printer(rpc.client_host()),
+        abort: rpc
+            .client_host()
+            .state::<abort::Abort>()
+            .borrow()
+            .all_flag(),
     };
     let ((desc1, fp1, ress1), (desc2, fp2, ress2)) = crate::common::file_infos(ui1, ui2)?;
     let r = merge_in(

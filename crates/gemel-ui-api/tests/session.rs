@@ -10,8 +10,8 @@ use gemel_base::trace::Trace;
 use gemel_rpc::runtime::EngineThread;
 use gemel_ui_api::exit_code::ExitCode;
 use gemel_ui_api::session::{
-    self, Command, Config, Event, IgnoreKind, ItemView, Outcome, Question, SetAction, Summary,
-    Updates,
+    self, Command, Config, Event, IgnoreKind, ItemView, Outcome, Question, SetAction, SortKind,
+    Summary, Updates,
 };
 use gemel_ui_api::uicommon::Action;
 use support::sync::{Output, T0};
@@ -33,6 +33,7 @@ fn start(pair: &Pair, args: &[&str], loopback: bool) -> (Session, Output) {
         scan_status: true,
         log_warnings: false,
         print_wait_message: false,
+        complete_progress: true,
     })
     .unwrap();
     (s, output)
@@ -51,6 +52,7 @@ fn is_reply(c: &Command, e: &Event) -> bool {
         | Event::Committed
         | Event::Diff { .. }
         | Event::Error(_)
+        | Event::Interrupted
         | Event::Exit(_) => true,
         Event::Item(..) => matches!(c, Command::SetAction(..)),
         _ => false,
@@ -631,6 +633,169 @@ fn quitting_answers_what_is_left_unanswered() {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.starts_with("lk"))
+        .collect();
+    assert_eq!(locks, Vec::<String>::new());
+}
+
+fn items(e: Event) -> Vec<ItemView> {
+    match e {
+        Event::Items { items, next } => {
+            assert_eq!(next, 0);
+            items
+        }
+        e => panic!("{e:?}"),
+    }
+}
+
+fn names(items: &[ItemView]) -> Vec<&str> {
+    items.iter().map(|v| v.path_string.as_str()).collect()
+}
+
+/// The items can be put in another order, some left out, and sorted; a
+/// sync propagates only those kept.
+#[test]
+fn items_can_be_arranged_and_sorted() {
+    let pair = synced_pair("session-arrange", &["times = true"], |_| {});
+    write(&pair.a(), "a", &"x".repeat(100), T0);
+    write(&pair.a(), "b", "x", T0);
+    write(&pair.a(), "c", &"x".repeat(10), T0);
+    settle(&[&pair.a(), &pair.b()]);
+    let (mut s, _) = start(&pair, &["p", "-batch"], false);
+    load(&mut s, &mut no_questions);
+    let u = updates(&mut s, &mut no_questions);
+    assert_eq!(names(&u.items), ["a", "b", "c"]);
+    let kept = items(ok(&mut s, Command::Arrange(vec![2, 0]), &mut no_questions));
+    assert_eq!(names(&kept), ["c", "a"]);
+    let by_size = items(ok(&mut s, Command::Sort(SortKind::Size), &mut no_questions));
+    assert_eq!(names(&by_size), ["c", "a"]);
+    let by_name = items(ok(&mut s, Command::Sort(SortKind::Name), &mut no_questions));
+    assert_eq!(names(&by_name), ["a", "c"]);
+    let back = items(ok(
+        &mut s,
+        Command::Sort(SortKind::Default),
+        &mut no_questions,
+    ));
+    assert_eq!(names(&back), ["a", "c"]);
+    // An item given twice, or one that doesn't exist.
+    for order in [vec![0, 0], vec![5]] {
+        let (_, e) = call(&mut s, Command::Arrange(order), &mut no_questions);
+        assert!(matches!(e, Event::Error(_)), "{e:?}");
+    }
+    let (_, summary) = synchronize(&mut s, &mut no_questions);
+    assert_eq!(summary.transferred, 2);
+    ok(&mut s, Command::Commit, &mut no_questions);
+    s.join().unwrap();
+    assert!(pair.b().join("a").exists() && pair.b().join("c").exists());
+    assert!(!pair.b().join("b").exists());
+}
+
+/// Older and newer "if a conflict" change only a conflict, or an item
+/// whose default is one.
+#[test]
+fn conflicts_are_resolved_only_if_they_are_conflicts() {
+    let pair = synced_pair("session-if-conflict", &["times = true"], |r| {
+        write(r, "both", "same", T0);
+    });
+    write(&pair.a(), "both", "a's", T0 + 10.0);
+    write(&pair.b(), "both", "b's, newer", T0 + 20.0);
+    write(&pair.a(), "new", "new in a", T0 + 10.0);
+    settle(&[&pair.a(), &pair.b()]);
+    let (mut s, _) = start(&pair, &["p", "-batch"], false);
+    load(&mut s, &mut no_questions);
+    let u = updates(&mut s, &mut no_questions);
+    let set = |s: &mut Session, i, a| match ok(s, Command::SetAction(i, a), &mut no_questions) {
+        Event::Item(_, v) => v.action,
+        e => panic!("{e:?}"),
+    };
+    let (both, _) = item(&u.items, "both");
+    let (new, _) = item(&u.items, "new");
+    assert_eq!(
+        set(&mut s, new, SetAction::OlderIfConflict),
+        Action::LtoR(false)
+    );
+    assert_eq!(
+        set(&mut s, both, SetAction::NewerIfConflict),
+        Action::RtoL(false)
+    );
+    // No longer a conflict, but its default is one.
+    assert_eq!(
+        set(&mut s, both, SetAction::OlderIfConflict),
+        Action::LtoR(false)
+    );
+    s.join().unwrap();
+}
+
+/// What the matching conditions and "in favour of the changed" need: only
+/// properties changed, and contents changed on one side only.
+#[cfg(unix)]
+#[test]
+fn props_changes_are_told_apart() {
+    use std::os::unix::fs::PermissionsExt;
+    let pair = synced_pair("session-props", &["times = true"], |r| {
+        write(r, "props", "same", T0);
+        write(r, "mixed", "same", T0);
+    });
+    let chmod = |p: std::path::PathBuf| {
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).unwrap()
+    };
+    chmod(pair.a().join("props"));
+    write(&pair.a(), "mixed", "a's", T0 + 10.0);
+    chmod(pair.b().join("mixed"));
+    settle(&[&pair.a(), &pair.b()]);
+    let (mut s, _) = start(&pair, &["p", "-batch"], false);
+    load(&mut s, &mut no_questions);
+    let u = updates(&mut s, &mut no_questions);
+    let (_, props) = item(&u.items, "props");
+    assert!(
+        props.props_only && props.favor_changed.is_none(),
+        "{props:?}"
+    );
+    let (_, mixed) = item(&u.items, "mixed");
+    assert!(!mixed.props_only, "{mixed:?}");
+    assert_eq!(mixed.favor_changed, Some(SetAction::Right));
+    s.join().unwrap();
+}
+
+/// An interrupt stops what the session is doing, a question left
+/// unanswered included (answering it later does nothing), and the
+/// session goes on; once it ends, the archives are unlocked.
+#[test]
+fn an_interrupt_stops_a_question_unanswered() {
+    let pair = Pair::new("session-interrupt");
+    pair.profile("p", &[]);
+    write(&pair.a(), "f", "f", T0);
+    settle(&[&pair.a()]);
+    let (mut s, _) = start(&pair, &["p"], false);
+    load(&mut s, &mut no_questions);
+    // Nothing running.
+    assert!(matches!(
+        ok(&mut s, Command::Interrupt, &mut no_questions),
+        Event::Interrupted
+    ));
+    let mut held = None;
+    let c = Command::Update {
+        allow_partial: true,
+        paths: None,
+    };
+    let (_, e) = call(&mut s, c, &mut |s, q| match q {
+        // No archives: the warning.
+        Question::Warning(_, r) => {
+            assert!(s.send(Command::Interrupt));
+            held = Some(r);
+        }
+        q => panic!("{q:?}"),
+    });
+    assert!(matches!(e, Event::Interrupted), "{e:?}");
+    held.expect("asked").send(false);
+    let (_, e) = call(&mut s, Command::Start, &mut no_questions);
+    assert!(matches!(e, Event::Started(_)), "{e:?}");
+    s.join().unwrap();
+    let locks: Vec<_> = std::fs::read_dir(pair.u())
+        .unwrap()
+        .filter_map(|e| {
+            let n = e.unwrap().file_name().to_string_lossy().into_owned();
+            n.starts_with("lk").then_some(n)
+        })
         .collect();
     assert_eq!(locks, Vec::<String>::new());
 }

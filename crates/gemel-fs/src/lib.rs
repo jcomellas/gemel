@@ -6,7 +6,9 @@
 //! and group names, `getattrlist`/`setattrlist` on macOS, `umask`,
 //! `gethostname`, the Windows file-information calls behind `stat`, and
 //! for copying `clonefile` on macOS and `ioctl(FICLONE)`,
-//! `copy_file_range` and `sendfile64` on Linux.
+//! `copy_file_range` and `sendfile64` on Linux, and for the text interface
+//! the terminal's modes (`tcgetattr`/`tcsetattr`, the Windows console's)
+//! and catching signals (`sigaction`, `SetConsoleCtrlHandler`).
 //!
 //! Not ported yet: AppleDouble files (resource forks on volumes without
 //! them), reading and setting xattrs and ACLs, and block cloning on
@@ -20,4 +22,6 @@ pub mod os;
 pub mod osx;
 pub mod props;
 pub mod reflink;
+pub mod signal;
 pub mod system;
+pub mod terminal;
