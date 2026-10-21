@@ -7,9 +7,14 @@
 //! OCaml keeps this state in globals of the process; here it is [`Abort`],
 //! kept in a host's state slot (`Host::state::<Abort>()`). A local run's
 //! client is its own host, so the user interface and the transfers share
-//! it, as in OCaml; a server has its own, which nothing aborts.
+//! it, as in OCaml; a server has its own, which nothing aborts. Whether
+//! everything is aborted is also an [`AllFlag`], which the copies' blocking
+//! tasks read while they run. The slot is reset in place, never replaced,
+//! so a flag taken from it stays current across runs.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
 use gemel_base::util::{Error, FileId};
@@ -39,18 +44,50 @@ pub const ABORTED: &str = "Aborted";
 /// The message when everything is aborted.
 pub const ABORTED_BY_USER: &str = "Aborted by user request";
 
+/// Whether everything is aborted, shared with the tasks that copy off the
+/// engine thread. [`Abort::reset`] clears the same flag, so one taken
+/// before stays current.
+#[derive(Debug, Clone, Default)]
+pub struct AllFlag(Arc<AtomicBool>);
+
+impl AllFlag {
+    /// `Abort.all`, from any thread (a signal handler's, say).
+    pub fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether everything is aborted.
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    /// `Abort.checkAll`: fails if everything is aborted.
+    pub fn check(&self) -> Result<(), Error> {
+        if self.is_set() {
+            return Err(Error::Transient(ABORTED_BY_USER.into()));
+        }
+        Ok(())
+    }
+}
+
 /// Which transfers are aborted.
 #[derive(Debug, Default)]
 pub struct Abort {
     errors: HashMap<FileId, i64>,
-    all: bool,
+    all: AllFlag,
 }
 
 impl Abort {
     /// `Abort.reset`: nothing is aborted.
     pub fn reset(&mut self) {
         self.errors.clear();
-        self.all = false;
+        self.all.0.store(false, Ordering::SeqCst);
+    }
+
+    /// The flag that says whether everything is aborted, for a task off the
+    /// engine thread.
+    pub fn all_flag(&self) -> AllFlag {
+        self.all.clone()
     }
 
     /// `Abort.file`: aborts one item (counts an error against it).
@@ -60,20 +97,17 @@ impl Abort {
 
     /// `Abort.all`: aborts everything.
     pub fn all(&mut self) {
-        self.all = true;
+        self.all.set();
     }
 
     /// `Abort.isAll`.
     pub fn is_all(&self) -> bool {
-        self.all
+        self.all.is_set()
     }
 
     /// `Abort.checkAll`: fails if everything is aborted.
     pub fn check_all(&self) -> Result<(), Error> {
-        if self.all {
-            return Err(Error::Transient(ABORTED_BY_USER.into()));
-        }
-        Ok(())
+        self.all.check()
     }
 
     /// `Abort.check`: fails if everything is aborted, or if the item has had
@@ -115,5 +149,25 @@ mod tests {
         a.reset();
         assert_eq!(a.check(x, 1), Ok(()));
         assert!(!is_abort(&Error::Fatal(ABORTED.into())));
+    }
+
+    #[test]
+    fn the_flag_is_shared_across_threads_and_resets() {
+        let mut a = Abort::default();
+        let flag = a.all_flag();
+        let seen = std::thread::spawn({
+            let flag = flag.clone();
+            move || flag.check()
+        });
+        assert_eq!(seen.join().unwrap(), Ok(()));
+        a.all();
+        let seen = std::thread::spawn({
+            let flag = flag.clone();
+            move || flag.check()
+        });
+        assert!(is_abort(&seen.join().unwrap().unwrap_err()));
+        // A flag taken before the reset sees it.
+        a.reset();
+        assert!(!flag.is_set());
     }
 }

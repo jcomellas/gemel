@@ -8,11 +8,14 @@ mod support;
 use std::cell::RefCell;
 use std::path::Path as StdPath;
 
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use gemel_base::util::{Error, FileId};
 use gemel_engine::abort::Abort;
-use gemel_engine::common;
+use gemel_engine::common::{self, ReconItem};
 use gemel_engine::transport::{self, Task};
-use gemel_engine::{recon, update};
+use gemel_engine::{recon, update, uutil};
 
 use support::oracle::*;
 use support::sync::*;
@@ -29,10 +32,19 @@ impl Setup {
     /// skipped. A failed item is noted (with the roots named `A` and `B`),
     /// and the rest go on; an error that stops the run skips the commit.
     fn sync(&self) -> Outcome {
+        self.sync_items().1
+    }
+
+    /// [`Setup::sync`], and the items it propagated.
+    fn sync_items(&self) -> (Vec<ReconItem>, Outcome) {
         settle(&[&self.a(), &self.b()]);
         let found = self.find();
-        block_on(async {
-            let (items, _, _) = recon::reconcile_all(&self.rpc, &self.roots, false, found).await?;
+        let items = RefCell::new(Vec::new());
+        let outcome = block_on(async {
+            let (found_items, _, _) =
+                recon::reconcile_all(&self.rpc, &self.roots, false, found).await?;
+            *items.borrow_mut() = found_items.clone();
+            let items = found_items;
             if items.iter().all(common::problematic) {
                 update::commit_updates(&self.rpc, &self.roots).await?;
                 return Ok(Vec::new());
@@ -53,7 +65,7 @@ impl Setup {
                                 &self.roots,
                                 ri,
                                 FileId(i as i64),
-                                &mut |_, _| true,
+                                &mut |_, _| Box::pin(async { true }),
                             )
                             .await;
                             match r {
@@ -73,7 +85,8 @@ impl Setup {
             transport::log_finish(&self.rpc)?;
             update::commit_updates(&self.rpc, &self.roots).await?;
             Ok(failed.into_inner())
-        })
+        });
+        (items.into_inner(), outcome)
     }
 
     /// The root names in log entries, and what to show instead.
@@ -90,9 +103,17 @@ fn transport_log(log: &str, s: &Setup) -> Vec<String> {
     let mut detail = false;
     for line in log.lines() {
         let keep = detail
-            || ["[BGN] ", "[END] ", "[CONFLICT] ", "[ERROR] ", "Failed ["]
-                .iter()
-                .any(|p| line.starts_with(p));
+            || [
+                "[BGN] ",
+                "[END] ",
+                "[CONFLICT] ",
+                "[ERROR] ",
+                "Failed [",
+                "Merge command: ",
+                "Merge result (",
+            ]
+            .iter()
+            .any(|p| line.starts_with(p));
         detail = ["[CONFLICT] ", "[ERROR] ", "Failed ["]
             .iter()
             .any(|p| line.starts_with(p));
@@ -339,7 +360,7 @@ fn only_files_are_merged() {
             &s.roots,
             ri,
             FileId(0),
-            &mut |_, _| true,
+            &mut |_, _| Box::pin(async { true }),
         ));
         assert_eq!(
             r,
@@ -483,4 +504,187 @@ fn aborting_everything_stops_dispensing() {
     ))
     .unwrap();
     assert_eq!(ran.into_inner(), Vec::<i32>::new());
+}
+
+/// What the progress printer got: the item, the bytes and the tag.
+type Reports = Arc<Mutex<Vec<(FileId, i64, &'static str)>>>;
+
+/// Installs a progress printer on the client that records what it gets.
+fn record_progress(s: &Setup) -> Reports {
+    let seen = Reports::default();
+    let r = seen.clone();
+    uutil::set_progress_printer(
+        s.rpc.client_host(),
+        Some(Arc::new(move |id, n, tag| {
+            r.lock().unwrap().push((id, n, tag))
+        })),
+    );
+    seen
+}
+
+/// Each item's progress adds up to what propagating it transfers
+/// (`riLength`): a copy as it goes, a move all at once.
+#[test]
+fn progress_adds_up_to_what_each_item_transfers() {
+    for loopback in [false, true] {
+        let dir = TempDir::new("transport-progress");
+        let s = synced(&dir, loopback, &["moves-experimental = true"], build_tree);
+        write(&s.a(), "big", &"x".repeat(300_000), T0 + 20.0);
+        write(&s.a(), "new/f1", "one", T0 + 20.0);
+        write(&s.a(), "new/f2", "two two", T0 + 20.0);
+        write(&s.b(), "README", "b's own version", T0 + 20.0);
+        std::fs::rename(s.a().join("src/main.c"), s.a().join("src/moved.c")).unwrap();
+        std::fs::remove_file(s.b().join("src/deep/x")).unwrap();
+        let seen = record_progress(&s);
+        let (items, outcome) = s.sync_items();
+        assert_eq!(outcome.unwrap(), Vec::<String>::new(), "{loopback}");
+        let mut by_item: BTreeMap<i64, (i64, Vec<&str>)> = BTreeMap::new();
+        for (id, n, tag) in seen.lock().unwrap().iter() {
+            let e = by_item.entry(id.0).or_default();
+            e.0 += n;
+            if !e.1.contains(tag) {
+                e.1.push(tag);
+            }
+        }
+        let shown: Vec<_> = items
+            .iter()
+            .enumerate()
+            .map(|(i, ri)| {
+                let (n, tags) = by_item.remove(&(i as i64)).unwrap_or_default();
+                let p = String::from_utf8_lossy(ri.path1.as_bytes()).into_owned();
+                (p, n, common::ri_length(ri), tags)
+            })
+            .collect();
+        for (p, n, len, _) in &shown {
+            assert_eq!(n, len, "{p} ({loopback}): {shown:?}");
+        }
+        let tags = |p: &str| &shown.iter().find(|s| s.0 == p).expect(p).3;
+        assert_eq!(tags("big"), &["l"]);
+        assert_eq!(tags("new"), &["l"]);
+        assert_eq!(tags("README"), &["l"]);
+        // A move is shown at its original path.
+        assert_eq!(tags("src/main.c"), &["mov"]);
+        // A deletion transfers nothing, and reports nothing.
+        assert_eq!(tags("src/deep/x"), &[] as &[&str]);
+        assert!(by_item.is_empty(), "{by_item:?}");
+    }
+}
+
+/// Aborting everything from another thread (a signal handler's, say)
+/// reaches the run, through the flag the copies read: nothing more starts.
+/// The next run starts afresh.
+#[test]
+fn aborting_from_another_thread_stops_the_run() {
+    for loopback in [false, true] {
+        let dir = TempDir::new("transport-abort-flag");
+        let s = synced(&dir, loopback, &[], build_tree);
+        for n in ["a1", "a2", "a3"] {
+            write(&s.a(), n, n, T0 + 20.0);
+        }
+        // Taken before the run, whose start resets it in place.
+        let flag = s.rpc.client_host().state::<Abort>().borrow().all_flag();
+        uutil::set_progress_printer(
+            s.rpc.client_host(),
+            Some(Arc::new(move |_, _, _| {
+                let flag = flag.clone();
+                std::thread::spawn(move || flag.set()).join().unwrap();
+            })),
+        );
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new());
+        let there = |n: &str| s.b().join(n).exists();
+        assert_eq!(
+            (there("a1"), there("a2"), there("a3")),
+            (true, false, false)
+        );
+        uutil::set_progress_printer(s.rpc.client_host(), None);
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new());
+        assert_eq!((there("a1"), there("a2"), there("a3")), (true, true, true));
+    }
+}
+
+/// A merge logs its command and result, and says what it made of the
+/// outputs on stderr, unless log entries aren't shown there.
+#[cfg(unix)]
+#[test]
+fn a_merge_is_logged_and_explained() {
+    for to_stderr in [true, false] {
+        let dir = TempDir::new("transport-merge-log");
+        let prefs = ["merge = Name README -> cat CURRENT1 CURRENT2 > NEW"];
+        let s = synced(&dir, false, &prefs, build_tree);
+        write(&s.a(), "README", "a's version\n", T0 + 20.0);
+        write(&s.b(), "README", "b's version\n", T0 + 30.0);
+        s.output.take();
+        s.rpc
+            .client_host()
+            .state::<gemel_base::trace::Trace>()
+            .borrow_mut()
+            .send_log_msgs_to_stderr = to_stderr;
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new());
+        let out = s.output.take();
+        assert_eq!(out.contains("One output detected \n"), to_stderr, "{out}");
+        assert_eq!(out.contains("Merge command: cat "), to_stderr, "{out}");
+        let log = read_log(&s.base.join("u/unison.log"));
+        assert!(log.contains("Merge command: cat "), "{log}");
+        assert!(log.contains("Merge result (exited (0)):\n"), "{log}");
+        assert!(!log.contains("One output detected"), "{log}");
+    }
+}
+
+/// Update detection and reconciliation show their status, and with
+/// `timers`, how long the scan and each copy took. The path being scanned
+/// is shown now and then, by the host that scans: a server shows nothing.
+#[test]
+fn the_scan_and_reconciliation_show_their_status() {
+    for loopback in [false, true] {
+        let dir = TempDir::new("transport-status");
+        let s = synced(&dir, loopback, &[], build_tree);
+        for i in 0..40 {
+            write(&s.a(), &format!("many/f{i:02}"), "f", T0 + 20.0);
+        }
+        let shown = Arc::new(Mutex::new(Vec::<String>::new()));
+        let d = shown.clone();
+        s.rpc
+            .client_host()
+            .state::<gemel_base::trace::Trace>()
+            .borrow_mut()
+            .set_displayer(Some(Box::new(move |m: &str| {
+                d.lock().unwrap().push(m.to_owned())
+            })));
+        s.set_prefs(|p| p.set(&gemel_base::trace::TIMERS, true));
+        let scanned = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sc = scanned.clone();
+        uutil::set_update_status_printer(
+            s.rpc.client_host(),
+            Some(Arc::new(move |p: &str| {
+                sc.lock().unwrap().push(p.to_owned())
+            })),
+        );
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new());
+        let shown = shown.lock().unwrap().clone();
+        let at = |pred: &dyn Fn(&str) -> bool| {
+            shown
+                .iter()
+                .position(|m| pred(m))
+                .unwrap_or_else(|| panic!("{shown:?}"))
+        };
+        let collecting = at(&|m| m == "Collecting changes...");
+        let collected = at(&|m| m.starts_with("Collecting changes (") && m.ends_with(" seconds)"));
+        let done = at(&|m| m == " ");
+        let reconciling = at(&|m| m == "Reconciling changes ");
+        let copying = at(&|m| m == "Transmitting file...");
+        assert!(
+            collecting < collected
+                && collected < done
+                && done < reconciling
+                && reconciling < copying,
+            "{shown:?}"
+        );
+        let scanned = scanned.lock().unwrap().clone();
+        if loopback {
+            assert_eq!(scanned, Vec::<String>::new());
+        } else {
+            assert!(!scanned.is_empty());
+            assert!(scanned.iter().all(|p| !p.is_empty()), "{scanned:?}");
+        }
+    }
 }

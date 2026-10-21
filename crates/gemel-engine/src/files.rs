@@ -43,6 +43,7 @@ use crate::copy::{self, Ctx, Replacing, Source};
 use crate::globals::Roots;
 use crate::stasher::{self, Disposition};
 use crate::update::{self, TRANSLATE_PATH};
+use crate::with_trace;
 use crate::{abort, exclusive, xferhint};
 
 fn internal(what: &str) -> Error {
@@ -1530,8 +1531,8 @@ pub async fn move_(
     to: MoveSide<'_>,
     old_desc: &Props,
     not_default: bool,
-    _size: gemel_fs::props::Filesize,
-    _id: FileId,
+    size: gemel_fs::props::Filesize,
+    id: FileId,
 ) -> Result<(), Error> {
     use UpdateContent::{Absent, Dir, File};
     use UpdateItem::{NoUpdates, Updates};
@@ -1578,6 +1579,7 @@ pub async fn move_(
         (from.path.clone(), from.new_path.clone(), reverting),
     )
     .await?;
+    crate::uutil::show_progress(rpc.client_host(), id, size, "mov");
     // The props after the rename, which could change them. (Only on the
     // path itself: a moved directory's children wait for the next sync.)
     set_prop(
@@ -1860,27 +1862,39 @@ fn settle_merge(
     m: &MergeFiles,
     status: crate::external::ProcessStatus,
     (fp1, fp2): (&os::FullFingerprint, &os::FullFingerprint),
+    say: &mut dyn FnMut(&str),
 ) -> Result<(), Error> {
     let (w1, w2, wa) = (&m.working1, &m.working2, &m.working_arch);
     let (n1, n2) = (&m.new1, &m.new2);
     let ok = status.success();
     match (m.exists(n1), m.exists(n2), m.exists(&m.new_arch)) {
-        (true, true, _) => {
+        (true, true, new_arch) => {
+            say(if new_arch {
+                "Three outputs detected \n"
+            } else {
+                "Two outputs detected \n"
+            });
             if m.fingerprint(ctx, n1)? == m.fingerprint(ctx, n2)? {
                 m.copy(ctx, &[(n1, w1), (n2, w2), (n1, wa)])
             } else if ok {
                 // Not equal, but the program returned 0: the first output
                 // wins, for the other replica and the archive too.
+                say("Two outputs not equal but merge command returned 0, so we will\n");
+                say("overwrite the other replica and the archive with the first output\n");
                 m.copy(ctx, &[(n1, w1), (n1, w2), (n1, wa)])
             } else {
                 // Not equal and a failure: both back, the archive as it was.
+                say("Two outputs not equal and the merge command exited with nonzero status, \n");
+                say("so we will copy back the new files but not update the archive\n");
                 m.copy(ctx, &[(n1, w1), (n2, w2)])
             }
         }
         (true, false, false) => {
             if ok {
+                say("One output detected \n");
                 m.copy(ctx, &[(n1, w1), (n1, w2), (n1, wa)])
             } else {
+                say("One output detected but merge command returned nonzero exit status\n");
                 Err(Error::Transient(
                     "One output detected but merge command returned nonzero exit status\n"
                         .to_owned(),
@@ -1889,8 +1903,10 @@ fn settle_merge(
         }
         (false, true, false) => Err(internal("only the second merge output")),
         (false, false, false) => {
+            say("No outputs detected \n");
             let (still1, still2) = (m.exists(w1), m.exists(w2));
             if still1 && still2 {
+                say("No output from merge cmd and both original files are still present\n");
                 let (fp1b, fp2b) = (m.fingerprint(ctx, w1)?, m.fingerprint(ctx, w2)?);
                 if *fp1 == fp1b && *fp2 == fp2b {
                     return Err(Error::Transient(
@@ -1898,11 +1914,13 @@ fn settle_merge(
                     ));
                 }
                 if fp1b == fp2b {
+                    say("Merge program made files equal\n");
                     m.copy(ctx, &[(w1, wa)])
                 } else if *fp2 == fp2b {
-                    // Just the first input changed.
+                    say("Merge program changed just first input\n");
                     m.copy(ctx, &[(w1, w2), (w1, wa)])
                 } else if *fp1 == fp1b {
+                    say("Merge program changed just second input\n");
                     m.copy(ctx, &[(w2, w1), (w2, wa)])
                 } else if !ok {
                     Err(Error::Transient(
@@ -1913,11 +1931,15 @@ fn settle_merge(
                 } else {
                     // Both changed differently, but a 0 means "morally
                     // equal": the second wins, so the file is in sync again.
+                    say("Merge program changed both of its inputs in");
+                    say("different ways, but returned zero.\n");
                     m.copy(ctx, &[(w2, w1), (w2, wa)])
                 }
             } else if still1 && !still2 && ok {
+                say("No outputs and second replica has been deleted \n");
                 m.copy(ctx, &[(w1, w2), (w1, wa)])
             } else if !still1 && still2 && ok {
+                say("No outputs and first replica has been deleted \n");
                 m.copy(ctx, &[(w2, w1), (w2, wa)])
             } else if ok {
                 Err(Error::Transient(
@@ -1926,12 +1948,28 @@ fn settle_merge(
                         .to_owned(),
                 ))
             } else {
+                say("The merge program exited with nonzero status and did not leave");
+                say(" both files equal");
                 Err(Error::Transient(
                     "Error: the merge program failed and did not leave both files equal".to_owned(),
                 ))
             }
         }
         _ => Err(internal("an unexpected set of merge outputs")),
+    }
+}
+
+/// Shows a merge's result (a title, and what the merge program printed)
+/// and says whether to keep it; it may wait for the user to answer.
+pub type ShowMerge<'a> = dyn FnMut(String, String) -> crate::transport::Task<'a, bool> + 'a;
+
+/// `showStatus`: how the merge program ended, as the log says.
+fn show_status(s: crate::external::ProcessStatus) -> String {
+    use crate::external::ProcessStatus::{Exited, Signaled, Stopped};
+    match s {
+        Exited(i) => format!("exited ({i})"),
+        Signaled(i) => format!("killed with signal {i}"),
+        Stopped(i) => format!("stopped with signal {i}"),
     }
 }
 
@@ -1949,7 +1987,7 @@ pub async fn merge(
     path2: &Path<Global>,
     ui2: &UpdateItem,
     id: FileId,
-    show_merge: &mut dyn FnMut(&str, &str) -> bool,
+    show_merge: &mut ShowMerge<'_>,
 ) -> Result<(), Error> {
     if !(root1.is_local() && root2.is_local()) {
         return Err(Error::Fatal(
@@ -2016,7 +2054,7 @@ async fn merge_in(
     (root2, path2, ui2): (&Root, &Path<Global>, &UpdateItem),
     ((desc1, fp1, ress1), (desc2, fp2, ress2)): FileInfos,
     id: FileId,
-    show_merge: &mut dyn FnMut(&str, &str) -> bool,
+    show_merge: &mut ShowMerge<'_>,
 ) -> Result<(), Error> {
     use crate::common::PrevState;
     use UpdateItem::{NoUpdates, Updates};
@@ -2121,14 +2159,33 @@ async fn merge_in(
             },
         )?
     };
+    with_trace(rpc, |t, p| t.log(p, &format!("Merge command: {cmd}\n")))?;
     let (status, log) = crate::external::run_external_program(&cmd).await?;
+    with_trace(rpc, |t, p| {
+        t.log(
+            p,
+            &format!("Merge result ({}):\n{log}\n", show_status(status)),
+        )
+    })?;
+    crate::debug(rpc.client_host(), "files", || {
+        format!("Merge result = {}\n", show_status(status))
+    });
     // This also shows the result, so it comes before what may fail below.
-    if !show_merge(&format!("Results of merging {}", path_str(path1)), &log) {
+    if !show_merge(format!("Results of merging {}", path_str(path1)), log).await {
         return Err(Error::Transient(
             "Merge command canceled by the user".to_owned(),
         ));
     }
-    settle_merge(ctx, m, status, (&fp1, &fp2))?;
+    // Shown as they would be logged (on stderr, unless the interface has
+    // none).
+    let mut say = |s: &str| {
+        with_trace(rpc, |t, _| {
+            if t.send_log_msgs_to_stderr {
+                t.msg(s);
+            }
+        })
+    };
+    settle_merge(ctx, m, status, (&fp1, &fp2), &mut say)?;
     // Commit the results.
     let arch_fspath = m.abs(&m.working_arch);
     let (desc1, desc2, arch_to) = if system::file_exists(arch_fspath.as_bytes()) {
