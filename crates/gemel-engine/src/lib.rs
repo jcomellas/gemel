@@ -41,13 +41,15 @@ pub fn register_features(features: &mut Features) -> Result<(), Error> {
     moves::register_features(features)
 }
 
-/// Registers the preferences of the engine modules ported so far (not
-/// those of `gemel-base` and `gemel-fs`), in OCaml's order.
+/// Registers the preferences of the engine modules ported so far, and
+/// `remote`'s (in `gemel-rpc`), in OCaml's order; not those of
+/// `gemel-base` and `gemel-fs`.
 pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     pred::register_prefs(prefs)?;
     abort::register_prefs(prefs)?;
     fswatch::register_prefs(prefs)?;
     xferhint::register_prefs(prefs)?;
+    gemel_rpc::connection::register_prefs(prefs)?;
     globals::register_prefs(prefs)?;
     fpcache::register_prefs(prefs)?;
     archive::register_prefs(prefs)?;

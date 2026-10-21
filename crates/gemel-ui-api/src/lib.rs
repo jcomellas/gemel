@@ -33,6 +33,7 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     gemel_fs::fileinfo::register_prefs(prefs)?;
     gemel_fs::os::register_prefs(prefs)?;
     xferhint::register_prefs(prefs)?;
+    gemel_rpc::connection::register_prefs(prefs)?;
     globals::register_prefs(prefs)?;
     fpcache::register_prefs(prefs)?;
     archive::register_prefs(prefs)?;
