@@ -268,7 +268,9 @@ fn replace_digits(s: &str, pattern: &str, with: &str) -> String {
 /// path, versions, clock times, dates and durations, and the progress
 /// display (carriage-return-separated, timing dependent).
 pub fn normalize(s: &str, work: &Path) -> String {
-    let mut s = s.replace(&work.display().to_string(), "<W>");
+    // Windows roots print with `/` (`Fspath.localString2fspath`).
+    let w = work.display().to_string();
+    let mut s = s.replace(&w, "<W>").replace(&w.replace('\\', "/"), "<W>");
     // Progress and the scanning spinner ("/ name", "- name", ...) are
     // drawn as carriage-return-separated pieces of a line, with blank
     // pieces to erase them; drop them.
@@ -311,7 +313,24 @@ pub fn normalize(s: &str, work: &Path) -> String {
         }
     }
     out.push_str(rest);
-    let mut s = out;
+    // gemel's banner is "Gemel 0.1.0", with no runtime in parentheses.
+    let mut s = String::new();
+    let mut rest = out.as_str();
+    while let Some(i) = rest.find("Gemel ") {
+        s.push_str(&rest[..i]);
+        let after = &rest[i + 6..];
+        let n = after
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(after.len());
+        if after.starts_with(|c: char| c.is_ascii_digit()) {
+            s.push_str("Unison <version>");
+            rest = &after[n..];
+        } else {
+            s.push_str("Gemel ");
+            rest = after;
+        }
+    }
+    s.push_str(rest);
     s = replace_digits(&s, "99:99:99.99", "<time>");
     s = replace_digits(&s, "99:99:99", "<time>");
     s = replace_digits(&s, "9:99:99", "<time>");
@@ -332,6 +351,7 @@ mod tests {
         let raw = "Starting...   Starting...\r 28%  0/2  (2 B of 5 B)  --:-- ETA \rdone\n\
                    / f  \r     \r   new file <-?-> new file   c\n\
                    Unison 2.54.0 (ocaml 4.14.3) started propagating changes at 18:38:45.70 on 19 Oct 2026\n\
+                   Gemel 0.1.0 finished propagating changes at 18:38:45.70 on 19 Oct 2026\n\
                    [BGN] Copying d from /tmp/w/a to /tmp/w/b\n\
                    modified on 2026-10-19 at 18:38:44  size 2\n\
                    finished at 18:38:46 on 19 Oct 2026, 0.007 s\n\
@@ -341,6 +361,7 @@ mod tests {
             "done\n\
                 \x20  new file <-?-> new file   c\n\
              Unison <version> started propagating changes at <time> on <date>\n\
+             Unison <version> finished propagating changes at <time> on <date>\n\
              [BGN] Copying d from <W>/a to <W>/b\n\
              modified on <date> at <time>  size 2\n\
              finished at <time> on <date>, <duration>\n\

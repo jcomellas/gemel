@@ -59,7 +59,6 @@ const NAMES: &[&str] = &[
 enum Kind {
     Dir,
     File,
-    #[cfg_attr(not(unix), allow(dead_code))]
     Link,
 }
 
@@ -179,10 +178,44 @@ impl Tree {
     }
 }
 
+/// Which filesystem a scenario is generated for. Windows scenarios have no
+/// permission changes or symbolic links.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flavour {
+    Unix,
+    Windows,
+}
+
+impl Flavour {
+    pub fn host() -> Flavour {
+        if cfg!(unix) {
+            Flavour::Unix
+        } else {
+            Flavour::Windows
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Flavour::Unix => "unix",
+            Flavour::Windows => "windows",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Flavour> {
+        match s {
+            "unix" => Some(Flavour::Unix),
+            "windows" => Some(Flavour::Windows),
+            _ => None,
+        }
+    }
+}
+
 /// Generates ops, keeping file modification times distinct and increasing.
 struct Gen<'a> {
     rng: &'a mut Rng,
     clock: &'a mut u64,
+    flavour: Flavour,
 }
 
 impl Gen<'_> {
@@ -232,7 +265,9 @@ impl Gen<'_> {
         let files = tree.of_kind(Kind::File);
         let dirs = tree.dirs();
         let any: Vec<String> = tree.0.keys().cloned().collect();
-        let roll = self.rng.below(if cfg!(unix) { 8 } else { 6 });
+        let roll = self
+            .rng
+            .below(if self.flavour == Flavour::Unix { 8 } else { 6 });
         Some(match roll {
             0 | 1 => {
                 let dir = self.rng.pick(&dirs).clone();
@@ -322,13 +357,14 @@ pub struct Scenario {
 }
 
 impl Scenario {
-    pub fn generate(seed: u64) -> Scenario {
+    pub fn generate(seed: u64, flavour: Flavour) -> Scenario {
         let mut rng = Rng::new(seed);
         // Start well in the past, so no time is within a second of the syncs.
         let mut clock = 1_600_000_000;
         let mut g = Gen {
             rng: &mut rng,
             clock: &mut clock,
+            flavour,
         };
         let mut a = Tree::default();
         let initial_a = g.initial(&mut a);
@@ -449,14 +485,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn windows_scenarios_have_no_modes_or_links() {
+        for seed in 0..200 {
+            let s = Scenario::generate(seed, Flavour::Windows);
+            for op in s
+                .initial_a
+                .iter()
+                .chain(&s.initial_b)
+                .chain(&s.changes_a)
+                .chain(&s.changes_b)
+            {
+                assert!(!matches!(op, Op::Chmod { .. } | Op::Symlink { .. }), "{op}");
+            }
+        }
+    }
+
+    #[test]
     fn generation_is_deterministic() {
         for seed in 0..50 {
-            let (s1, s2) = (Scenario::generate(seed), Scenario::generate(seed));
-            assert_eq!(s1.to_string(), s2.to_string());
+            for f in [Flavour::Unix, Flavour::Windows] {
+                let (s1, s2) = (Scenario::generate(seed, f), Scenario::generate(seed, f));
+                assert_eq!(s1.to_string(), s2.to_string());
+            }
         }
         assert_ne!(
-            Scenario::generate(1).to_string(),
-            Scenario::generate(2).to_string()
+            Scenario::generate(1, Flavour::Unix).to_string(),
+            Scenario::generate(2, Flavour::Unix).to_string()
         );
     }
 }

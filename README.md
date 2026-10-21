@@ -11,7 +11,7 @@ OCaml Unison:
   command line, root specifications, the feature registry, property lists,
   tracing and logging, and the Rx pattern engine.
 
-Milestone 2 is under way ([plan](docs/milestone-2-plan.md)): the oracle
+Milestone 2 is done ([plan](docs/milestone-2-plan.md)): the oracle
 harness (`tools/oracle`), `gemel-fs` (file metadata, `stat`, directory
 operations, fingerprints), the local half of `gemel-rpc` (roots, the
 command registry, the engine thread), the engine's foundations (update
@@ -35,8 +35,11 @@ menu, in raw mode or in a dumb terminal, and syncs, prints and logs as it
 does, in batch mode too; Ctrl-C and `SIGTERM` are handled as OCaml 5
 handles them. `-repeat` with an interval and the profile manager (`-i`) work as
 OCaml's do, and `-help` lists the options as OCaml's does, except
-`-acl` and `-xattrs`. Watching for changes, the GUI and remote
-connections are still to come.
+`-acl` and `-xattrs`. On generated scenarios gemel ends as OCaml Unison
+does, and OCaml accepts the archives gemel writes. CI checks this on
+Linux, and Windows replays outcomes recorded from OCaml. Watching for
+changes, synchronising xattrs and ACLs, the GUI and remote connections
+are still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 

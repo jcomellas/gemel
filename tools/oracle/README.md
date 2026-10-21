@@ -58,6 +58,9 @@ scripts/oracle.sh /path/to/unison --count 30
 |---|---|
 | `--candidate PATH` | The binary under test |
 | `--seed N --count K` | Run scenarios `N` to `N+K-1` |
+| `--flavour unix\|windows` | Generate scenarios for this system (default: the host's) |
+| `--record FILE` | Save the reference's outcomes, if every scenario agrees |
+| `--replay FILE` | Compare the candidate with recorded outcomes, without a reference |
 | `--work DIR` | Where to work (default: a fresh temporary directory) |
 | `--keep` | Keep the work directories of scenarios that agree |
 
@@ -65,6 +68,41 @@ A scenario that differs prints its operations and the first difference in
 each compared item, and its `<seed>-reference` and `<seed>-candidate`
 directories are kept for inspection.
 
-With the reference as its own candidate, every scenario must agree; CI
-checks this (the `oracle` job). A candidate that runs the same unison with
-`-perms 0` fails every scenario, which shows the comparison is sensitive.
+With the reference as its own candidate, every scenario must agree. A
+candidate that runs the same unison with `-perms 0` fails every scenario,
+which shows the comparison is sensitive. CI's `oracle` job runs this
+self-test, then gemel as the candidate.
+
+## Recorded outcomes, for Windows
+
+There is no OCaml Unison build on Windows, so CI's Windows job replays
+outcomes recorded from the pinned reference, as does its macOS job, which
+has no OCaml either: [`recorded/windows.txt`](recorded/windows.txt), 100
+Windows-flavour scenarios (no permission changes or symbolic links). The
+file is kept byte for byte (`-text` in `.gitattributes`). The oracle job
+replays the file with the reference as the candidate, which shows it is
+still what the reference does, and with gemel.
+
+```sh
+# Record again, in Docker, after a change to scenarios or normalisation
+scripts/oracle.sh /path/to/unison --flavour windows --count 100 \
+    --record /work/tools/oracle/recorded/windows.txt
+
+# Replay, here with gemel
+cargo run -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt \
+    --candidate target/debug/gemel
+```
+
+A replay compares the same things, with what depends on the system
+removed from both sides:
+- line endings;
+- the padding of local times;
+- separators in the roots;
+- permissions, which OCaml prints as `read-write` or `read-only` on
+  Windows;
+- the archives' hashes, which cover the roots' paths and the host's name.
+
+With no reference to recheck the final state, the candidate rechecks its
+own. That is weaker than a live run: it shows that gemel accepts its own
+archives, not that OCaml does. A candidate that runs unison with
+`-ignore "Name a"` fails 59 of the 100 recorded scenarios.

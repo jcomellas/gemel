@@ -3,3 +3,6 @@
 crates/gemel-compat/tests/fixtures/*.txt -text linguist-generated
 crates/gemel-compat/src/unicode/tables.rs -text linguist-generated
 crates/gemel-engine/tests/archives/* -text linguist-generated
+# Recorded by the oracle harness (tools/oracle/README.md); a replay reads the
+# bytes as recorded.
+tools/oracle/recorded/* -text linguist-generated
