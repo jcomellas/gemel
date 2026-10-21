@@ -1539,8 +1539,12 @@ name = "gemel-ui-api"
 version = "0.1.0"
 dependencies = [
  "gemel-base",
+ "gemel-compat",
  "gemel-engine",
+ "gemel-fs",
  "gemel-rpc",
+ "md-5",
+ "tokio",
 ]
 
 [[package]]

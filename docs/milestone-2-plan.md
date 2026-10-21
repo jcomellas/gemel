@@ -299,6 +299,45 @@ Split, like phase 4, into:
 - **The session contract** modelled on `uimacbridge.ml`: `init1`/`init2`, item accessors and setters, `synchronize`, abort, ignore, and diff.
 - Exit codes (already ported).
 
+Split, like phases 4 and 6, into:
+- **7a:** `uicommon`, and the startup it drives;
+- **7b:** the session contract, on the engine thread.
+
+What earlier phases left for phase 7, and where each goes:
+
+| Left by | Item | Where |
+|---|---|---|
+| 4a, 4b | Register the `case` and `fileinfo` preferences on every host; default `path` to the empty path; call `case::init`, `osx::init` and `fileinfo::init` (which derives `links-aux`) before `propagatePrefs` | 7a (`validateAndFixupPrefs`, `initPrefs`) |
+| 5 | A host that registers the engine's features registers its preferences too | 7a: one registration of every preference, in OCaml's link order, for the client and every server host |
+| 6a | `initBackups` after `propagatePrefs` | 7a (`initRoots`) |
+| 6c | The client's `Trace` slot, with its Unison directory, installed before anything logs (`initPrefs` logs before the roots exist) | 7a |
+| 4b, 5 | The status messages of update detection, the "Reconciling changes" status, and the debug traces of both | 7b, with the status events |
+| 6a | Progress reporting and timers; aborting in the middle of a copy, which needs an abort flag that the copy's blocking task can read | 7b |
+| 6b | The merge command's log and result, and merge's messages on standard error | 7b, with the merge confirmation |
+| 6c | `doTransport`'s statistics, and catching `Transient` for each item | 7b (the session's `synchronize`) and phase 8 (`uitext`) |
+
+Decided now for 7b, because 7a's callbacks depend on it:
+- **The session runs on the engine thread** and owns the `Rpc`, the installed roots (`None` until `initRoots`, and again after `initPrefs`, as `Globals.uninstallRoots`) and the items. Frontends reach it through `EngineThread`: commands in, events out. Events carry snapshots of items (`Send`), not the engine's own values.
+- **Questions to the user are requests with a reply channel,** not events: roots when none are given, the warning panel, dangerous paths, merge confirmation, and (milestone 3) passwords. So `initPrefs`'s `promptForRoots` is async.
+- **A sync runs as a task of its own** on the engine thread, so the session still reads commands during it. Abort is the one command it then accepts; it sets a flag shared with the copies' blocking tasks.
+
+**Notes (phase 7a, 2026-10-21):**
+- **`uicommon`:** all of it but the self-tests (`selftest`, whose `Test` module isn't ported) and turning on GC messages.
+  - Its preferences, including `repeat` with its own codec (the setting as a string).
+  - The formatting: `details2string`, `reconItem2string`, `displayPath`, the root names (`roots2niceStrings`), and `dangerousPathMsg`. Paths and root names are shown with invalid UTF-8 replaced, where OCaml prints their bytes.
+  - The ignore patterns (`ignorePath`, `ignoreName`, `ignoreExt`, `addIgnorePattern`), and `showDiffs` (`uicommon`'s, which follows moves; `uimacbridge`'s copy doesn't).
+  - `Stats`: the rate and time left. Where OCaml's `truncate` is undefined (a time left too long for an integer, as at a rate of 0), gemel shows the default instead.
+  - The startup, in `uicommon::startup`: `scanProfiles`, `uiInitClRootsAndProfile`, `initPrefs`, `initRoots`, `connectRoots` and `validateAndFixupPrefs`, with the `architecture` root command. OCaml's globals (the command line's roots, the installed roots, the profiles found) are in `Ui`, with the client's `Rpc`.
+  - `transportStart`, `transportFinish` and `transportItems` stay in `gemel_engine::transport` (see 6c).
+- **Every host registers every preference** (`gemel_ui_api::register_prefs`), in OCaml's link order, which is the order of the dump sent to a server. A server refuses a preference it doesn't know, so the loopback server, and phase 8's `-server`, register the same set. The `watch` preference (`Fswatch.useWatcher`) is registered, for `repeat = watch`; the watcher is phase 9.
+- **`client_rpc`** builds the client with the Trace slot installed, its Unison directory set, before anything logs.
+- **Ported with it:** `Props.init` (the permission mask and owners on Windows), `Util.truncateString` and `Util.padto` (both counting as OCaml does: code points, and bytes), and `String.capitalize_ascii`.
+- **Not ported yet:** the `ui` preference and `Uicommon.interface` (phase 8, with `main`); `remote`'s preferences (milestone 3), so a profile that sets one, such as `sshargs`, is refused.
+- **Tests:**
+  - Golden vectors from OCaml (`gen_uicommon.ml`, which copies `truncateString`, `quote` and `Stats` out of Unison's sources) for truncating, quoting patterns, and the rates and times left. The rates are compared up to rounding, since `exp` and `pow` can differ in the last bit between C libraries.
+  - `tests/startup.rs`: the command line's roots and profile, asking for roots, installing them once per profile, the start of the log, and the list of profiles with their keys. Two scenarios sync from a profile (one with `ignore` and `label`, one with a `path` ending in `*`), twice each and in both dispatch modes, on twin replicas with OCaml's `unison <profile> -batch`. They must end the same, with the same log (from its start, with the text interface's summaries left out), and with each item's details as OCaml prints them. Then OCaml finds nothing to do on gemel's replicas. CI's oracle job runs it.
+
+
 ### Phase 8: text UI, `bins/gemel` (~2.1k)
 
 - **`main`:** the driver: `-server` stub, profile selection, `-batch` and `-ui text`.

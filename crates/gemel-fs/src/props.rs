@@ -140,6 +140,23 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     prefs.register(&TIMES)
 }
 
+/// `Props.init`: once it is known whether a host runs Windows, keeps only
+/// the permission bits Windows can set, and stops synchronising owners and
+/// groups.
+pub fn init(prefs: &mut Prefs, some_host_running_windows: bool) {
+    let mask = if some_host_running_windows {
+        WINDOWS_PERM_MASK
+    } else {
+        0o7777
+    };
+    let perms = *prefs.read(&PERMS);
+    prefs.set(&PERMS, perms & mask);
+    if some_host_running_windows {
+        prefs.set(&OWNER, false);
+        prefs.set(&GROUP, false);
+    }
+}
+
 /// The feature that adds the change time and xattrs to props.
 pub const FEATURE_XATTR: &str = "Sync: xattr";
 

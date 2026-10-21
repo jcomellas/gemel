@@ -142,9 +142,76 @@ pub fn split_into_words(s: &str, c: char) -> Vec<String> {
     }
 }
 
+/// `Util.padto`: `s` padded with spaces to `n` bytes (OCaml counts bytes,
+/// not characters).
+pub fn padto(n: usize, s: &str) -> String {
+    format!("{s}{}", " ".repeat(n.saturating_sub(s.len())))
+}
+
+/// `Util.truncateString`: `s` (made UTF-8 and composed) cut to `count`
+/// code points, its last three replaced by `...` if it was longer.
+pub fn truncate_string(s: &[u8], count: i64) -> String {
+    use gemel_compat::unicode;
+    // Like `String.sub`, extended (never shortened) by up to six bytes
+    // until it is valid UTF-8.
+    fn sub_valid_utf8(s: &[u8], pos: usize, len: usize) -> Option<&[u8]> {
+        let total = s.len();
+        if pos >= total {
+            return None;
+        }
+        for (len, extra) in (len..).zip(0..) {
+            if pos + len > total {
+                return Some(&s[pos..]);
+            }
+            let sub = &s[pos..pos + len];
+            if unicode::check_utf_8(sub) || extra > 5 {
+                return Some(sub);
+            }
+        }
+        unreachable!()
+    }
+    // `count` code points from byte `pos` (at least one, as in OCaml).
+    fn extract_codepoints(s: &[u8], mut pos: usize, mut count: i64) -> Vec<u8> {
+        let mut out = Vec::new();
+        while let Some(c) = sub_valid_utf8(s, pos, 1) {
+            out.extend_from_slice(c);
+            pos += c.len();
+            if count <= 1 {
+                break;
+            }
+            count -= 1;
+        }
+        out
+    }
+    let s = unicode::compose(&unicode::protect(s));
+    let head = extract_codepoints(&s, 0, count - 3);
+    let tail = extract_codepoints(&s, head.len(), 3);
+    let mut out = head;
+    if out.len() + tail.len() < s.len() {
+        out.extend_from_slice(b"...");
+    } else {
+        out.extend_from_slice(&tail);
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `String.capitalize_ascii`.
+pub fn capitalize_ascii(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+        .unwrap_or_default()
+}
+
+/// `Uutil.myName`: the program's name, in messages (`gemel`).
+pub const MY_NAME: &str = "gemel";
+
 /// `Uutil.myNameAndVersion`, for messages to the user. Archives and the
 /// files Unison names keep OCaml's name (`unison`), for compatibility.
 pub const MY_NAME_AND_VERSION: &str = concat!("gemel ", env!("CARGO_PKG_VERSION"));
+
+/// `Uutil.myVersion`.
+pub const MY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// `Uutil.quotes`: `s` quoted for the shell (single quotes on Unix,
 /// double quotes on Windows).
