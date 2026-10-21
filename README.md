@@ -26,8 +26,10 @@ choosing and loading a profile, the command line, setting up the roots),
 so a sync can run from a `.prf` profile as OCaml's does. The engine
 reports what an interface shows: progress for each item, the path being
 scanned, status messages and timers, and a merge's result; and an abort
-reaches a copy as it runs. The session contract the frontends use, the
-frontends themselves and remote connections are still to come.
+reaches a copy as it runs. The session contract the frontends use
+(`gemel-ui-api`'s `session`: commands in, events out, on the engine
+thread) is done too. The frontends themselves and remote connections are
+still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 

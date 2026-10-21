@@ -14,11 +14,11 @@ gemel-base.workspace = true
 gemel-fs.workspace = true
 gemel-engine.workspace = true
 gemel-rpc.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 # For gemel-engine's test support, which these tests share.
 md-5.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

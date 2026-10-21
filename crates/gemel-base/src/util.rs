@@ -142,6 +142,22 @@ pub fn split_into_words(s: &str, c: char) -> Vec<String> {
     }
 }
 
+/// `Util.percent2string`: a percentage, between 0 and 100, as `" 42%"`.
+pub fn percent2string(p: f64) -> String {
+    let p = if p.is_nan() { 0. } else { p.clamp(0., 100.) };
+    format!("{:3}%", p as i64)
+}
+
+/// `Uutil.Filesize.percentageOfTotalSize`: `current` as a percentage of
+/// `total` (100 if `total` is 0).
+pub fn percentage_of_total_size(current: i64, total: i64) -> f64 {
+    if total == 0 {
+        100.
+    } else {
+        current as f64 * 100. / total as f64
+    }
+}
+
 /// `Util.padto`: `s` padded with spaces to `n` bytes (OCaml counts bytes,
 /// not characters).
 pub fn padto(n: usize, s: &str) -> String {
@@ -344,6 +360,17 @@ pub fn int_of_string(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn percentages() {
+        assert_eq!(percent2string(0.), "  0%");
+        assert_eq!(percent2string(42.9), " 42%");
+        assert_eq!(percent2string(100.), "100%");
+        assert_eq!(percent2string(250.), "100%");
+        assert_eq!(percent2string(-3.), "  0%");
+        assert_eq!(percentage_of_total_size(1, 4), 25.);
+        assert_eq!(percentage_of_total_size(5, 0), 100.);
+    }
 
     #[test]
     fn string_helpers_match_util_ml() {
