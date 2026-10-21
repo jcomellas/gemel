@@ -32,6 +32,7 @@ fn start(pair: &Pair, args: &[&str], loopback: bool) -> (Session, Output) {
         status_events: true,
         scan_status: true,
         log_warnings: false,
+        print_wait_message: false,
     })
     .unwrap();
     (s, output)
@@ -40,9 +41,10 @@ fn start(pair: &Pair, args: &[&str], loopback: bool) -> (Session, Output) {
 /// Whether `e` ends command `c`.
 fn is_reply(c: &Command, e: &Event) -> bool {
     match e {
-        Event::Started { .. }
+        Event::Started(_)
         | Event::Profiles(_)
         | Event::ProfileLoaded(_)
+        | Event::Connected(_)
         | Event::Updates(_)
         | Event::Items { .. }
         | Event::Synchronized(_)
@@ -99,7 +101,7 @@ fn ok(s: &mut Session, c: Command, answer: &mut dyn FnMut(&mut Session, Question
 
 /// Loads the profile the command line names.
 fn load(s: &mut Session, answer: &mut dyn FnMut(&mut Session, Question)) {
-    let Event::Started { profile, .. } = ok(s, Command::Start, answer) else {
+    let Event::Started(profile) = ok(s, Command::Start, answer) else {
         panic!()
     };
     let profile = profile.expect("a profile");
@@ -185,10 +187,13 @@ fn profiles_are_listed_and_roots_asked_for() {
     pair.profile("other", &["label = another"]);
     std::fs::write(pair.u().join("empty.prf"), "").unwrap();
     let (mut s, _) = start(&pair, &[], false);
-    let Event::Started { profile, profiles } = ok(&mut s, Command::Start, &mut no_questions) else {
+    let Event::Started(profile) = ok(&mut s, Command::Start, &mut no_questions) else {
         panic!()
     };
     assert_eq!(profile, None);
+    let Event::Profiles(profiles) = ok(&mut s, Command::ScanProfiles, &mut no_questions) else {
+        panic!()
+    };
     let names: Vec<_> = profiles.iter().map(|(n, _)| n.as_str()).collect();
     assert_eq!(names, ["empty", "other"]);
     // Without an answer.

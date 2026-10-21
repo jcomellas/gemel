@@ -55,6 +55,7 @@ use std::time::Instant;
 
 use gemel_base::case;
 use gemel_base::path::{Global, Path};
+use gemel_base::prefs::BoolWithDefault;
 use gemel_base::trace::{self, Trace};
 use gemel_base::util::{self, Error, FileId};
 use gemel_engine::abort::Abort;
@@ -67,6 +68,7 @@ use gemel_fs::props::Filesize;
 use gemel_rpc::runtime::{Commands, EngineThread, Events};
 use tokio::sync::{mpsc, oneshot};
 
+use crate::cli;
 use crate::exit_code::ExitCode;
 use crate::uicommon::startup::{ProfileInfo, Ui, client_rpc};
 use crate::uicommon::stats::Stats;
@@ -92,15 +94,21 @@ pub struct Config {
     pub scan_status: bool,
     /// Warnings are logged, as the Mac interface logs them.
     pub log_warnings: bool,
+    /// The message that the roots are being connected goes to stderr,
+    /// through the trace (unless `silent`), as the text interface shows
+    /// it; otherwise it comes as [`Event::Contacting`].
+    pub print_wait_message: bool,
 }
 
 /// What a frontend asks the session to do.
 #[derive(Debug, Clone)]
 pub enum Command {
-    /// `uiInitClRootsAndProfile` and `scanProfiles`: the profile the
-    /// command line names, and every profile. Replies [`Event::Started`].
+    /// `uiInitClRootsAndProfile`: the profile the command line names.
+    /// Replies [`Event::Started`]. (The other profiles are left alone, as
+    /// the text interface leaves them, unless the frontend asks for them.)
     Start,
-    /// `scanProfiles` again. Replies [`Event::Profiles`].
+    /// `scanProfiles`: every profile, with its roots, label and key.
+    /// Replies [`Event::Profiles`].
     ScanProfiles,
     /// `unisonProfileInit`: makes the profile `name`, with these roots.
     /// Replies [`Event::Profiles`].
@@ -115,6 +123,12 @@ pub enum Command {
     /// `initPrefs`: loads a profile, and the command line over it (asking
     /// for roots if neither gives them). Replies [`Event::ProfileLoaded`].
     LoadProfile(String),
+    /// Overrides some of the profile's settings, as `-silent` and
+    /// `-repeat` imply others. Replies [`Event::ProfileLoaded`].
+    Configure(Overrides),
+    /// `connectRoots`: connects the roots if they aren't, and sends them
+    /// the preferences. Replies [`Event::Connected`].
+    Connect,
     /// Connects the roots if they aren't, finds the updates and reconciles
     /// them; commits at once if there were no archives. Replies
     /// [`Event::Updates`].
@@ -132,7 +146,7 @@ pub enum Command {
     /// then the deletions. Replies [`Event::Synchronized`].
     Synchronize,
     /// `Abort.all`: stops a sync; what is copying stops at its next check,
-    /// and nothing more starts. No reply.
+    /// and nothing more starts. No reply. (Taken during a sync.)
     Abort,
     /// `commitUpdates`: saves the archives. Replies [`Event::Committed`].
     Commit,
@@ -142,7 +156,8 @@ pub enum Command {
     Ignore(usize, IgnoreKind),
     /// `showDiffs` on an item. Replies [`Event::Diff`].
     Diff(usize),
-    /// Writes to the log. No reply.
+    /// Writes to the log, or shows a status. No reply. (Taken during a
+    /// sync.)
     Log(LogKind, String),
 }
 
@@ -185,23 +200,22 @@ pub enum LogKind {
     LogColor,
     /// `Trace.logonly`: the log only.
     LogOnly,
+    /// `Trace.status`: a status message.
+    Status,
 }
 
 /// What the session tells the frontend.
 #[derive(Debug)]
 pub enum Event {
     /// [`Command::Start`]'s reply: the profile the command line names, if
-    /// any (roots alone name `default`), and every profile.
-    Started {
-        /// The profile to load, or `None` for the user to choose one.
-        profile: Option<String>,
-        /// The profiles found.
-        profiles: Vec<(String, ProfileInfo)>,
-    },
+    /// any (roots alone name `default`); `None` for the user to choose one.
+    Started(Option<String>),
     /// The profiles found.
     Profiles(Vec<(String, ProfileInfo)>),
-    /// [`Command::LoadProfile`]'s reply.
+    /// [`Command::LoadProfile`]'s and [`Command::Configure`]'s reply.
     ProfileLoaded(Settings),
+    /// [`Command::Connect`]'s reply: the roots' names.
+    Connected(RootNames),
     /// The roots are being connected (`contactingServerMsg`).
     Contacting(String),
     /// A status message, or a timer's (with [`Config::status_events`]).
@@ -284,6 +298,32 @@ impl<T> Reply<T> {
     }
 }
 
+/// Settings to override ([`Command::Configure`]); `None` leaves one as it
+/// is.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Overrides {
+    /// `batch`.
+    pub batch: Option<bool>,
+    /// `terse`.
+    pub terse: Option<bool>,
+    /// `auto`.
+    pub auto: Option<bool>,
+    /// Log entries also go to stderr (`Trace.sendLogMsgsToStderr`).
+    pub log_to_stderr: Option<bool>,
+}
+
+/// The roots' names, for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootNames {
+    /// `roots2niceStrings 32`.
+    pub short: (String, String),
+    /// The ends of their paths that differ (`Fspath.differentSuffix`), or
+    /// `local` and the host's name, in full.
+    pub full: (String, String),
+    /// `roots2string`: the headings of the columns.
+    pub headings: String,
+}
+
 /// The settings a frontend needs, once a profile is loaded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
@@ -309,6 +349,18 @@ pub struct Settings {
     pub confirm_big_deletes: bool,
     /// `label`.
     pub label: String,
+    /// `silent`.
+    pub silent: bool,
+    /// `dumbtty`.
+    pub dumbtty: bool,
+    /// `color`.
+    pub color: BoolWithDefault,
+    /// `debug`: the modules being debugged.
+    pub debug: Vec<String>,
+    /// `selftest`.
+    pub run_tests: bool,
+    /// `testserver`.
+    pub test_server: bool,
 }
 
 /// [`Command::Update`]'s result.
@@ -324,8 +376,8 @@ pub struct Updates {
     pub dangerous_message: Option<String>,
     /// There were archives (`Update.foundArchives`).
     pub found_archives: bool,
-    /// The roots' names, for display (`roots2niceStrings 32`).
-    pub roots: (String, String),
+    /// The roots' names.
+    pub roots: RootNames,
 }
 
 /// An item, as a frontend shows it.
@@ -370,6 +422,21 @@ pub struct ItemView {
     pub progress: String,
     /// How it went, once propagated.
     pub outcome: Option<Outcome>,
+    /// What the text interface shows of it (`reconItem2stringList` from
+    /// the empty path): the first replica's short status, ...
+    pub status1: &'static str,
+    /// ... the second's, ...
+    pub status2: &'static str,
+    /// ... and the path, with a move's other name.
+    pub shown_path: String,
+    /// A problem found during update detection, if it is one.
+    pub problem: Option<String>,
+    /// Why it is skipped, if it is: a problem, or a conflict.
+    pub skip_reason: Option<String>,
+    /// The errors deep inside, in the first replica.
+    pub errors1: Vec<String>,
+    /// The same, in the second.
+    pub errors2: Vec<String>,
 }
 
 /// How propagating an item went (`Util.confirmation`).
@@ -509,6 +576,8 @@ struct Session {
     events: Events<Event>,
     scan_status: bool,
     log_warnings: bool,
+    print_wait_message: bool,
+    profile: String,
     items: RefCell<Vec<Item>>,
     warnings: Rc<RefCell<Vec<String>>>,
     totals: RefCell<Option<Totals>>,
@@ -540,6 +609,8 @@ impl Session {
             events,
             scan_status: config.scan_status,
             log_warnings: config.log_warnings,
+            print_wait_message: config.print_wait_message,
+            profile: String::new(),
             items: RefCell::new(Vec::new()),
             warnings,
             totals: RefCell::new(None),
@@ -576,10 +647,8 @@ impl Session {
                     .ui
                     .ui_init_cl_roots_and_profile()
                     .map_err(Error::Fatal)?;
-                self.ui.scan_profiles()?;
                 self.ask_warnings().await?;
-                let profiles = self.ui.profiles_and_roots.clone();
-                self.send(Event::Started { profile, profiles });
+                self.send(Event::Started(profile));
             }
             Command::ScanProfiles => {
                 self.ui.scan_profiles()?;
@@ -600,6 +669,29 @@ impl Session {
                 self.send(Event::Profiles(self.ui.profiles_and_roots.clone()));
             }
             Command::LoadProfile(name) => self.load_profile(&name).await?,
+            Command::Configure(o) => {
+                {
+                    let client = self.rpc().client_host();
+                    let mut prefs = client.prefs().borrow_mut();
+                    if let Some(b) = o.batch {
+                        prefs.set(&globals::BATCH, b);
+                    }
+                    if let Some(b) = o.terse {
+                        prefs.set(&trace::TERSE, b);
+                    }
+                    if let Some(b) = o.auto {
+                        prefs.set(&uicommon::AUTO, b);
+                    }
+                }
+                if let Some(b) = o.log_to_stderr {
+                    with_trace(self.rpc(), |t, _| t.send_log_msgs_to_stderr = b);
+                }
+                self.send(Event::ProfileLoaded(self.settings()));
+            }
+            Command::Connect => {
+                self.connect().await?;
+                self.send(Event::Connected(self.root_names()?));
+            }
             Command::Update {
                 allow_partial,
                 paths,
@@ -615,13 +707,18 @@ impl Session {
             }
             Command::Ignore(i, kind) => self.ignore(i, kind).await?,
             Command::Diff(i) => self.diff(i).await?,
-            Command::Log(kind, s) => with_trace(self.rpc(), |t, p| match kind {
-                LogKind::Log => t.log(p, &s),
-                LogKind::LogColor => t.log_color(p, &s),
-                LogKind::LogOnly => t.log_only(p, &s),
-            })?,
+            Command::Log(kind, s) => self.log(kind, &s)?,
         }
         Ok(())
+    }
+
+    fn log(&self, kind: LogKind, s: &str) -> Result<(), Error> {
+        with_trace(self.rpc(), |t, p| match kind {
+            LogKind::Log => t.log(p, s),
+            LogKind::LogColor => t.log_color(p, s),
+            LogKind::LogOnly => t.log_only(p, s),
+            LogKind::Status => t.status(p, s),
+        })
     }
 
     /// Shows the warnings kept, or (unless in batch mode) asks whether to
@@ -671,9 +768,15 @@ impl Session {
             .await;
         self.ask_warnings().await?;
         asked?;
+        self.profile = name.to_owned();
+        self.send(Event::ProfileLoaded(self.settings()));
+        Ok(())
+    }
+
+    fn settings(&self) -> Settings {
         let prefs = self.rpc().client_host().prefs().borrow();
-        let settings = Settings {
-            profile: name.to_owned(),
+        Settings {
+            profile: self.profile.clone(),
             roots: globals::raw_roots(&prefs),
             batch: *prefs.read(&globals::BATCH),
             auto: *prefs.read(&uicommon::AUTO),
@@ -684,10 +787,43 @@ impl Session {
             confirm_merge: *prefs.read(&uicommon::CONFIRM_MERGE),
             confirm_big_deletes: *prefs.read(&globals::CONFIRM_BIG_DELETES),
             label: prefs.read(&uicommon::PROFILE_LABEL).clone(),
-        };
-        drop(prefs);
-        self.send(Event::ProfileLoaded(settings));
-        Ok(())
+            silent: *prefs.read(&cli::SILENT),
+            dumbtty: *prefs.read(&cli::DUMBTTY),
+            color: *prefs.read(&cli::COLOR),
+            debug: prefs.read(&trace::DEBUG).clone(),
+            run_tests: *prefs.read(&uicommon::RUN_TESTS),
+            test_server: *prefs.read(&uicommon::TEST_SERVER),
+        }
+    }
+
+    fn root_names(&self) -> Result<RootNames, Error> {
+        let roots = self.roots()?.pair();
+        Ok(RootNames {
+            short: uicommon::roots_to_nice_strings(32, roots),
+            full: uicommon::root_suffixes(roots),
+            headings: uicommon::roots_to_string(roots),
+        })
+    }
+
+    /// `connectRoots`, with the message that it may take a while.
+    async fn connect(&mut self) -> Result<(), Stop> {
+        let events = self.events.clone();
+        let print = self.print_wait_message;
+        let client = self.ui.rpc().client_host().clone();
+        self.ui
+            .connect_roots(&mut || {
+                let msg = uicommon::contacting_server_msg();
+                if !print {
+                    let _ = events.send(Event::Contacting(msg));
+                } else if !*client.prefs().borrow().read(&cli::SILENT) {
+                    client
+                        .state::<Trace>()
+                        .borrow_mut()
+                        .msg(&format!("{msg}\n"));
+                }
+            })
+            .await?;
+        self.ask_warnings().await
     }
 
     async fn update(
@@ -696,13 +832,7 @@ impl Session {
         paths: Option<Vec<Path<Global>>>,
     ) -> Result<(), Stop> {
         self.items.borrow_mut().clear();
-        let events = self.events.clone();
-        self.ui
-            .connect_roots(&mut || {
-                let _ = events.send(Event::Contacting(uicommon::contacting_server_msg()));
-            })
-            .await?;
-        self.ask_warnings().await?;
+        self.connect().await?;
         let (rpc, roots) = (self.ui.rpc(), self.roots()?);
         with_trace(rpc, |t, p| t.status(p, "Looking for changes"))?;
         let client = rpc.client_host();
@@ -749,7 +879,7 @@ impl Session {
                 .then(|| uicommon::dangerous_path_msg(&dangerous)),
             dangerous,
             found_archives,
-            roots: uicommon::roots_to_nice_strings(32, roots.pair()),
+            roots: self.root_names()?,
         };
         self.send(Event::Updates(updates));
         Ok(())
@@ -876,7 +1006,11 @@ impl Session {
             (_, Some(Outcome::Succeeded), _) => "done".to_owned(),
             (_, Some(Outcome::Failed(_)), _) => "FAILED".to_owned(),
         };
-        let (_, action, _, _) = fmt.recon_item_parts(&previous, ri);
+        let (status1, action, status2, shown_path) = fmt.recon_item_parts(&Path::empty(), ri);
+        let (errors1, errors2) = match &ri.replicas {
+            Replicas::Different(d) => (d.errors1.clone(), d.errors2.clone()),
+            Replicas::Problem(_) => (Vec::new(), Vec::new()),
+        };
         ItemView {
             path: ri.path1.clone(),
             path_string: uicommon::path_string(&ri.path1),
@@ -896,6 +1030,22 @@ impl Session {
             transferred: it.transferred,
             progress,
             outcome: it.outcome.clone(),
+            status1,
+            status2,
+            shown_path,
+            problem: match &ri.replicas {
+                Replicas::Problem(s) => Some(s.clone()),
+                Replicas::Different(_) => None,
+            },
+            skip_reason: match &ri.replicas {
+                Replicas::Problem(s) => Some(s.clone()),
+                Replicas::Different(d) => match &d.direction {
+                    Direction::Conflict(r) => Some(r.clone()),
+                    _ => None,
+                },
+            },
+            errors1,
+            errors2,
         }
     }
 
@@ -939,6 +1089,11 @@ impl Session {
                 match next {
                     Ok(r) => break r,
                     Err(Some(Command::Abort)) => self.abort(),
+                    Err(Some(Command::Log(kind, s))) => {
+                        if let Err(e) = self.log(kind, &s) {
+                            self.send(Event::Error(uicommon::exn2string(&e)));
+                        }
+                    }
                     Err(Some(c)) => self.send(Event::Refused(c)),
                     // The frontend has gone: the sync finishes all the same.
                     Err(None) => commands_open = false,

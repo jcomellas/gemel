@@ -393,6 +393,27 @@ Decided now for 7c, because 7a's callbacks depend on it:
 
 The text UI uses the phase 7 contract rather than the engine directly, so the contract has a consumer before the GUI.
 
+Split into:
+- **8a:** `main` and the text interface's batch mode, with the preferences of both: one sync with `-batch` (and `-silent`, `-terse`, `-retry`), its output, summary, log and exit code, checked against OCaml's `unison -batch -ui text` (stdout, stderr, the log, the replicas and the exit code). `-version`; `-server`, `-socket`, `-doc`, `-prefsdocs` and `-prefsman` say they aren't supported yet.
+- **8b:** interactive mode (the per-item prompts and keys, the confirmations, the terminal's raw mode and dumb-terminal handling, interrupts), `-repeat` with a time interval and safe stops, the profile manager (`-i`), and `-help`'s list of options (`Prefs.printUsage`).
+
+Decided for 8a:
+- **Who writes where:** while a session step runs, only the engine writes to stderr (through the trace), and only the frontend writes to stdout. So the session prints the wait message itself (`Config`), and the frontend's own stderr output comes before the session starts or after it ends. Before exiting, the frontend joins the session, so that the log entries it asked for are written.
+- **Session additions:** `Command::Configure` (what `-silent` and `-repeat` imply: `batch`, `terse`, and whether log entries go to stderr), and `Command::Connect` on its own (`start2` connects before the warning printer changes); `ItemView` with `displayri`'s parts (against the empty path) and each root's errors; `Updates` with the roots' untruncated names (`Fspath.differentSuffix`); `Settings` with the text interface's preferences and the debug modules.
+
+**Notes (phase 8a, 2026-10-21):**
+- **`gemel_ui_api::cli`:** `uitext`'s preferences (`dumbtty`, `silent`, `color`, `i`) and `main`'s (`version`, `doc`, `prefsdocs`, `prefsman`, `server`, `socket`, `listen` with its alias `host`, `ui`), registered after `uicommon`'s, as OCaml links them (`test.ml` has none).
+- **`bins/gemel`:**
+  - `main`: `-version`; `-doc`, `-prefsdocs`, `-prefsman`, `-server` and `-socket` say they aren't supported yet; `-ui graphic` says this binary has only the text interface, and another value prints the usage; a bad option prints the error and the usage, and exits with 2.
+  - `text`, from `uitext`: `start` and `start2`, `synchronizeUntilNoFailures` (`-retry`), `synchronizeOnce`, the items as batch mode lists them (`displayri`, the details, each root's errors), `interactAndPropagateChanges` and `doTransport` in batch mode (the "items will be synced" block, the progress line, "Failed […]" as each item fails, the summary and its "skipped", "partially transferred" and "failed" lines), `checkForDangerousPath` (aborting), `verifyMerge`, the two warning printers, `formatStatus`, `errorOut` and `handleException`, and `-silent`, `-terse` and the colours.
+  - `infos`: the status line (`Util.set_infos`) on stdout, which the trace's stderr sink clears before writing and shows again after, as `Util.msg` does.
+- **`-retry`** sends the failed paths to `Update`, which scans everything, as OCaml's `findLocal` does without the watcher (it uses the paths only while the watcher runs).
+- **`Command::Start` no longer scans the profiles** (7c's did): `uiInitClRootsAndProfile` alone, as the text interface starts. Otherwise another profile in the Unison directory, one with a bad or a shared `key`, or one that can't be read, failed or changed every run. Frontends that list profiles send `ScanProfiles`.
+- **Session additions:** `Command::Configure` and `Command::Connect`; `Config::print_wait_message`; `LogKind::Status` (`Trace.status`), and `Log` taken during a sync (the progress line goes to the log every minute in batch mode); `ItemView`'s `displayri` parts, its problem, its reason to be skipped and each root's errors; `RootNames` (short, in full, and the column headings); more `Settings`.
+- **Fixed in the engine:** a merge's "Warning: 'backupcurrent' is not set for path …" on stderr (a `Util.msg` that 6b left out).
+- **Not ported yet (8b):** interactive mode (the binary says so, and exits with 1, without `-batch`), `-repeat`, `-i`, `-selftest`, the option list of `-help` and of usage errors, and the timer of the whole propagation ("Transmitting all files").
+- **Tests:** `bins/gemel/tests/batch.rs` runs the program, and with OCaml a twin pair with `unison … -ui text`: both must end with the same exit code, the same stdout and stderr as a terminal shows them (the progress line and the spinner overwritten), the same log and the same replicas. The programs' names and versions are normalised where they appear (the banners and the usage), and the summary's local times compared within a few seconds. Scenarios: roots on the command line (a first sync, a conflict and a deletion with `-auto`, the conflict left), a profile with `-terse` and then nothing to do, only a conflict ("No updates to propagate"), `-silent`, a dangerous deletion (abort, 3), a merge (Unix), and the errors before a sync (a missing profile, too many roots, none, a bad preference), and other profiles with bad or shared keys left alone. Not tested: a problem item, and `-retry` (no failure can be provoked from outside the program). `-version` and an unknown option are checked on their own. CI's oracle job now runs it, and the session tests of 7c, which it didn't.
+
 ### Phase 9 (optional): watch mode
 
 - **`fswatch`** on the client side, over the ported line protocol.

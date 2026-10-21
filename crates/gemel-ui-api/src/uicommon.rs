@@ -538,6 +538,21 @@ pub fn roots_to_nice_strings(length: i64, (r1, r2): (&Root, &Root)) -> (String, 
     }
 }
 
+/// The roots' names as the text interface's summary shows them: the ends
+/// of their paths that differ, or `local` and the host's name, in full.
+pub fn root_suffixes((r1, r2): (&Root, &Root)) -> (String, String) {
+    let s = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    match (&r1.host, &r2.host) {
+        (Host::Local, Host::Local) => {
+            let (n1, n2) = r1.fspath.different_suffix(&r2.fspath);
+            (s(&n1), s(&n2))
+        }
+        (Host::Local, Host::Remote(h)) => ("local".to_owned(), h.clone()),
+        (Host::Remote(h), Host::Local) => (h.clone(), "local".to_owned()),
+        (Host::Remote(h1), Host::Remote(h2)) => (h1.clone(), h2.clone()),
+    }
+}
+
 /// `roots2string`: the roots' names, as headings of the columns.
 pub fn roots_to_string(roots: (&Root, &Root)) -> String {
     let (r1, r2) = roots_to_nice_strings(12, roots);

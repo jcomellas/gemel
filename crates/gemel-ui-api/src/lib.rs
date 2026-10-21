@@ -6,6 +6,7 @@
 //! ignore and diff. Commands go in and events come out over channels.
 //! [`uicommon`] is what the frontends share besides.
 
+pub mod cli;
 pub mod exit_code;
 pub mod session;
 pub mod uicommon;
@@ -46,7 +47,8 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     sortri::register_prefs(prefs)?;
     recon::register_prefs(prefs)?;
     transport::register_prefs(prefs)?;
-    uicommon::register_prefs(prefs)
+    uicommon::register_prefs(prefs)?;
+    cli::register_prefs(prefs)
 }
 
 /// Preferences with everything registered, at their defaults.
