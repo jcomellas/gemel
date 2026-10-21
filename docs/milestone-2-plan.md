@@ -274,6 +274,24 @@ Split, like phase 4, into:
   
   OCaml stops on a leftover commit log with the same message. CI's oracle job runs these.
 
+**Notes (phase 6c, 2026-10-20):**
+- **`transport`:** all of it. Each item becomes one of the `files` operations, and a move one of `doMove`'s four cases: a rename where the moved contents are unchanged in the other replica, or copies and deletions otherwise (and after a rename across filesystems, `EXDEV`). The log entries are OCaml's: `[BGN]` and `[END]` around each operation, `[CONFLICT]` and `[ERROR]` for the items skipped, `Failed` (in the log file only) for one that fails, and the start and end of the run.
+- **The client's `Trace`** is a slot of its host, which the user interface will set up (phase 7). Transport is the first part of the engine that logs. `Uutil.myNameAndVersion` is `gemel` and its version, in messages; archives and the files Unison names keep `unison`.
+  - For phase 7: a `Trace` slot made by default has no Unison directory, so a relative `logfile` (the default, `unison.log`) would land in the working directory. The interface must install the client's slot, with `set_unison_dir`, before anything logs.
+- **The pool:** `Transport.run`, and `Uicommon.transportItems`, which every user interface shares, so it is in `transport` rather than `gemel-ui-api` (the engine's tests need it, and can't depend on that crate).
+  - The first error stops the run and aborts everything. OCaml returns it at once and gives the items still running a few chances to stop; here they finish first (they stop at their abort checks).
+  - Between local roots, items run one at a time. OCaml runs up to `maxthreads` at once, but its local operations never yield, so each item runs to the end before the next starts. Here the filesystem work runs on blocking tasks, which yield; one at a time keeps OCaml's order (of the log and of archive updates) and settles the atomicity note of 6b. Items run concurrently only with a remote root.
+  - `maxThreads` reads `stream` (`Remote.streamingActivated`), which comes with remote roots in milestone 3; until then it is on, its default.
+- **Not ported:** the progress display and statistics of `Uitext.doTransport`, and its catching of `Transient` per item (phases 7 and 8; the tests do it themselves). Not tested: the fallback after `EXDEV`, which needs two filesystems.
+- **Tests:** the `files` tests now propagate through `transportItem`. `tests/transport.rs` runs whole syncs, as the text interface does in batch mode (all but the deletions, then the deletions, then the commit), in both dispatch modes:
+  - copies, updates, props, deletions and a conflict;
+  - moves, in each of `doMove`'s cases and the fallback, including reverting a move and a move over a directory;
+  - a merge, and a conflict where a merge was asked for but one side is gone;
+  - a copy that fails, logged, while the run goes on;
+  - a fatal error, which stops the run before the commit; and aborting everything, which stops dispensing.
+  
+  With OCaml Unison, a twin of each replica pair is synced by it, and the replicas must end the same, with the same transport log (with the roots renamed and the times left out). Then OCaml finds nothing to do on gemel's pair, with fast checking and without, so the archives agree with the replicas; or, where conflicts remain, it does the same on both pairs, with the same summary. CI's oracle job runs them.
+
 ### Phase 7: `gemel-ui-api` (~1.3k)
 
 - **`uicommon`:** profile choice and initialisation, root checks, the transfer and stats formatting, and the summary line.
