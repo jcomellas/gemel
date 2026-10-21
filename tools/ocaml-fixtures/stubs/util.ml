@@ -86,3 +86,8 @@ let splitAtString ?(reverse=false) s sep =
       let after = String.sub s afterpos ((String.length s) - afterpos) in
       (* rest is possibly the empty string *)
       (before, Some after)
+
+let rec splitIntoWordsByString s sep =
+  match splitAtString s sep with
+    (s, None) -> [s]
+  | (before, Some after) -> before :: (splitIntoWordsByString after sep)

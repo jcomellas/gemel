@@ -25,8 +25,8 @@ use std::task::Poll;
 
 use gemel_base::path::{Global, Path};
 use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
-use gemel_base::trace::{self, Trace};
-use gemel_base::util::{Error, FileId, MY_NAME_AND_VERSION};
+use gemel_base::trace;
+use gemel_base::util::{Error, FileId, MY_NAME_AND_VERSION, capitalize_ascii};
 use gemel_fs::fileinfo::Typ;
 use gemel_fs::osx;
 use gemel_fs::props::Filesize;
@@ -43,6 +43,7 @@ use crate::copy::Replacing;
 use crate::files::{self, MoveSide};
 use crate::globals::{self, Roots};
 use crate::moves;
+use crate::with_trace;
 
 /// A boxed future of the engine thread.
 pub type Task<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
@@ -164,13 +165,6 @@ pub async fn transport_items<'a, T>(
 // ---- Logging ----
 
 /// Runs `f` with the client's trace and preferences.
-fn with_trace<R>(rpc: &Rpc, f: impl FnOnce(&mut Trace, &Prefs) -> R) -> R {
-    let host = rpc.client_host();
-    let trace = host.state::<Trace>();
-    let prefs = host.prefs().borrow();
-    f(&mut trace.borrow_mut(), &prefs)
-}
-
 fn log(rpc: &Rpc, s: &str) -> Result<(), Error> {
     with_trace(rpc, |t, p| t.log(p, s))
 }
@@ -633,13 +627,6 @@ fn timestamp(t: f64) -> Result<String, Error> {
     ))
 }
 
-fn capitalized(s: &str) -> String {
-    let mut c = s.chars();
-    c.next()
-        .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
-        .unwrap_or_default()
-}
-
 /// Blank lines around the run's entries, unless terse or batch.
 fn spacing(prefs: &Prefs) -> &'static str {
     if *prefs.read(&trace::TERSE) || *prefs.read(&globals::BATCH) {
@@ -660,7 +647,7 @@ pub fn log_start(rpc: &Rpc) -> Result<(), Error> {
         let m = format!(
             "{}{} started propagating changes at {ts}\n",
             spacing(p),
-            capitalized(MY_NAME_AND_VERSION)
+            capitalize_ascii(MY_NAME_AND_VERSION)
         );
         tr.log_verbose(p, &m)
     })
@@ -674,7 +661,7 @@ pub fn log_finish(rpc: &Rpc) -> Result<(), Error> {
     with_trace(rpc, |tr, p| {
         let m = format!(
             "{} finished propagating changes at {ts}, {:.3} s\n{}",
-            capitalized(MY_NAME_AND_VERSION),
+            capitalize_ascii(MY_NAME_AND_VERSION),
             t - start,
             spacing(p)
         );

@@ -49,3 +49,7 @@ jobs:
       - run: cargo test --locked -p gemel-engine --test reading --test update --test commit --test recon --test copy --test files --test transport
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
+      # Whole syncs from a profile, through uicommon's startup.
+      - run: cargo test --locked -p gemel-ui-api --test startup
+        env:
+          GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
