@@ -132,6 +132,19 @@ pub static IGNORE_LOCKS: PrefDef<bool> = PrefDef::new(
      command-line use.",
 );
 
+/// `dumparchives`. Accepted, but the dump (`dumpArchiveOnRoot`) isn't
+/// ported.
+pub static DUMP_ARCHIVES: PrefDef<bool> = PrefDef::new(
+    "dumparchives",
+    Category::Expert,
+    || false,
+    "dump contents of archives just after loading",
+    "When this preference is set, Unison will create a file unison.dump on \
+     each host, containing a text summary of the archive, immediately after \
+     loading it.",
+)
+.cli_only();
+
 /// Registers this module's preferences.
 pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     prefs.register(&IGNORE_ARCHIVES)?;
@@ -139,6 +152,7 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     prefs.register(&ROOT_ALIASES)?;
     prefs.register(&SHOW_ARCHIVE_NAME)?;
     prefs.alias(&SHOW_ARCHIVE_NAME, "showArchiveName")?;
+    prefs.register(&DUMP_ARCHIVES)?;
     prefs.register(&IGNORE_LOCKS)
 }
 

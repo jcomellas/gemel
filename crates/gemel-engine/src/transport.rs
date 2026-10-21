@@ -77,13 +77,13 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     prefs.register(&MAXTHREADS)
 }
 
-/// `Transport.maxThreads`: how many items may run at once. Streaming
-/// (`Remote.streamingActivated`, the `stream` preference) is on by
-/// default; its preference comes with remote roots.
+/// `Transport.maxThreads`: how many items may run at once (fewer without
+/// streaming, `stream`).
 pub fn max_threads(prefs: &Prefs) -> usize {
     match usize::try_from(*prefs.read(&MAXTHREADS)) {
         Ok(n) if n > 0 => n,
-        _ => 1000,
+        _ if *prefs.read(&gemel_rpc::connection::STREAMING_ACTIVATED) => 1000,
+        _ => 20,
     }
 }
 

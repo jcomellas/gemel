@@ -481,3 +481,128 @@ fn profiles_are_listed_with_their_keys() {
     let e = ui.scan_profiles().unwrap_err().to_string();
     assert!(e.ends_with("must be a single digit (0-9), not 12"), "{e}");
 }
+
+/// The items a scan of `ui`'s roots finds, by path.
+async fn items(ui: &Ui) -> Vec<gemel_engine::common::ReconItem> {
+    let (rpc, roots) = (ui.rpc(), ui.roots().unwrap());
+    let updates = update::find_updates(rpc, roots, false, None).await.unwrap();
+    recon::reconcile_all(rpc, roots, true, updates)
+        .await
+        .unwrap()
+        .0
+}
+
+fn path_of(ri: &gemel_engine::common::ReconItem) -> String {
+    gemel_ui_api::uicommon::path_string(&ri.path1)
+}
+
+#[test]
+fn an_ignored_path_is_added_to_the_profile_and_sent_to_the_servers() {
+    use gemel_ui_api::uicommon::{add_ignore_pattern, ignore_path};
+    let pair = Pair::new("ui-ignore");
+    pair.profile("p", &[]);
+    write(&pair.a(), "x", "x", T0);
+    write(&pair.a(), "y", "y", T0);
+    // In loopback mode, the root's host scans with the preferences it was
+    // sent.
+    let (mut ui, output, _) = new_ui(&pair, &["p"], true);
+    block_on(async {
+        ui.init_prefs("p", async || None).await.unwrap();
+        ui.connect_roots(&mut || {}).await.unwrap();
+        let found: Vec<String> = items(&ui).await.iter().map(path_of).collect();
+        assert_eq!(found, ["x", "y"]);
+        let x = gemel_base::path::Path::from_bytes(b"x").unwrap();
+        let (rpc, roots) = (ui.rpc(), ui.roots().unwrap());
+        add_ignore_pattern(rpc, roots, &ignore_path(&x))
+            .await
+            .unwrap();
+        let found: Vec<String> = items(&ui).await.iter().map(path_of).collect();
+        assert_eq!(found, ["y"]);
+        assert_eq!(
+            add_ignore_pattern(rpc, roots, "Path ").await,
+            Err(Error::Transient("Can't ignore the root path!".to_owned()))
+        );
+    });
+    let profile = std::fs::read_to_string(pair.u().join("p.prf")).unwrap();
+    assert!(profile.ends_with("\nignore = Path {x}"), "{profile:?}");
+    assert!(
+        output
+            .take()
+            .contains("ignore = Path {x}' added to profile ")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn diffs_are_of_where_the_files_are() {
+    use gemel_engine::common::{ReconItem, Replicas, Status};
+    use gemel_ui_api::uicommon::show_diffs;
+    let pair = Pair::new("ui-diff");
+    // `echo` shows the files it is given.
+    pair.profile("p", &["moves-experimental = true", "diff = echo"]);
+    for r in [pair.a(), pair.b()] {
+        write(&r, "README", "read me", T0);
+        write(&r, "d/f", "f", T0);
+    }
+    settle(&[&pair.a(), &pair.b()]);
+    gemel(&pair, &["p", "-batch"], false);
+    std::fs::rename(pair.a().join("README"), pair.a().join("READ-ME")).unwrap();
+    write(&pair.b(), "README", "b's version", T0 + 30.0);
+    std::fs::remove_dir_all(pair.a().join("d")).unwrap();
+    write(&pair.a(), "d", "now a file", T0 + 40.0);
+    settle(&[&pair.a(), &pair.b()]);
+    let (mut ui, _, _) = new_ui(&pair, &["p"], false);
+    let canonical = |p: PathBuf| std::fs::canonicalize(p).unwrap();
+    let (a, b) = (canonical(pair.a()), canonical(pair.b()));
+    block_on(async {
+        ui.init_prefs("p", async || None).await.unwrap();
+        ui.connect_roots(&mut || {}).await.unwrap();
+        let (rpc, roots) = (ui.rpc(), ui.roots().unwrap());
+        let found = items(&ui).await;
+        let diff = async |ri: &ReconItem| {
+            let (mut shown, mut errors) = (Vec::new(), Vec::new());
+            show_diffs(
+                rpc,
+                roots,
+                ri,
+                &mut |_, text| shown.push(text.to_owned()),
+                &mut |e| errors.push(e.to_owned()),
+                FileId(0),
+            )
+            .await
+            .unwrap();
+            (shown, errors)
+        };
+        let moved = found.iter().find(|ri| path_of(ri) == "README").unwrap();
+        let Replicas::Different(d) = &moved.replicas else {
+            panic!("{moved:?}")
+        };
+        assert!(matches!(d.rc1.status, Status::MovedOut(..)), "{moved:?}");
+        let files = format!(
+            "{} {}",
+            a.join("READ-ME").display(),
+            b.join("README").display()
+        );
+        assert_eq!(diff(moved).await, (vec![files], vec![]));
+
+        let dir = found.iter().find(|ri| path_of(ri) == "d").unwrap();
+        assert_eq!(
+            diff(dir).await,
+            (
+                vec![],
+                vec!["Can't diff: path doesn't refer to a file in both replicas".to_owned()]
+            )
+        );
+        let problem = ReconItem {
+            replicas: Replicas::Problem("bad".to_owned()),
+            ..dir.clone()
+        };
+        assert_eq!(
+            diff(&problem).await,
+            (
+                vec![],
+                vec!["Can't diff files: there was a problem during update detection".to_owned()]
+            )
+        );
+    });
+}
