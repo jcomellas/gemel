@@ -49,7 +49,11 @@ jobs:
       - run: cargo test --locked -p gemel-engine --test reading --test update --test commit --test recon --test copy --test files --test transport
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
-      # Whole syncs from a profile, through uicommon's startup.
-      - run: cargo test --locked -p gemel-ui-api --test startup
+      # Whole syncs from a profile, through uicommon's startup and the session.
+      - run: cargo test --locked -p gemel-ui-api --test startup --test session
+        env:
+          GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
+      # The gemel program in batch mode, against `unison -ui text`.
+      - run: cargo test --locked -p gemel --test batch
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison

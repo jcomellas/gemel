@@ -2189,6 +2189,15 @@ async fn merge_in(
     // Commit the results.
     let arch_fspath = m.abs(&m.working_arch);
     let (desc1, desc2, arch_to) = if system::file_exists(arch_fspath.as_bytes()) {
+        let backed_up = stasher::should_backup_current(&rpc.client_host().prefs().borrow(), path1)?;
+        if !backed_up {
+            with_trace(rpc, |t, _| {
+                t.msg(&format!(
+                    "Warning: 'backupcurrent' is not set for path {}\n",
+                    path_str(path1)
+                ))
+            });
+        }
         let info = fileinfo::get_basic(false, &arch_fspath, &Path::empty(), &|_| false, &ctx.fs)?;
         let fp = os::fingerprint(
             &arch_fspath,

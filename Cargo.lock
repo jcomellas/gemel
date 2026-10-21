@@ -1461,7 +1461,13 @@ dependencies = [
 name = "gemel"
 version = "0.1.0"
 dependencies = [
+ "gemel-base",
+ "gemel-engine",
+ "gemel-fs",
+ "gemel-rpc",
  "gemel-ui-api",
+ "md-5",
+ "tokio",
 ]
 
 [[package]]

@@ -142,6 +142,27 @@ pub fn split_into_words(s: &str, c: char) -> Vec<String> {
     }
 }
 
+/// `Util.bytes2string`: a size, in bytes, KiB, MiB or GiB.
+pub fn bytes2string(v: i64) -> String {
+    const GIB: f64 = 1073741824.;
+    const MIB: f64 = 1048576.;
+    const KIB: f64 = 1024.;
+    let f = v as f64;
+    if v > 1_048_051_711 {
+        format!("{:.2} GiB", f / GIB)
+    } else if v > 104_805_171 {
+        format!("{:.0} MiB", f / MIB)
+    } else if v > 1_023_487 {
+        format!("{:.1} MiB", f / MIB)
+    } else if v > 102_348 {
+        format!("{:.0} KiB", f / KIB)
+    } else if v > 999 {
+        format!("{:.1} KiB", f / KIB)
+    } else {
+        format!("{v} B")
+    }
+}
+
 /// `Util.percent2string`: a percentage, between 0 and 100, as `" 42%"`.
 pub fn percent2string(p: f64) -> String {
     let p = if p.is_nan() { 0. } else { p.clamp(0., 100.) };
@@ -360,6 +381,19 @@ pub fn int_of_string(s: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizes() {
+        assert_eq!(bytes2string(0), "0 B");
+        assert_eq!(bytes2string(999), "999 B");
+        assert_eq!(bytes2string(1000), "1.0 KiB");
+        assert_eq!(bytes2string(102_348), "99.9 KiB");
+        assert_eq!(bytes2string(102_349), "100 KiB");
+        assert_eq!(bytes2string(1_023_488), "1.0 MiB");
+        assert_eq!(bytes2string(104_805_172), "100 MiB");
+        assert_eq!(bytes2string(1_048_051_712), "0.98 GiB");
+        assert_eq!(bytes2string(5 * 1073741824), "5.00 GiB");
+    }
 
     #[test]
     fn percentages() {

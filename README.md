@@ -28,8 +28,11 @@ reports what an interface shows: progress for each item, the path being
 scanned, status messages and timers, and a merge's result; and an abort
 reaches a copy as it runs. The session contract the frontends use
 (`gemel-ui-api`'s `session`: commands in, events out, on the engine
-thread) is done too. The frontends themselves and remote connections are
-still to come.
+thread) is done too, and so is the `gemel` program's batch mode: `gemel
+<profile> -batch` (or `gemel root1 root2 -batch`) syncs, prints and logs
+as `unison -batch -ui text` does, except that an interrupt isn't caught
+yet. The text interface's interactive mode, the GUI and remote
+connections are still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 
