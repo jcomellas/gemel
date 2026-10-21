@@ -1218,6 +1218,8 @@ pub async fn reconcile_all(
     allow_partial: bool,
     updates: Vec<PathUpdates>,
 ) -> Result<(Vec<ReconItem>, bool, Vec<Path<Global>>), Error> {
+    crate::with_trace(rpc, |t, p| t.status(p, "Reconciling changes"))?;
+    crate::debug(rpc.client_host(), "recon", || "reconcileAll\n".to_owned());
     let archive = LocalArchive::new(rpc, roots)?;
     let (unequals, batches, equals, archive_updated, mut moves, dangerous) = {
         let client = rpc.client_host();
@@ -1255,8 +1257,12 @@ pub async fn reconcile_all(
             }
         }
         dangerous.reverse();
+        let unequals = r.unequals.finish();
+        crate::debug(client, "recon", || {
+            format!("reconcile: {} results\n", unequals.size())
+        });
         (
-            r.unequals.finish(),
+            unequals,
             r.batches,
             r.equals.finish(),
             r.archive_updated,

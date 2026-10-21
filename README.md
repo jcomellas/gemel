@@ -23,9 +23,11 @@ reconciliation (with move detection), and propagation between local roots
 merge) are done: a whole sync between local roots ends as OCaml Unison's
 does. So is the frontends' shared startup (`gemel-ui-api`'s `uicommon`:
 choosing and loading a profile, the command line, setting up the roots),
-so a sync can run from a `.prf` profile as OCaml's does. The session
-contract the frontends use, the frontends themselves and remote
-connections are still to come.
+so a sync can run from a `.prf` profile as OCaml's does. The engine
+reports what an interface shows: progress for each item, the path being
+scanned, status messages and timers, and a merge's result; and an abort
+reaches a copy as it runs. The session contract the frontends use, the
+frontends themselves and remote connections are still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 

@@ -563,7 +563,7 @@ pub async fn transport_item(
     roots: &Roots,
     ri: &ReconItem,
     id: FileId,
-    show_merge: &mut dyn FnMut(&str, &str) -> bool,
+    show_merge: &mut files::ShowMerge<'_>,
 ) -> Result<(), Error> {
     let (root1, root2) = roots.pair();
     let path = path_str(&ri.path1);

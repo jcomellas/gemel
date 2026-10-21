@@ -46,7 +46,7 @@ impl Setup {
                 &self.roots,
                 &ri,
                 FileId(i as i64),
-                &mut |_, _| true,
+                &mut |_, _| Box::pin(async { true }),
             ));
             results.push((ri, r));
         }
@@ -368,8 +368,8 @@ fn merges_like_ocaml() {
                 &d.rc2.ui,
                 FileId(0),
                 &mut |title, log| {
-                    shown.push((title.to_owned(), log.to_owned()));
-                    true
+                    shown.push((title, log));
+                    Box::pin(async { true })
                 },
             ));
             block_on(update::commit_updates(&s.rpc, &s.roots)).unwrap();

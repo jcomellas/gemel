@@ -318,6 +318,12 @@ impl Trace {
         };
     }
 
+    /// `Util.msg`: prints `s` to standard error.
+    pub fn msg(&mut self, s: &str) {
+        let _ = self.stderr.write_all(s.as_bytes());
+        let _ = self.stderr.flush();
+    }
+
     /// `Trace.debug`: prints `msg()` to stderr if debugging for `modname`
     /// is on, after a `[time: server: module]` prefix. The timestamp is UTC
     /// (OCaml uses local time).

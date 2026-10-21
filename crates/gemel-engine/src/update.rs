@@ -27,13 +27,16 @@
 //! - Scanning only what a file watcher reported (`Fswatchold`, the path
 //!   trees, and the `wantWatcher` and `subpaths` arguments of `find`): the
 //!   watcher is phase 9, and without it OCaml scans every path.
-//! - Status messages during the scan, which belong to the frontends.
+//! - The debug traces of the scan itself (`buildUpdate` and the functions
+//!   it calls), which run off the engine thread, away from the host's
+//!   trace. Those of the functions around it are ported.
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
+use std::time::Instant;
 
 use gemel_base::case::{self, Mode};
 use gemel_base::name::Name;
@@ -61,6 +64,7 @@ use crate::globals::{self, Ignore, Roots};
 use crate::name_map::{NameMap, PathMap};
 use crate::pred::{self, Compiled, Pred};
 use crate::tree::Tree;
+use crate::uutil::UpdateStatusPrinter;
 use crate::xferhint;
 
 // ---- Preferences ----
@@ -134,6 +138,11 @@ pub static IMMUTABLE_NOT: Pred = Pred::new(
     "add a pattern to the immutablenot list",
     "This preference overrides {\\tt immutable}.",
 );
+
+/// A path as debug traces show it.
+fn path_str<S>(p: &Path<S>) -> String {
+    String::from_utf8_lossy(p.as_bytes()).into_owned()
+}
 
 fn xattr_ignore_initial() -> Vec<String> {
     vec![
@@ -375,6 +384,59 @@ pub struct Scan {
     temp_names: TempNames,
     fpcache: FpCache,
     hints: Vec<xferhint::Entry>,
+    status: ScanStatus,
+}
+
+/// `showStatus`: shows a path being scanned now and then, after about
+/// 10 KiB of files (a small file counts as 1 KiB) and 0.05 seconds. Each
+/// scan counts for itself, where OCaml's scans (one at a time) share the
+/// count.
+#[derive(Default)]
+struct ScanStatus {
+    printer: Option<UpdateStatusPrinter>,
+    file_length: usize,
+    shown: Option<Instant>,
+}
+
+/// `bigFileLength`.
+const BIG_FILE_LENGTH: usize = 10 * 1024;
+/// `smallFileLength`.
+const SMALL_FILE_LENGTH: usize = 1024;
+
+impl ScanStatus {
+    /// `showStatusAddLength`: counts a file whose contents are read.
+    fn add_length(&mut self, info: &Info) {
+        if self.printer.is_none() {
+            return;
+        }
+        let len1 = info.desc.length();
+        let len2 = osx::ress_length(&info.os_x.ress_info);
+        let big = BIG_FILE_LENGTH as props::Filesize;
+        self.file_length = if len1 >= big || len2 >= big {
+            BIG_FILE_LENGTH
+        } else {
+            BIG_FILE_LENGTH.min(self.file_length + len1 as usize + len2 as usize)
+        };
+    }
+
+    /// `showStatus`: counts `path`, and shows it if it is time to.
+    fn show(&mut self, path: &Path<Local>) {
+        let Some(printer) = &self.printer else {
+            return;
+        };
+        self.file_length += SMALL_FILE_LENGTH;
+        if self.file_length >= BIG_FILE_LENGTH {
+            self.file_length = 0;
+            let now = Instant::now();
+            if self
+                .shown
+                .is_none_or(|t| now.duration_since(t).as_secs_f64() > 0.05)
+            {
+                printer(&path_str(path));
+                self.shown = Some(now);
+            }
+        }
+    }
 }
 
 /// The paths to scan, as the archive spells them, and whether each is
@@ -421,6 +483,7 @@ impl Scan {
             temp_names,
             fpcache,
             hints: Vec::new(),
+            status: ScanStatus::default(),
         })
     }
 
@@ -564,6 +627,7 @@ impl Scan {
             };
             return Ok(replace(archive, new, props_updates));
         }
+        self.status.add_length(info);
         let known = data_clearly_unchanged.then_some(&arch_fp);
         let fspath = self.fspath.clone();
         let follow = self.follow.clone();
@@ -673,6 +737,7 @@ impl Scan {
                 if self.ignore.test(&path2) {
                     continue;
                 }
+                self.status.show(&path2);
                 let (changed, ui) = self.build_update_rec(archive, &path2)?;
                 arch_updated |= changed;
                 if ui != UpdateItem::NoUpdates {
@@ -698,6 +763,7 @@ impl Scan {
                 has_ignored_children |= *archive != Archive::NoArchive;
                 return Ok(false);
             }
+            scan.status.show(&path2);
             match status {
                 Status::Ok | Status::Abs => {
                     if skip && *archive != Archive::NoArchive && status != Status::Abs {
@@ -794,6 +860,7 @@ impl Scan {
             )),
             (Typ::File, Archive::File(..)) => self.check_contents_change(path, &info, archive),
             (Typ::File, _) => {
+                self.status.add_length(&info);
                 let fspath = self.fspath.clone();
                 let follow = self.follow.clone();
                 let (desc, fp, stamp, ress) = self.fpcache.fingerprint(
@@ -1263,6 +1330,12 @@ pub fn check_no_update_predicate_change(
         }
     }
     purge_overridden_children(&mut props.paths, paths, &ignore);
+    crate::debug(host, "update", || {
+        format!(
+            "Optim: rescan ext props = {rescan_props}; rescan dir entries (dir stamp changed) \
+             = {preds_changed}\n"
+        )
+    });
     // If the files scanned change, previously ignored files may already be
     // in the archive, so all their props must be read too.
     let rescan_props = rescan_props || preds_changed;
@@ -1358,6 +1431,10 @@ pub type FindArgs = (bool, Vec<Path<Global>>, Subpaths);
 pub async fn find_local(host: &Host, fspath: &Fspath, args: FindArgs) -> Result<Vec<Found>, Error> {
     let turn = Turn::take(host);
     let (_want_watcher, path_list, _subpaths) = args;
+    crate::debug(host, "update", || {
+        let paths: Vec<_> = path_list.iter().map(path_str).collect();
+        format!("findLocal {fspath} ({})\n", paths.join(" "))
+    });
     let arch_hash = archive::archive_hash(host, fspath)?;
     let mut temp_names = TempNames::default();
     temp_names.include(&arch_hash);
@@ -1377,6 +1454,7 @@ pub async fn find_local(host: &Host, fspath: &Fspath, args: FindArgs) -> Result<
         FpCache::init(fast_check, ignore_archives, &cache_file, scan_props(host))
     };
     let mut scan = Scan::new(host, fspath, info, temp_names.clone(), fpcache)?;
+    scan.status.printer = crate::uutil::update_status_printer(host);
     // Without a watcher, every path is scanned. Errors and ignored paths
     // are reported against the archive as loaded.
     let paths: Translated = {
@@ -1504,8 +1582,14 @@ pub async fn find_updates_on_paths(
     subpaths: Subpaths,
 ) -> Result<Vec<PathUpdates>, Error> {
     archive::load_archives_safely(rpc, roots).await?;
+    let timer = crate::start_timer(rpc, "Collecting changes")?;
     let args: FindArgs = (want_watcher, path_list, subpaths);
-    let updates = roots.map(|r| rpc.call_root(&FIND, r, args.clone())).await?;
+    let updates = roots
+        .map(|r| {
+            crate::debug(rpc.client_host(), "update", || format!("findOnRoot {r}\n"));
+            rpc.call_root(&FIND, r, args.clone())
+        })
+        .await?;
     // Shared props data, with hosts other than the client's.
     let enabled = {
         let f = rpc.client_host().features().borrow();
@@ -1525,6 +1609,8 @@ pub async fn find_updates_on_paths(
             })
             .await?;
     }
+    crate::show_timer(rpc, &timer)?;
+    crate::with_trace(rpc, |t, p| t.status(p, ""))?;
     let mut it = updates.into_iter();
     let (Some(u1), Some(u2), None) = (it.next(), it.next(), it.next()) else {
         return Err(Error::Fatal("Internal error: two roots expected".into()));
@@ -1726,6 +1812,9 @@ pub fn update_archive(
     path: &Path<Local>,
     ui: &UpdateItem,
 ) -> Result<Archive, Error> {
+    crate::debug(host, "update", || {
+        format!("updateArchive {fspath} {}\n", path_str(path))
+    });
     let root = archive::this_roots_global_name(host, fspath)?;
     let (mode, ignore) = {
         let prefs = host.prefs().borrow();
@@ -1767,6 +1856,9 @@ pub async fn mark_equal_local(
     // the default.
     let stash = host.state::<Stasher>().borrow().0.clone();
     for (path, _) in &entries {
+        crate::debug(host, "update", || {
+            format!("markEqualLocal {fspath} {}\n", path_str(path))
+        });
         let local = archive::with_archive(host, &root, |a| get_path_in_archive(a, path).0)
             .unwrap_or_else(|| path.clone());
         match &stash {
@@ -1811,6 +1903,9 @@ pub async fn mark_equal(
     roots: &Roots,
     equals: &Tree<(Name, Name), (UpdateContent, UpdateContent)>,
 ) -> Result<(), Error> {
+    crate::debug(rpc.client_host(), "update", || {
+        format!("Marking {} paths equal\n", equals.size())
+    });
     if equals.is_empty() {
         return Ok(());
     }
@@ -1833,6 +1928,9 @@ pub fn replace_archive_local<S>(
     path: &Path<S>,
     new: Archive,
 ) -> Result<(), Error> {
+    crate::debug(host, "update", || {
+        format!("replaceArchiveLocal {fspath} {}\n", path_str(path))
+    });
     let root = archive::this_roots_global_name(host, fspath)?;
     let mode = case::mode(&host.prefs().borrow());
     let mut new = Some(new);
@@ -1936,6 +2034,9 @@ pub fn update_props(
     props: Option<&Props>,
     ui: &UpdateItem,
 ) -> Result<(), Error> {
+    crate::debug(host, "update", || {
+        format!("updateProps {fspath} {}\n", path_str(path))
+    });
     let root = archive::this_roots_global_name(host, fspath)?;
     let mode = case::mode(&host.prefs().borrow());
     let c = scan_props(host);
@@ -1981,6 +2082,9 @@ pub fn mark_possibly_updated(
     fspath: &Fspath,
     path: &Path<Local>,
 ) -> Result<(), Error> {
+    crate::debug(host, "update", || {
+        format!("markPossiblyUpdated {fspath} {}\n", path_str(path))
+    });
     let root = archive::this_roots_global_name(host, fspath)?;
     let mode = case::mode(&host.prefs().borrow());
     archive::with_archive_mut(host, &root, |archive| {
@@ -2102,6 +2206,9 @@ pub async fn check_no_updates(
     ui: &UpdateItem,
     fast_check: bool,
 ) -> Result<Archive, Error> {
+    crate::debug(host, "update", || {
+        format!("checkNoUpdates {fspath} {}\n", path_str(path_in_archive))
+    });
     let root = archive::this_roots_global_name(host, fspath)?;
     let mode = case::mode(&host.prefs().borrow());
     let (local_path, sub) = archive::with_archive(host, &root, |a| {
@@ -2325,6 +2432,9 @@ pub static PREPARE_COMMIT: RootCmd<Vec<u8>, Option<i64>> = RootCmd::new(
 /// archive, and only if they have the same hash are they made the new and
 /// then the main archives. All under the archive locks.
 pub async fn commit_updates(rpc: &Rpc, roots: &Roots) -> Result<(), Error> {
+    crate::debug(rpc.client_host(), "update", || {
+        "Updating archives\n".to_owned()
+    });
     archive::lock_archives(rpc, roots).await?;
     let r = async {
         let mode = case::mode(&rpc.client_host().prefs().borrow());

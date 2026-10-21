@@ -15,8 +15,9 @@
 //! transfer, `copyprog`), and with them the shortcut of copying an
 //! identical local file instead (`tryCopyMovedFile`), which OCaml only
 //! takes for remote transfers. Their preferences are registered.
-//! Progress reporting (`Uutil.showProgress`) and the timers come with the
-//! user interface (phase 7).
+//! A copy reports its progress to the client's progress printer
+//! ([`crate::uutil`]), and stops when everything is aborted
+//! ([`crate::abort::AllFlag`]), as it runs.
 
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -37,8 +38,9 @@ use gemel_rpc::host::Host;
 use gemel_rpc::registry::{RootCmd, Rpc};
 use gemel_rpc::root::Root;
 
+use crate::abort::Abort;
 use crate::pred::{self, Compiled};
-use crate::{exclusive, fpcache, update};
+use crate::{exclusive, fpcache, update, uutil};
 
 // ---- Preferences ----
 
@@ -699,7 +701,7 @@ pub async fn file(
     real_path_to: &Path<Local>,
     replacing: Replacing,
     source: &Source,
-    _id: FileId,
+    id: FileId,
 ) -> Result<Info, Error> {
     if !(root_from.is_local() && root_to.is_local()) {
         return Err(Error::Fatal(
@@ -707,31 +709,44 @@ pub async fn file(
         ));
     }
     let ctx = Ctx::of(rpc.local_host())?;
+    let timer = crate::start_timer(rpc, "Transmitting file")?;
     let status = {
         let (fspath_from, path_from) = (root_from.fspath.clone(), path_from.clone());
         let (fspath_to, path_to, real_path_to) =
             (fspath_to.clone(), path_to.clone(), real_path_to.clone());
         let (desc, fp) = (source.desc.clone(), source.fp.clone());
         let ress_length = osx::ress_length(&source.ress);
+        // The client's, where the user interface reports and aborts.
+        let client = rpc.client_host();
+        let printer = uutil::progress_printer(client);
+        let abort = client.state::<Abort>().borrow().all_flag();
         exclusive::blocking(rpc.local_host(), move || {
-            Progress::none(|p| {
-                local_file(
-                    &ctx,
-                    &fspath_from,
-                    &path_from,
-                    &fspath_to,
-                    &path_to,
-                    &real_path_to,
-                    replacing,
-                    &desc,
-                    ress_length,
-                    p,
-                )
-            })?;
+            let mut progress = |n| {
+                if let Some(p) = &printer {
+                    p(id, n, "l");
+                }
+            };
+            let check = || abort.check();
+            local_file(
+                &ctx,
+                &fspath_from,
+                &path_from,
+                &fspath_to,
+                &path_to,
+                &real_path_to,
+                replacing,
+                &desc,
+                ress_length,
+                &mut Progress {
+                    progress: &mut progress,
+                    check: &check,
+                },
+            )?;
             paranoid_check(&ctx, &fspath_to, &path_to, &fp)
         })
         .await?
     };
+    crate::show_timer(rpc, &timer)?;
     let check = |new_fp, paranoid| SourceCheck {
         path: path_from.clone(),
         desc: source.desc.clone(),
@@ -929,6 +944,36 @@ mod tests {
         assert!(crate::abort::is_abort(&r.unwrap_err()));
         assert_eq!(checks, 2);
         assert!(out.len() < 300_000);
+    }
+
+    #[test]
+    fn a_copy_stops_when_another_thread_aborts_everything() {
+        let d = Dir::new("rw-abort-flag");
+        std::fs::write(d.0.join("src"), vec![7u8; 300_000]).unwrap();
+        let mut src = std::fs::File::open(d.0.join("src")).unwrap();
+        let mut dst = std::fs::File::create(d.0.join("dst")).unwrap();
+        let flag = crate::abort::Abort::default().all_flag();
+        // At the first report, another thread aborts everything.
+        let setter = flag.clone();
+        let mut progress = |_| {
+            let setter = setter.clone();
+            std::thread::spawn(move || setter.set()).join().unwrap();
+        };
+        let check = || flag.check();
+        let r = read_write_bounded(
+            &mut src,
+            &mut dst,
+            300_000,
+            Fork::Data,
+            &mut Progress {
+                progress: &mut progress,
+                check: &check,
+            },
+        );
+        drop(dst);
+        assert!(crate::abort::is_abort(&r.unwrap_err()));
+        let copied = std::fs::metadata(d.0.join("dst")).unwrap().len();
+        assert!(copied < 300_000, "{copied}");
     }
 
     #[cfg(target_os = "macos")]

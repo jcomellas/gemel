@@ -120,7 +120,7 @@ async fn sync(ui: &Ui) -> Result<Vec<String>, Error> {
                 Box::pin(async move {
                     let r =
                         transport::transport_item(rpc, roots, ri, FileId(i as i64), &mut |_, _| {
-                            true
+                            Box::pin(async { true })
                         })
                         .await;
                     match r {

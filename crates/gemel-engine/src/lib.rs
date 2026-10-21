@@ -25,12 +25,14 @@ pub mod transfer;
 pub mod transport;
 pub mod tree;
 pub mod update;
+pub mod uutil;
 pub mod xferhint;
 
 use gemel_base::features::Features;
 use gemel_base::prefs::Prefs;
-use gemel_base::trace::Trace;
+use gemel_base::trace::{Timer, Trace};
 use gemel_base::util::Error;
+use gemel_rpc::host::Host;
 use gemel_rpc::registry::Rpc;
 
 /// Registers the features of the engine and of `gemel-fs`, in OCaml's
@@ -70,6 +72,24 @@ pub fn with_trace<R>(rpc: &Rpc, f: impl FnOnce(&mut Trace, &Prefs) -> R) -> R {
     let trace = host.state::<Trace>();
     let prefs = host.prefs().borrow();
     f(&mut trace.borrow_mut(), &prefs)
+}
+
+/// `Trace.debug`, on `host`'s trace: the client's, or a server's for what
+/// runs there.
+pub fn debug(host: &Host, modname: &str, msg: impl FnOnce() -> String) {
+    let trace = host.state::<Trace>();
+    let prefs = host.prefs().borrow();
+    trace.borrow_mut().debug(&prefs, modname, msg);
+}
+
+/// `Trace.startTimer`, on the client's trace.
+pub fn start_timer(rpc: &Rpc, desc: &str) -> Result<Timer, Error> {
+    with_trace(rpc, |t, p| t.start_timer(p, desc))
+}
+
+/// `Trace.showTimer`, on the client's trace.
+pub fn show_timer(rpc: &Rpc, timer: &Timer) -> Result<(), Error> {
+    with_trace(rpc, |t, p| t.show_timer(p, timer))
 }
 
 /// Registers the remote commands of the modules ported so far.

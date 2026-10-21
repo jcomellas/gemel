@@ -301,7 +301,8 @@ Split, like phase 4, into:
 
 Split, like phases 4 and 6, into:
 - **7a:** `uicommon`, and the startup it drives;
-- **7b:** the session contract, on the engine thread.
+- **7b:** what the engine owes the interfaces: progress and update-status printers, an abort flag the copies' blocking tasks can read, the status messages and timers, and the merge's log and asynchronous confirmation;
+- **7c:** the session contract, on the engine thread.
 
 What earlier phases left for phase 7, and where each goes:
 
@@ -311,15 +312,16 @@ What earlier phases left for phase 7, and where each goes:
 | 5 | A host that registers the engine's features registers its preferences too | 7a: one registration of every preference, in OCaml's link order, for the client and every server host |
 | 6a | `initBackups` after `propagatePrefs` | 7a (`initRoots`) |
 | 6c | The client's `Trace` slot, with its Unison directory, installed before anything logs (`initPrefs` logs before the roots exist) | 7a |
-| 4b, 5 | The status messages of update detection, the "Reconciling changes" status, and the debug traces of both | 7b, with the status events |
+| 4b, 5 | The status messages of update detection, the "Reconciling changes" status, and the debug traces of both | 7b; their events 7c |
 | 6a | Progress reporting and timers; aborting in the middle of a copy, which needs an abort flag that the copy's blocking task can read | 7b |
-| 6b | The merge command's log and result, and merge's messages on standard error | 7b, with the merge confirmation |
-| 6c | `doTransport`'s statistics, and catching `Transient` for each item | 7b (the session's `synchronize`) and phase 8 (`uitext`) |
+| 6b | The merge command's log and result, and merge's messages on standard error | 7b, with the merge confirmation made asynchronous |
+| 6c | `doTransport`'s statistics, and catching `Transient` for each item | 7c (the session's `synchronize`) and phase 8 (`uitext`) |
 
-Decided now for 7b, because 7a's callbacks depend on it:
+Decided now for 7c, because 7a's callbacks depend on it:
 - **The session runs on the engine thread** and owns the `Rpc`, the installed roots (`None` until `initRoots`, and again after `initPrefs`, as `Globals.uninstallRoots`) and the items. Frontends reach it through `EngineThread`: commands in, events out. Events carry snapshots of items (`Send`), not the engine's own values.
 - **Questions to the user are requests with a reply channel,** not events: roots when none are given, the warning panel, dangerous paths, merge confirmation, and (milestone 3) passwords. So `initPrefs`'s `promptForRoots` is async.
 - **A sync runs as a task of its own** on the engine thread, so the session still reads commands during it. Abort is the one command it then accepts; it sets a flag shared with the copies' blocking tasks.
+- **To decide in 7c:** whether an item's remaining bytes, added when it finishes (`bytesToTransfer - bytesTransferred`), may be negative, as for a merge in OCaml, or are clamped at 0.
 
 **Notes (phase 7a, 2026-10-21):**
 - **`uicommon`:** all of it but the self-tests (`selftest`, whose `Test` module isn't ported) and turning on GC messages.
@@ -339,6 +341,23 @@ Decided now for 7b, because 7a's callbacks depend on it:
   - Golden vectors from OCaml (`gen_uicommon.ml`, which copies `truncateString`, `quote` and `Stats` out of Unison's sources) for truncating, quoting patterns, and the rates and times left. The rates are compared up to rounding, since `exp` and `pow` can differ in the last bit between C libraries.
   - `tests/startup.rs`: the command line's roots and profile, asking for roots, installing them once per profile, the start of the log, and the list of profiles with their keys. Adding an ignore pattern, in loopback mode: the next scan leaves the path out (so the server got the pattern) and the profile gains it. Diffs (on Unix): of the file where it now is, for a move, and the messages for a problem and for a file against a directory. Two scenarios sync from a profile (one with `ignore` and `label`, one with a `path` ending in `*`), twice each and in both dispatch modes, on twin replicas with OCaml's `unison <profile> -batch`. They must end the same, with the same log (from its start, with the text interface's summaries left out), and with each item's details as OCaml prints them. Then OCaml finds nothing to do on gemel's replicas. CI's oracle job runs it.
 
+
+**Notes (phase 7b, 2026-10-21):**
+- **Printers** (`gemel_engine::uutil`, from `Uutil`): a host's progress printer and update-status printer, `Send` and `Sync`, since the blocking tasks that copy and scan call them.
+  - Progress is reported on the client's host, where copies between local roots run: `"l"` as a local copy goes (so a directory's files count towards its item), and `"mov"` for a move, all at once. The reports of a copy, a move or a deletion (none) add up to its `riLength`. A merge's don't: its working copies report their bytes, as in OCaml, while its `riLength` is 0.
+  - The path being scanned is shown by the host that scans, as OCaml's `showStatus` does, at most every 0.05 seconds and about every 10 KiB of files. A server's (one in loopback mode too) shows nothing, as `scanInfo.showStatus` is off on servers. Each scan counts for itself, as the two roots' scans run at once.
+- **The abort flag:** whether everything is aborted is now an `AllFlag` (an atomic) in the client's `Abort`. A copy's blocking task checks it at each report, and anything can set it from any thread (`AllFlag::set`, for a signal handler or the session). `Abort::reset` clears the same flag, so one taken before a run stays current. As in OCaml, cloning a whole file by its path reports once and isn't checked.
+- **Status messages and timers:** "Collecting changes" (timed, then the empty status that clears it) and "Reconciling changes"; "Transmitting file" around each copy. Timers show only with `timers`.
+- **Debug traces:** those of update detection on the engine thread and on the hosts (`findOnRoot`, `findLocal`, the predicates check, `updateArchive`, `markEqual`, `replaceArchiveLocal`, `updateProps`, `markPossiblyUpdated`, `checkNoUpdates`, `commitUpdates`), and recon's `reconcileAll` and result count. `Trace.debug` on a host's trace is `gemel_engine::debug`. Not ported: those of the scan itself, which runs off the engine thread, and `root2direction`'s, which has no host to trace on.
+- **Merge:** the command and its result are logged ("Merge command:", and "Merge result (exited (0)):" with the output), as OCaml logs them, and the oracle now compares those entries. What the merge made of the outputs ("One output detected" and the others) goes to stderr when log entries do (`send_log_msgs_to_stderr`), as `Util.msg`, now `Trace::msg`.
+- **The merge confirmation is asynchronous** (`files::ShowMerge`, through `merge` and `transport_item`): a future, so that the session can ask the user and wait for the reply.
+- **Tests:** in `tests/transport.rs`, in both dispatch modes:
+  - each item's progress adds up to its length (copies, a directory, a move);
+  - an abort set from another thread at the first report stops the run, with the first item done and nothing more started, and the next run starts afresh;
+  - the status messages and timers come in order, and the scan's path shows in direct mode, not on a server;
+  - a merge's log entries, and its explanation on stderr only when log entries go there.
+  
+  Copy's unit tests abort a copy midway from another thread, through the flag.
 
 ### Phase 8: text UI, `bins/gemel` (~2.1k)
 
