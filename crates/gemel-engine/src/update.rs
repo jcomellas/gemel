@@ -22,11 +22,19 @@
 //! drops those updates under a path whose scan then fails, gemel keeps the
 //! ones already made; they record only what the scan verified.
 //!
+//! # With a file watcher
+//!
+//! When `find` asks for a watcher (`wantWatcher`), the scan starts one
+//! ([`crate::fswatch`]) and tells it each directory it scans. A later
+//! `find` with `subpaths` (the paths left unsynchronised) then scans only
+//! what the watcher reported, as a tree of paths ([`PathTree`]), provided
+//! the paths and the directory stamp are those it was started with
+//! (`previousFindOptions`); otherwise it scans everything again. The scan
+//! holds the host's watcher throughout, so the two roots of a local sync
+//! take turns then.
+//!
 //! # Not ported yet
 //!
-//! - Scanning only what a file watcher reported (`Fswatchold`, the path
-//!   trees, and the `wantWatcher` and `subpaths` arguments of `find`): the
-//!   watcher is phase 9, and without it OCaml scans every path.
 //! - The debug traces of the scan itself (`buildUpdate` and the functions
 //!   it calls), which run off the engine thread, away from the host's
 //!   trace. Those of the functions around it are ported.
@@ -60,6 +68,7 @@ use crate::archive::{
 };
 use crate::common::{Codec, ContentsChange, PermChange, PrevState, UpdateContent, UpdateItem};
 use crate::fpcache::{self, FpCache};
+use crate::fswatch;
 use crate::globals::{self, Ignore, Roots};
 use crate::name_map::{NameMap, PathMap};
 use crate::pred::{self, Compiled, Pred};
@@ -385,6 +394,13 @@ pub struct Scan {
     fpcache: FpCache,
     hints: Vec<xferhint::Entry>,
     status: ScanStatus,
+    /// The replica's archive hash, which names it to the watcher.
+    arch_hash: Vec<u8>,
+    /// The host's watcher, while the scan holds it.
+    watch: RefCell<Option<fswatch::Slot>>,
+    /// The first error talking to the watcher: the scan stops there, as
+    /// OCaml's raises it.
+    watch_error: RefCell<Option<Error>>,
 }
 
 /// `showStatus`: shows a path being scanned now and then, after about
@@ -484,11 +500,43 @@ impl Scan {
             fpcache,
             hints: Vec::new(),
             status: ScanStatus::default(),
+            arch_hash: Vec::new(),
+            watch: RefCell::new(None),
+            watch_error: RefCell::new(None),
         })
     }
 
+    /// Runs `f` on the watcher, if the scan holds one and nothing has gone
+    /// wrong with it yet.
+    fn watcher(&self, f: impl FnOnce(&mut fswatch::Slot) -> Result<(), Error>) {
+        if self.watch_error.borrow().is_some() {
+            return;
+        }
+        if let Some(w) = self.watch.borrow_mut().as_mut()
+            && let Err(e) = f(w)
+        {
+            *self.watch_error.borrow_mut() = Some(e);
+        }
+    }
+
+    /// The error talking to the watcher, if there was one.
+    fn watch_result(&self) -> Result<(), Error> {
+        match self.watch_error.borrow_mut().take() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// The `follow` predicate, telling the watcher of each link followed
+    /// (`statFn` calls `Fswatch.followLink`).
     fn follow_link(&self) -> impl Fn(&Path<Local>) -> bool + '_ {
-        |p| self.follow.test(p.as_bytes())
+        |p| {
+            let follow = self.follow.test(p.as_bytes());
+            if follow {
+                self.watcher(|w| w.follow_link(p.as_bytes()));
+            }
+            follow
+        }
     }
 
     /// `Xferhint.insertEntry`, recorded to be applied on the host.
@@ -500,7 +548,9 @@ impl Scan {
     }
 
     fn get_info(&self, path: &Path<Local>) -> Result<Info, Error> {
-        fileinfo::get(true, &self.fspath, path, &self.follow_link(), &self.fs)
+        let info = fileinfo::get(true, &self.fspath, path, &self.follow_link(), &self.fs);
+        self.watch_result()?;
+        info
     }
 
     /// `checkFilename`.
@@ -681,8 +731,10 @@ impl Scan {
         child_updates: &[(Name, UpdateItem)],
     ) -> Result<(Props, bool), Error> {
         if no_child_change(child_updates) {
-            let (_, data_unchanged, _) =
-                fileinfo::unchanged(&self.fspath, path, info, &self.follow_link(), &self.fs)?;
+            let unchanged =
+                fileinfo::unchanged(&self.fspath, path, info, &self.follow_link(), &self.fs);
+            self.watch_result()?;
+            let (_, data_unchanged, _) = unchanged?;
             if data_unchanged {
                 let inode = inode_of(info, &self.fs);
                 return Ok(arch_desc.set_dir_change_flag(self.info.dir_stamp, inode));
@@ -711,6 +763,8 @@ impl Scan {
         children: &mut NameMap<Archive>,
         unchanged_children: bool,
     ) -> Result<ChildrenScan, Error> {
+        self.watcher(|w| w.scan_directory(path.as_bytes()));
+        self.watch_result()?;
         let p = path.as_bytes();
         let skip = self.immutable.test(p) && !self.immutable_not.test(p);
         let mut updates = Vec::new();
@@ -972,11 +1026,106 @@ impl Scan {
         }
     }
 
-    /// `buildUpdate`: the updates for `fullpath`, reached by going down
-    /// `rest` from `here`. Also returns the path as the archive spells it,
-    /// and the props of the directories on the way (for creating them on
-    /// the other side). `translated` is `fullpath` translated against the
-    /// archive as loaded.
+    /// `buildUpdatePathTree`: the updates for the paths of `tree` below
+    /// `here`, and whether the archive changed. A leaf, or a directory not
+    /// in the archive, is scanned whole, telling the watcher.
+    fn build_update_path_tree(
+        &mut self,
+        archive: &mut Archive,
+        here: &Path<Local>,
+        tree: &PathTree,
+    ) -> Result<(bool, UpdateItem), Error> {
+        let prev = old_info_of(archive);
+        let (PathTree::Node(tree_children), Archive::Dir(desc, arch_children)) =
+            (tree, &mut *archive)
+        else {
+            let hash = self.arch_hash.clone();
+            self.watcher(|w| w.start_scanning(&hash, &self.fspath, here.as_bytes()));
+            self.watch_result()?;
+            let r = self.build_update_rec(archive, here);
+            self.watcher(|w| w.stop_scanning());
+            let r = r?;
+            self.watch_result()?;
+            return Ok(r);
+        };
+        let mode = arch_children.mode();
+        let mut cur: Option<NameMap<Status>> = None;
+        let mut updates = Vec::new();
+        let mut arch_updated = false;
+        // The archive's names to respell as the tree does, if it changes
+        // (OCaml rebuilds the children with the tree's names).
+        let mut respell = Vec::new();
+        for (nm, sub) in tree_children.iter() {
+            let in_archive = arch_children.mem(nm);
+            let (nm2, status) = if *sub == PathTree::Leaf || !in_archive {
+                if cur.is_none() {
+                    cur = Some(NameMap::from_bindings(mode, self.get_children(here)?));
+                }
+                match cur.as_ref().expect("read").find_key_value(nm) {
+                    Some((k, st)) => (k.clone(), *st),
+                    None => match arch_children.find_key_value(nm) {
+                        Some((k, _)) => (k.clone(), Status::Abs),
+                        None => (nm.clone(), Status::Abs),
+                    },
+                }
+            } else {
+                let (k, _) = arch_children.find_key_value(nm).expect("in the archive");
+                (k.clone(), Status::Ok)
+            };
+            let path2 = here.child(&nm2);
+            if os::is_temp_file(nm2.as_bytes()) || self.ignore.test(&path2) {
+                continue;
+            }
+            let ui = match status {
+                Status::Ok | Status::Abs => {
+                    let key = arch_children.find_key_value(nm).map(|(k, _)| k.clone());
+                    let mut child = match &key {
+                        Some(k) => arch_children.remove(k).expect("in the archive"),
+                        None => Archive::NoArchive,
+                    };
+                    let r = self.build_update_path_tree(&mut child, &path2, sub);
+                    if let Some(k) = key {
+                        if k.as_bytes() != nm.as_bytes() {
+                            respell.push((k.clone(), nm.clone()));
+                        }
+                        arch_children.add(k, child);
+                    }
+                    let (changed, ui) = r?;
+                    arch_updated |= changed;
+                    ui
+                }
+                Status::Dup => dup_error(&path2),
+                Status::BadEnc => bad_enc_error(&path2),
+                Status::BadName => bad_name_error(&path2),
+            };
+            if ui != UpdateItem::NoUpdates {
+                updates.push((nm2, ui));
+            }
+        }
+        if arch_updated {
+            for (k, nm) in respell {
+                if let Some(child) = arch_children.remove(&k) {
+                    arch_children.add(nm, child);
+                }
+            }
+        }
+        let ui = if updates.is_empty() {
+            UpdateItem::NoUpdates
+        } else {
+            // Recon relies on the updates being sorted.
+            UpdateItem::Updates(
+                UpdateContent::Dir(desc.clone(), updates, PermChange::Same, false),
+                prev,
+            )
+        };
+        Ok((arch_updated, ui))
+    }
+
+    /// `buildUpdate`: the updates for the paths of `tree` below `fullpath`,
+    /// reached by going down `rest` from `here`. Also returns the path as
+    /// the archive spells it, and the props of the directories on the way
+    /// (for creating them on the other side). `translated` is `fullpath`
+    /// translated against the archive as loaded.
     fn build_update(
         &mut self,
         archive: &mut Archive,
@@ -984,10 +1133,10 @@ impl Scan {
         here: Path<Local>,
         rest: &Path<Global>,
         translated: &Path<Local>,
+        tree: &PathTree,
     ) -> Result<(UpdateItem, Path<Local>, Vec<Props>), Error> {
         let Some((name, rest2)) = rest.deconstruct() else {
-            // `buildUpdatePathTree` with a leaf.
-            let (_, ui) = self.build_update_rec(archive, &here)?;
+            let (_, ui) = self.build_update_path_tree(archive, &here, tree)?;
             return Ok((ui, here, Vec::new()));
         };
         let info = self.get_info(&here)?;
@@ -1047,7 +1196,7 @@ impl Scan {
         let (ui, local, mut dirs) = match archive {
             Archive::Dir(_, children) => {
                 let mut child = children.remove(&name).unwrap_or(Archive::NoArchive);
-                let r = self.build_update(&mut child, fullpath, here2, &rest2, translated);
+                let r = self.build_update(&mut child, fullpath, here2, &rest2, translated, tree);
                 if child != Archive::NoArchive {
                     children.add(name2, child);
                 }
@@ -1055,7 +1204,7 @@ impl Scan {
             }
             _ => {
                 let mut none = Archive::NoArchive;
-                let r = self.build_update(&mut none, fullpath, here2, &rest2, translated)?;
+                let r = self.build_update(&mut none, fullpath, here2, &rest2, translated, tree)?;
                 debug_assert_eq!(none, Archive::NoArchive);
                 r
             }
@@ -1068,23 +1217,153 @@ impl Scan {
         Ok((ui, local, dirs))
     }
 
+    /// The trees of paths to scan below each path (`None`: nothing), and
+    /// whether a watcher was started for the replica (`None`: the watcher
+    /// gave the trees). Without a watcher's report, every path is scanned
+    /// whole.
+    fn trees(
+        &mut self,
+        path_list: &[Path<Global>],
+        subpaths: &Subpaths,
+        want_watcher: bool,
+        unchanged_options: bool,
+    ) -> Result<(Vec<Option<PathTree>>, Option<bool>), Error> {
+        let hash = self.arch_hash.clone();
+        let mut watch = self.watch.borrow_mut();
+        if let (Some((unsynchronized, _)), true, Some(w)) =
+            (subpaths, unchanged_options, watch.as_mut())
+            && w.running(&hash)
+        {
+            // Filtered here too, which may cut the paths down cheaply.
+            let changes = w.get_changes(&hash)?;
+            let changed = unsynchronized
+                .iter()
+                .cloned()
+                .chain(changes.into_iter().filter(|p| !self.ignore.test(p)));
+            let subpaths: Vec<Path<Global>> = changed.collect();
+            return Ok((subtrees(path_list, &subpaths, self.mode), None));
+        }
+        let started = match watch.as_mut() {
+            Some(w) if want_watcher => w.start(true, &hash)?,
+            _ => false,
+        };
+        Ok((vec![Some(PathTree::Leaf); path_list.len()], Some(started)))
+    }
+
     /// Scans the paths (with their translations), last first as OCaml's
     /// `fold_right` does, updating `archive`.
-    fn run(&mut self, archive: &mut Archive, paths: &Translated) -> Result<Vec<Found>, Error> {
+    fn run(
+        &mut self,
+        archive: &mut Archive,
+        paths: &Translated,
+        trees: &[Option<PathTree>],
+    ) -> Result<Vec<Found>, Error> {
         let mut found = Vec::with_capacity(paths.len());
-        for (path, translated, ignored) in paths.iter().rev() {
-            if *ignored {
-                found.push((translated.clone(), UpdateItem::NoUpdates, Vec::new()));
-            } else {
-                let (ui, local, dirs) =
-                    self.build_update(archive, path, Path::empty(), path, translated)?;
-                found.push((local, ui, dirs));
+        for ((path, translated, ignored), tree) in paths.iter().zip(trees).rev() {
+            match tree {
+                Some(tree) if !*ignored => {
+                    let (ui, local, dirs) =
+                        self.build_update(archive, path, Path::empty(), path, translated, tree)?;
+                    found.push((local, ui, dirs));
+                }
+                _ => found.push((translated.clone(), UpdateItem::NoUpdates, Vec::new())),
             }
         }
         found.reverse();
         Ok(found)
     }
 }
+
+// ---- Sets of paths ----
+
+/// Paths to scan, as a tree (`pathTree`): a leaf is scanned whole, a node
+/// only through its children.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PathTree {
+    /// Everything below.
+    Leaf,
+    /// Only these children, each with its own tree.
+    Node(NameMap<PathTree>),
+}
+
+/// `addPathToTree`.
+fn add_path_to_tree(path: &Path<Global>, tree: Option<PathTree>, mode: Mode) -> PathTree {
+    match (path.deconstruct(), tree) {
+        (None, _) | (_, Some(PathTree::Leaf)) => PathTree::Leaf,
+        (Some((nm, p)), None) => {
+            let mut children = NameMap::new(mode);
+            children.add(nm, add_path_to_tree(&p, None, mode));
+            PathTree::Node(children)
+        }
+        (Some((nm, p)), Some(PathTree::Node(mut children))) => {
+            let t = children.remove(&nm);
+            children.add(nm, add_path_to_tree(&p, t, mode));
+            PathTree::Node(children)
+        }
+    }
+}
+
+/// `removePathFromTree`.
+fn remove_path_from_tree(path: &Path<Global>, tree: PathTree) -> Option<PathTree> {
+    let (nm, p) = path.deconstruct()?;
+    match tree {
+        PathTree::Leaf => Some(PathTree::Leaf),
+        PathTree::Node(mut children) => {
+            let Some(t) = children.remove(&nm) else {
+                return Some(PathTree::Node(children));
+            };
+            if let Some(t) = remove_path_from_tree(&p, t) {
+                children.add(nm, t);
+            }
+            // OCaml tests whether the children were empty before the
+            // removal, which they never are: an emptied node stays.
+            Some(PathTree::Node(children))
+        }
+    }
+}
+
+/// `pathTreeOfList`.
+fn path_tree_of_list(l: &[Path<Global>], mode: Mode) -> Option<PathTree> {
+    l.iter()
+        .fold(None, |t, p| Some(add_path_to_tree(p, t, mode)))
+}
+
+/// `getSubTree`.
+fn get_sub_tree(path: &Path<Global>, tree: &PathTree) -> Option<PathTree> {
+    let Some((nm, p)) = path.deconstruct() else {
+        return Some(tree.clone());
+    };
+    match tree {
+        PathTree::Leaf => Some(PathTree::Leaf),
+        PathTree::Node(children) => get_sub_tree(&p, children.find(&nm)?),
+    }
+}
+
+/// `filterPaths` (in `findLocal`): for each path, the tree of `subpaths`
+/// below it. The longest paths take theirs first, so that a path inside
+/// another keeps its own.
+fn subtrees(
+    paths: &[Path<Global>],
+    subpaths: &[Path<Global>],
+    mode: Mode,
+) -> Vec<Option<PathTree>> {
+    let mut numbered: Vec<(usize, &Path<Global>)> = paths.iter().enumerate().collect();
+    numbered.sort_by(|(_, a), (_, b)| b.compare_in(a, mode));
+    let mut tree = path_tree_of_list(subpaths, mode);
+    let mut out = vec![None; paths.len()];
+    for (i, p) in numbered {
+        if let Some(t) = tree.take() {
+            out[i] = get_sub_tree(p, &t);
+            tree = remove_path_from_tree(p, t);
+        }
+    }
+    out
+}
+
+/// `previousFindOptions`: for each replica watched, the directory stamp
+/// and the paths its watcher was started with.
+#[derive(Default)]
+struct PreviousFindOptions(std::collections::HashMap<String, (DirChangedStamp, Vec<Path<Global>>)>);
 
 /// Replaces `archive` by `new`, if any (the `optArch` of
 /// `checkContentsChange`).
@@ -1430,7 +1709,7 @@ pub type FindArgs = (bool, Vec<Path<Global>>, Subpaths);
 /// didn't change.
 pub async fn find_local(host: &Host, fspath: &Fspath, args: FindArgs) -> Result<Vec<Found>, Error> {
     let turn = Turn::take(host);
-    let (_want_watcher, path_list, _subpaths) = args;
+    let (want_watcher, path_list, subpaths) = args;
     crate::debug(host, "update", || {
         let paths: Vec<_> = path_list.iter().map(path_str).collect();
         format!("findLocal {fspath} ({})\n", paths.join(" "))
@@ -1453,10 +1732,25 @@ pub async fn find_local(host: &Host, fspath: &Fspath, args: FindArgs) -> Result<
         let ignore_archives = *host.prefs().borrow().read(&archive::IGNORE_ARCHIVES);
         FpCache::init(fast_check, ignore_archives, &cache_file, scan_props(host))
     };
+    let dir_stamp = info.dir_stamp;
     let mut scan = Scan::new(host, fspath, info, temp_names.clone(), fpcache)?;
     scan.status.printer = crate::uutil::update_status_printer(host);
-    // Without a watcher, every path is scanned. Errors and ignored paths
-    // are reported against the archive as loaded.
+    scan.arch_hash = arch_hash.as_bytes().to_vec();
+    let unchanged_options = host
+        .state::<PreviousFindOptions>()
+        .borrow()
+        .0
+        .get(&arch_hash)
+        .is_some_and(|(stamp, paths)| *stamp == dir_stamp && *paths == path_list);
+    // The scan holds the host's watcher, if it may use one.
+    let use_watcher = *host.prefs().borrow().read(&fswatch::USE_WATCHER);
+    let mut watch = if use_watcher {
+        Some(fswatch::take(host).await)
+    } else {
+        None
+    };
+    *scan.watch.borrow_mut() = watch.as_mut().map(|w| std::mem::take(&mut **w));
+    // Errors and ignored paths are reported against the archive as loaded.
     let paths: Translated = {
         let ignore = &scan.ignore;
         path_list
@@ -1471,12 +1765,20 @@ pub async fn find_local(host: &Host, fspath: &Fspath, args: FindArgs) -> Result<
             .collect::<Result<_, Error>>()?
     };
     let mut archive = archive::take_archive(host, &this_root);
+    let paths_scanned = path_list.clone();
     let (archive, scan, found) = runtime::blocking(move || {
-        let found = scan.run(&mut archive, &paths);
+        let found = scan
+            .trees(&paths_scanned, &subpaths, want_watcher, unchanged_options)
+            .and_then(|(trees, started)| Ok((scan.run(&mut archive, &paths, &trees)?, started)));
         (archive, scan, found)
     })
     .await;
     archive::set_archive_local(host, &this_root, archive);
+    if let Some(w) = watch.as_mut() {
+        **w = scan.watch.take().unwrap_or_default();
+        fswatch::flush_trace(host, w);
+    }
+    drop(watch);
     let Scan {
         fpcache, hints, fs, ..
     } = scan;
@@ -1487,7 +1789,22 @@ pub async fn find_local(host: &Host, fspath: &Fspath, args: FindArgs) -> Result<
     }
     *host.state::<TempNames>().borrow_mut() = temp_names;
     drop(turn);
-    let found = found?;
+    let (found, started) = found?;
+    match started {
+        Some(true) => {
+            host.state::<PreviousFindOptions>()
+                .borrow_mut()
+                .0
+                .insert(arch_hash, (dir_stamp, path_list));
+        }
+        Some(false) => {
+            host.state::<PreviousFindOptions>()
+                .borrow_mut()
+                .0
+                .remove(&arch_hash);
+        }
+        None => {}
+    }
     abort_if_any_mountpoints_are_missing(host, fspath, &fs)?;
     Ok(found)
 }
@@ -2484,4 +2801,69 @@ pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
     r.register_root(&MARK_EQUAL)?;
     r.register_root(&REPLACE_ARCHIVE)?;
     r.register_root(&PREPARE_COMMIT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> Path<Global> {
+        Path::from_bytes(s.as_bytes()).unwrap()
+    }
+
+    fn show(t: &Option<PathTree>) -> String {
+        fn rec(t: &PathTree, out: &mut String) {
+            match t {
+                PathTree::Leaf => out.push('*'),
+                PathTree::Node(c) => {
+                    out.push('{');
+                    for (n, t) in c.iter() {
+                        out.push_str(&String::from_utf8_lossy(n.as_bytes()));
+                        out.push(':');
+                        rec(t, out);
+                        out.push(' ');
+                    }
+                    out.push('}');
+                }
+            }
+        }
+        let mut out = String::new();
+        match t {
+            Some(t) => rec(t, &mut out),
+            None => out.push('-'),
+        }
+        out
+    }
+
+    #[test]
+    fn a_path_tree_keeps_the_shortest_paths() {
+        let m = Mode::Sensitive;
+        let t = path_tree_of_list(&[p("a/b/c"), p("a/d"), p("a/b")], m);
+        assert_eq!(show(&t), "{a:{b:* d:* } }");
+        assert_eq!(show(&path_tree_of_list(&[p("x"), p("")], m)), "*");
+        assert_eq!(show(&path_tree_of_list(&[], m)), "-");
+    }
+
+    #[test]
+    fn sub_trees_and_removals_follow_ocaml() {
+        let m = Mode::Sensitive;
+        let t = path_tree_of_list(&[p("a/b"), p("c")], m).unwrap();
+        assert_eq!(show(&get_sub_tree(&p("a"), &t)), "{b:* }");
+        assert_eq!(show(&get_sub_tree(&p("a/b/x"), &t)), "*");
+        assert_eq!(show(&get_sub_tree(&p("z"), &t)), "-");
+        // An emptied node stays, as in OCaml.
+        let r = remove_path_from_tree(&p("a/b"), t.clone());
+        assert_eq!(show(&r), "{a:{} c:* }");
+        assert_eq!(show(&remove_path_from_tree(&p(""), t)), "-");
+    }
+
+    #[test]
+    fn each_path_gets_the_changes_below_it_longest_first() {
+        let m = Mode::Sensitive;
+        let paths = [p("a"), p("a/b"), p("z")];
+        let changes = [p("a/b/c"), p("a/x"), p("q")];
+        let out: Vec<String> = subtrees(&paths, &changes, m).iter().map(show).collect();
+        // a/b takes its own change first; a keeps the rest of its own.
+        assert_eq!(out, ["{x:* }", "{c:* }", "-"]);
+    }
 }

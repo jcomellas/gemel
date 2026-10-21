@@ -40,8 +40,9 @@ does, and OCaml accepts the archives gemel writes. CI checks this on
 Linux, and Windows replays outcomes recorded from OCaml. Watch mode is
 under way: `gemel-fsmonitor`, the file watcher, runs on Linux, macOS
 (FSEvents, which OCaml has no watcher for) and Windows, and OCaml Unison
-uses it as its `unison-fsmonitor` on Linux and macOS. gemel itself
-doesn't use it yet. Synchronising
+uses it as its `unison-fsmonitor` on Linux and macOS. gemel's engine
+uses it to scan only what changed; the text interface's `-repeat watch`
+is still to come. Synchronising
 xattrs and ACLs, the GUI and remote connections are still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
