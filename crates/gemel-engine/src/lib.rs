@@ -102,5 +102,6 @@ pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
     update::register_commands(rpc)?;
     copy::register_commands(rpc)?;
     stasher::register_commands(rpc)?;
-    files::register_commands(rpc)
+    files::register_commands(rpc)?;
+    fswatch::register_commands(rpc)
 }

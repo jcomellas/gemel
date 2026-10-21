@@ -80,3 +80,8 @@ jobs:
         env:
           GEMEL_REFERENCE_FSMONITOR: ${{ github.workspace }}/unison-src/fsmonitor-ocaml
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
+      # Update detection with OCaml's watcher. (The test jobs run it with
+      # gemel's, which `cargo test --workspace` builds.)
+      - run: cargo test --locked -p gemel-engine --test watch
+        env:
+          GEMEL_REFERENCE_FSMONITOR: ${{ github.workspace }}/unison-src/fsmonitor-ocaml

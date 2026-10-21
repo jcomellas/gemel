@@ -517,6 +517,40 @@ Unison has no FSEvents watcher on macOS, so gemel's helper would be an improveme
     - Without a helper, OCaml's watch mode stops at once.
   - CI's oracle job builds OCaml's helper and moves it away from OCaml's binary, which OCaml searches first.
 
+**Notes (phase 9b, 2026-10-22):**
+- **The client** is `gemel_engine::fswatch`: `fswatch.ml`, and the half of `fswatchold.ml` that uses it.
+  - It looks for `gemel-fsmonitor`, then `unison-fsmonitor-2.54` (the version of the source ported, since gemel claims none) and `unison-fsmonitor`, each next to the program and then on `PATH`.
+  - `fswatch::set_program` names the helper instead, for tests.
+  - Not ported: `fswatchold.ml`'s `fsmonitor.py` watchers, which nothing ships.
+- **Threads.**
+  - Update detection runs off the engine thread, so the host's connection is in a `Slot` behind an async mutex.
+  - A scan holds the slot from asking for changes through its last `DONE`, so the two roots of a local sync take turns while watching. Without `watch` they still scan at the same time.
+  - A thread reads the helper's output:
+    - every line read wakes the waits, as `has_changes` does;
+    - `CHANGES` lines go no further;
+    - other lines answer commands.
+  - At the end of the output it marks the helper gone, and the next use cleans up. So the next `find` scans everything and starts a new helper, as OCaml does.
+- **Update detection** (`update.rs`):
+  - the path trees (`addPathToTree`, `removePathFromTree` with OCaml's test of the children before the removal, `getSubTree`), and `findLocal`'s `filterPaths`;
+  - `buildUpdatePathTree`, including respelling the archive's names as the tree does, when the archive changes;
+  - `START`/`DONE` around each subtree scanned whole, `DIR` for each directory, and `LINK` from the `follow` predicate (`statFn`);
+  - `previousFindOptions`.
+  - The paths left unsynchronised are scanned whatever the watcher says. A `find` without them, or with other paths or another directory stamp, scans everything again and restarts the watching.
+  - A watcher error stops the scan with OCaml's message, at the next point the scan checks rather than where it happened.
+- **`waitForChanges`** is a root command of the engine (OCaml's is in `uitext.ml`), so a server will have it.
+- **As in OCaml**, a directory reached through a path tree is never said to be emptied: `buildUpdatePathTree` passes `false`, and only a whole scan of the directory computes it.
+- **Tests:**
+  - Unit tests for the path trees.
+  - `tests/watch.rs`, directly and through the loopback, with the helper from `target/<profile>`:
+    - only what the watcher reports is scanned, besides the paths left unsynchronised;
+    - a `find` without a watcher's report, or right after one without a watcher, scans everything;
+    - the watcher's `find` gives the same updates as a full scan;
+    - directories a watched scan finds are watched;
+    - the emptied flag.
+
+    With `GEMEL_REFERENCE_FSMONITOR`, OCaml's helper is used instead. CI's oracle job does that.
+  - The roots share one helper, and any line from it ends every wait (OCaml's `has_changes`). So a wait can end with one replica's report, before the other's changes are old enough. The tests let the changes settle after each wait.
+
 ## Verification
 
 - **Codecs and hashes:** OCaml golden vectors, as in milestone 1. They are regenerated with `scripts/gen-ocaml-fixtures.sh`, and must be identical on OCaml 4.13 and 5.3.
