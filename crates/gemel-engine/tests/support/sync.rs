@@ -4,10 +4,12 @@
 use std::cell::RefCell;
 use std::path::{Path as StdPath, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use gemel_base::case::Mode;
 use gemel_base::path::{Global, Path};
 use gemel_base::prefs::Prefs;
+use gemel_base::trace::Trace;
 use gemel_engine::archive::{self, Archive};
 use gemel_engine::common::{UpdateContent, UpdateItem};
 use gemel_engine::globals::{self, Roots};
@@ -29,6 +31,30 @@ pub struct Setup {
     pub rpc: Rpc,
     pub roots: Roots,
     pub base: PathBuf,
+    /// What the client's trace printed (log entries and messages).
+    pub output: Output,
+}
+
+/// Captured output.
+#[derive(Clone, Default)]
+pub struct Output(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Output {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Output {
+    /// Everything so far, and clears it.
+    pub fn take(&self) -> String {
+        String::from_utf8_lossy(&std::mem::take(&mut *self.0.lock().unwrap())).into_owned()
+    }
 }
 
 pub fn setup(dir: &TempDir, loopback: bool) -> Setup {
@@ -57,6 +83,11 @@ pub fn setup_in(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
     ));
     client.set_unison_dir(&unison_dir);
     client.set_warn_printer(None);
+    // The log file is `dir/u/unison.log`.
+    let output = Output::default();
+    let mut trace = Trace::with_sinks(Box::new(output.clone()), Box::new(output.clone()));
+    trace.set_unison_dir(&unison_dir);
+    *client.state::<Trace>().borrow_mut() = trace;
     let dispatch = if loopback {
         let server = Host::loopback_server(
             &client.prefs().borrow(),
@@ -82,7 +113,12 @@ pub fn setup_in(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
         globals::propagate_prefs(&rpc, &roots).await.unwrap();
         roots
     });
-    Setup { rpc, roots, base }
+    Setup {
+        rpc,
+        roots,
+        base,
+        output,
+    }
 }
 
 impl Setup {

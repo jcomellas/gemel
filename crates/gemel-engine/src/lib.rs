@@ -55,7 +55,8 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     stasher::register_prefs(prefs)?;
     files::register_prefs(prefs)?;
     sortri::register_prefs(prefs)?;
-    recon::register_prefs(prefs)
+    recon::register_prefs(prefs)?;
+    transport::register_prefs(prefs)
 }
 
 /// Registers the remote commands of the modules ported so far.

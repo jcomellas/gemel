@@ -6,37 +6,22 @@ mod support;
 
 use std::path::Path as StdPath;
 
-use gemel_base::case;
-use gemel_base::path::{Global, Path};
+#[cfg(unix)]
+use gemel_base::path::Path;
 use gemel_base::util::{Error, FileId};
-use gemel_engine::common::{
-    Direction, ReconItem, ReplicaContent, Replicas, Status, UpdateContent, UpdateItem,
-};
-use gemel_engine::copy::Replacing;
-use gemel_engine::{files, recon, update};
-use gemel_fs::fileinfo::Typ;
-use gemel_fs::osx;
+use gemel_engine::common::ReconItem;
+#[cfg(unix)]
+use gemel_engine::common::{Direction, Replicas};
+use gemel_engine::{files, recon, transport, update};
 
+use support::oracle::*;
 use support::sync::*;
 use support::*;
 
 impl Setup {
-    /// What OCaml's startup sets for these hosts, and `prefs`.
-    fn init(&self, prefs: &[&str]) {
-        self.set_prefs(|p| {
-            let osx_host = cfg!(target_os = "macos");
-            case::init(p, osx_host || cfg!(windows), osx_host);
-            osx::init(p, osx_host);
-            let lines: Vec<String> = prefs.iter().map(|l| l.to_string()).collect();
-            p.load_strings(&lines).unwrap();
-            gemel_fs::fileinfo::init(p, cfg!(windows));
-        });
-        self.init_backups();
-    }
-
-    /// Reconciles, and propagates every item with a direction (as transport
-    /// will, without moves), then commits. Returns the items and each one's
-    /// result.
+    /// Reconciles, and propagates every item in order (with
+    /// `Transport.transportItem`, but without putting deletions last), then
+    /// commits. Returns the items and each one's result.
     fn propagate(&self) -> Vec<(ReconItem, Result<(), Error>)> {
         self.propagate_after(|| {})
     }
@@ -55,8 +40,14 @@ impl Setup {
             .borrow_mut()
             .reset();
         let mut results = Vec::new();
-        for ri in items {
-            let r = block_on(do_action(self, &ri));
+        for (i, ri) in items.into_iter().enumerate() {
+            let r = block_on(transport::transport_item(
+                &self.rpc,
+                &self.roots,
+                &ri,
+                FileId(i as i64),
+                &mut |_, _| true,
+            ));
             results.push((ri, r));
         }
         block_on(update::commit_updates(&self.rpc, &self.roots)).unwrap();
@@ -76,175 +67,9 @@ impl Setup {
     }
 }
 
-/// `Transport.doAction`, with only the first kind of move.
-async fn do_action(s: &Setup, ri: &ReconItem) -> Result<(), Error> {
-    let Replicas::Different(d) = &ri.replicas else {
-        return Ok(());
-    };
-    let roots = s.roots.list();
-    let (from, to, path_from, path_to, rc_from, rc_to): (
-        _,
-        _,
-        &Path<Global>,
-        &Path<Global>,
-        &ReplicaContent,
-        &ReplicaContent,
-    ) = match d.direction {
-        Direction::Replica1ToReplica2 => {
-            (&roots[0], &roots[1], &ri.path1, &ri.path2, &d.rc1, &d.rc2)
-        }
-        Direction::Replica2ToReplica1 => {
-            (&roots[1], &roots[0], &ri.path2, &ri.path1, &d.rc2, &d.rc1)
-        }
-        Direction::Conflict(_) | Direction::Merge => return Ok(()),
-    };
-    let not_default = d.direction != d.default_direction;
-    // doMove's first case: a move whose source is unchanged in the other
-    // replica.
-    if let Status::MovedOut(new_path, from_new, to_new) = &rc_from.status
-        && matches!(rc_to.status, Status::Unchanged | Status::PropsChanged)
-    {
-        return files::move_(
-            &s.rpc,
-            from,
-            files::MoveSide {
-                path: path_from,
-                ui: &rc_from.ui,
-                new_path,
-                new_ui: &from_new.ui,
-                new_props: &from_new.props,
-            },
-            &from_new.desc,
-            to,
-            files::MoveSide {
-                path: path_to,
-                ui: &rc_to.ui,
-                new_path,
-                new_ui: &to_new.ui,
-                new_props: &to_new.props,
-            },
-            &rc_to.desc,
-            not_default,
-            rc_from.size.1,
-            FileId(0),
-        )
-        .await;
-    }
-    let unchanged =
-        |rc: &ReplicaContent| matches!(rc.status, Status::Unchanged | Status::PropsChanged);
-    if rc_from.typ == Typ::Absent {
-        files::delete(&s.rpc, from, path_from, to, path_to, &rc_to.ui, not_default).await
-    } else if unchanged(rc_from) && unchanged(rc_to) {
-        files::set_prop(
-            &s.rpc,
-            from,
-            path_from,
-            to,
-            path_to,
-            &rc_from.desc,
-            &rc_to.desc,
-            &rc_from.ui,
-            &rc_to.ui,
-        )
-        .await
-    } else if rc_from.typ == Typ::File && rc_to.typ == Typ::File {
-        let len = match &rc_from.ui {
-            UpdateItem::Updates(UpdateContent::File(p, _), _) => p.length(),
-            _ => 0,
-        };
-        files::copy(
-            &s.rpc,
-            &s.roots,
-            Replacing::Update(len, 0),
-            from,
-            path_from,
-            &rc_from.ui,
-            &[],
-            to,
-            path_to,
-            &rc_to.ui,
-            &[],
-            not_default,
-            FileId(0),
-        )
-        .await
-    } else {
-        files::copy(
-            &s.rpc,
-            &s.roots,
-            Replacing::Copy,
-            from,
-            path_from,
-            &rc_from.ui,
-            &rc_from.props,
-            to,
-            path_to,
-            &rc_to.ui,
-            &rc_to.props,
-            not_default,
-            FileId(0),
-        )
-        .await
-    }
-}
-
-/// Both replicas of a sync, in step.
-fn synced(dir: &TempDir, loopback: bool, prefs: &[&str], build: fn(&StdPath)) -> Setup {
-    let s = setup(dir, loopback);
-    s.init(prefs);
-    build(&s.a());
-    build(&s.b());
-    s.commit(&s.find());
-    s
-}
-
 /// The replicas are the same, but for OCaml's backup files.
 fn assert_mirrored(s: &Setup) {
     assert_eq!(listing(&s.a()), listing(&s.b()));
-}
-
-/// OCaml Unison finds nothing to do, with fast checking and without.
-/// Needs OCaml Unison (`GEMEL_REFERENCE_UNISON`).
-fn ocaml_agrees(s: &Setup, prefs: &[&str]) {
-    let Some(unison) = std::env::var_os("GEMEL_REFERENCE_UNISON") else {
-        return;
-    };
-    let flags: Vec<String> = prefs
-        .iter()
-        .map(|l| {
-            let (k, v) = l.split_once(" = ").unwrap();
-            format!("-{k}={v}")
-        })
-        .collect();
-    for fastcheck in ["true", "false"] {
-        let out = std::process::Command::new(&unison)
-            .arg(s.a())
-            .arg(s.b())
-            .args([
-                "-batch",
-                "-ui",
-                "text",
-                "-log=false",
-                "-contactquietly",
-                "-times",
-            ])
-            .arg(format!("-fastcheck={fastcheck}"))
-            .args(&flags)
-            .env("UNISON", s.base.join("u"))
-            .env("HOME", &s.base)
-            .stdin(std::process::Stdio::null())
-            .output()
-            .unwrap();
-        let all = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            all.contains("Nothing to do: replicas have not changed since last sync."),
-            "fastcheck {fastcheck}: {all}"
-        );
-    }
 }
 
 #[test]
@@ -489,14 +314,6 @@ fn merge_conflict(dir: &TempDir, loopback: bool, prefs: &[&str]) -> Setup {
     s
 }
 
-/// A replica's files and contents.
-type Listing = Vec<(String, String)>;
-
-/// The listings of both replicas.
-fn listings(s: &Setup) -> (Listing, Listing) {
-    (listing(&s.a()), listing(&s.b()))
-}
-
 /// gemel merges what OCaml merges, for each kind of result the merge
 /// program can leave, and OCaml then has nothing to do.
 #[cfg(unix)]
@@ -666,38 +483,6 @@ fn ls_lists_matching_entries() {
     // `*` doesn't match a leading dot (so neither `.` nor `..`).
     assert_eq!(files::ls(d, "*").unwrap(), ["a.txt", "b.txt", "c.md"]);
     assert_eq!(files::ls(d, ".*").unwrap(), [".", ".."]);
-}
-
-/// OCaml Unison, run in batch mode on `s`'s replicas with `prefs`.
-fn ocaml_sync(unison: &std::ffi::OsStr, s: &Setup, flags: &[String]) -> String {
-    let out = std::process::Command::new(unison)
-        .arg(s.a())
-        .arg(s.b())
-        .args([
-            "-batch",
-            "-ui",
-            "text",
-            "-log=false",
-            "-contactquietly",
-            "-times",
-        ])
-        .args(flags)
-        .env("UNISON", s.base.join("u"))
-        .env("HOME", &s.base)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)
-}
-
-fn flags_of(prefs: &[&str]) -> Vec<String> {
-    prefs
-        .iter()
-        .map(|l| {
-            let (k, v) = l.split_once(" = ").unwrap();
-            format!("-{k}={v}")
-        })
-        .collect()
 }
 
 /// Missing parents of a path given with `path` are created with the

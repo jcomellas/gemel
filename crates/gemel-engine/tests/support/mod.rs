@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+pub mod oracle;
 pub mod sync;
 
 use std::path::{Path as StdPath, PathBuf};
@@ -27,7 +28,22 @@ impl TempDir {
 
 impl Drop for TempDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if std::fs::remove_dir_all(&self.0).is_err() {
+            // A test left a directory read-only.
+            #[cfg(unix)]
+            fn writable(d: &StdPath) {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(d, PermissionsExt::from_mode(0o755));
+                for e in std::fs::read_dir(d).into_iter().flatten().flatten() {
+                    if e.file_type().is_ok_and(|t| t.is_dir()) {
+                        writable(&e.path());
+                    }
+                }
+            }
+            #[cfg(unix)]
+            writable(&self.0);
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 }
 
@@ -39,9 +55,10 @@ pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
     tokio::task::LocalSet::new().block_on(&rt, f)
 }
 
-/// Every preference archives and update detection read.
+/// Every preference the engine reads.
 pub fn new_prefs() -> Prefs {
     let mut p = Prefs::new();
+    gemel_base::trace::register_prefs(&mut p).unwrap();
     case::register_prefs(&mut p).unwrap();
     gemel_fs::os::register_prefs(&mut p).unwrap();
     gemel_fs::fileinfo::register_prefs(&mut p).unwrap();

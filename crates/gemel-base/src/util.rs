@@ -142,6 +142,10 @@ pub fn split_into_words(s: &str, c: char) -> Vec<String> {
     }
 }
 
+/// `Uutil.myNameAndVersion`, for messages to the user. Archives and the
+/// files Unison names keep OCaml's name (`unison`), for compatibility.
+pub const MY_NAME_AND_VERSION: &str = concat!("gemel ", env!("CARGO_PKG_VERSION"));
+
 /// `Uutil.quotes`: `s` quoted for the shell (single quotes on Unix,
 /// double quotes on Windows).
 pub fn quotes(s: &str) -> String {
