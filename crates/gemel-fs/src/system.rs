@@ -132,6 +132,31 @@ pub fn os_path(p: &[u8]) -> PathBuf {
     }
 }
 
+/// The long form of a path, without 8.3 short names (`GetLongPathNameW`,
+/// as `Lwt_win.longpathname` does for the file watcher); `None` if there
+/// is none, as when the path is gone.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn long_path_name(p: &std::path::Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut buf = vec![0u16; 260];
+    loop {
+        // SAFETY: `wide` is NUL-terminated, and `buf` is as long as said.
+        let n =
+            unsafe { GetLongPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) } as usize;
+        if n == 0 {
+            return None;
+        }
+        if n < buf.len() {
+            buf.truncate(n);
+            return Some(PathBuf::from(std::ffi::OsString::from_wide(&buf)));
+        }
+        buf.resize(n, 0);
+    }
+}
+
 /// `System.extendedPath` (Windows): `C:/x` becomes `\\?\C:\x`,
 /// `//host/share/x` becomes `\\?\UNC\host\share\x`, and `//?/...` paths
 /// just get backslashes.

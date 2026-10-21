@@ -10,6 +10,11 @@ publish.workspace = true
 
 [dependencies]
 gemel-compat.workspace = true
+notify.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# Windows' long path names, for events.
+gemel-fs.workspace = true
 
 [lints]
 workspace = true

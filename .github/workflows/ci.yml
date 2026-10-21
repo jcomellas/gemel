@@ -48,7 +48,11 @@ jobs:
           path: unison-src
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ocaml make
-      - run: make -C unison-src tui
+      # OCaml looks for its watcher next to its binary first; keep it
+      # elsewhere, so that each test chooses the watcher OCaml finds.
+      - run: |
+          make -C unison-src tui fsmonitor
+          mv unison-src/src/unison-fsmonitor unison-src/fsmonitor-ocaml
       # The harness's self-test, then gemel on generated scenarios.
       - run: cargo run --locked -p gemel-oracle -- --reference unison-src/src/unison --count 20
       - run: cargo build --locked -p gemel
@@ -70,4 +74,9 @@ jobs:
       # The gemel program, in batch and interactive mode, against `unison -ui text`.
       - run: cargo test --locked -p gemel --test batch --test interactive --test terminal --test repeat
         env:
+          GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
+      # The file watcher, against OCaml's (inotify), and as OCaml's watcher.
+      - run: cargo test --locked -p gemel-fsmonitor
+        env:
+          GEMEL_REFERENCE_FSMONITOR: ${{ github.workspace }}/unison-src/fsmonitor-ocaml
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison

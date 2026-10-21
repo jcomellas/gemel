@@ -1,6 +1,6 @@
 # Milestone 2: local engine and text UI
 
-*Status: done (2026-10-21), but for the optional phase 9 · Proposed 2026-10-19 · Follows milestone 1 (compat and base, PRs #2–#6) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: done (2026-10-21) but for the optional phase 9, which is in progress · Proposed 2026-10-19 · Follows milestone 1 (compat and base, PRs #2–#6) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 2 is step 2 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): a local↔local engine plus the text UI. It ends with `gemel` synchronising two local directories, with OCaml Unison's results and archive format.
 
@@ -454,6 +454,68 @@ Decided for 8a:
 - **`bins/gemel-fsmonitor`** on `notify`.
 
 Unison has no FSEvents watcher on macOS, so gemel's helper would be an improvement there.
+
+**Split (2026-10-21):** three PRs. The helper comes first, so that each later part can be tested with a watcher on all three systems.
+
+- **9a: `bins/gemel-fsmonitor`** (`fsmonitor/watchercommon.ml`, ~0.6k, and the watchers, ~0.4k).
+  - **A core without system calls:** the tree of watched directories and its generations, the changes with their times, the 0.5 s delay, a creation then a deletion cancelling out, `gather_changes`, `RESET`, and the waits. The time is passed in, so the core is tested by feeding it events.
+  - **A `notify` backend,** watching as OCaml's watchers do:
+    - Linux: each directory on its own (inotify), as `fsmonitor/inotify` does;
+    - Windows: each root recursively, recording the directories `DIR` names without opening them, as `fsmonitor/windows` does;
+    - macOS: each root recursively too (FSEvents), which OCaml has no watcher for.
+  - **One loop,** on a channel fed by a stdin reader and the backend, with timeouts for the delay. No tokio.
+  - **Messages as OCaml's,** including its errors.
+  - **Tests:**
+    - the core, on its own;
+    - the helper driven over its stdin and stdout, on real directories, on all three systems;
+    - on Linux, OCaml's `unison-fsmonitor` (inotify) driven by the same scripts, comparing the changes reported as sets. A Hashtbl orders OCaml's.
+  - `scripts/build-ocaml-unison.sh` and CI's oracle job also build OCaml's helper (`make fsmonitor`). They keep it under a name OCaml doesn't look for next to its binary, so that a test chooses the helper OCaml finds.
+- **9b: the client,** in `gemel-engine` (`fswatch.ml`, ~0.5k, and the new-watcher half of `fswatchold.ml`).
+  - The connection, with `fswatch.ml`'s reader semantics: any line signals a change, and `CHANGES` lines never answer a command.
+  - `START`, `DIR`, `LINK` and `DONE` from the scan.
+  - In `find`: the path trees, `subpaths`, and `previousFindOptions`.
+  - The `waitForChanges` root command.
+  - **Tests:** with gemel's helper on all three systems, and on Linux with OCaml's helper. OCaml's client is also run with gemel's helper.
+- **9c: `-repeat watch` and `watch+n`** (`synchronizePathsFromFilesystemWatcher`).
+  - The loop, its full syncs and its retries after failures. The session gets the paths that are ready and those delayed.
+  - **Tests:** compared with OCaml on Linux, each with its own helper, on statuses and results rather than whole outputs.
+- **Divergences and cuts:**
+  - gemel looks for `gemel-fsmonitor` (next to its binary, then on `PATH`), then for `unison-fsmonitor-<major>` and `unison-fsmonitor`, as OCaml does. Both speak protocol version 1.
+  - Not ported: `fswatchold.ml`'s `fsmonitor.py` fallback, which nothing ships, and the Solaris watcher.
+  - macOS has no OCaml helper to compare with.
+
+**Notes (phase 9a, 2026-10-21):**
+- **`bins/gemel-fsmonitor`** has three parts:
+  - `core`: `watchercommon.ml`, with the time passed in and the system calls behind a `Backend`;
+  - `backend`: `notify` 8.2;
+  - `main`: one loop on a std channel, fed by a thread reading stdin and by `notify`'s callback, with a timeout for the delay.
+- **How an event is matched with a directory.**
+  - OCaml finds it from the inotify watch the event came from, or, on Windows, from the path below the root. `notify` gives paths, so:
+    - on Linux and macOS an event concerns the watched directory holding the path, and the path itself if it is watched;
+    - on Windows it follows OCaml's Windows watcher. An event in a directory not known, or a deletion, counts as a change to the nearest known directory, and names are tried in long form (`gemel_fs::system::long_path_name`, `GetLongPathNameW`).
+  - On macOS the roots are watched recursively (FSEvents), but events count only in directories scanned, as with inotify.
+  - On Windows and macOS a symbolic link's target is watched only if it is below a root. That is OCaml's limitation on Windows.
+  - Each `DIR` asks the backend again for a directory already watched, as OCaml asks inotify each time: a directory deleted then created again at the same path needs a new inotify watch.
+- **Divergences:**
+  - A `notify` error, or its rescan flag, counts as lost events: every root has changed (`signal_overflow`). OCaml stops on an inotify read error, and ignores a Windows read error.
+  - An error starting `notify` other than inotify's limit says "unable to start watching for changes".
+  - FSEvents merges the events on a path and may deliver a burst in several batches. So on macOS a file created then deleted can still be reported, and a `WAIT` can be answered before the last events of a burst arrive. Unison picks those up at its next `CHANGES`.
+- **Tests:**
+  - The core has 14 unit tests:
+    - when changes are reported, and how one hides those below it;
+    - a creation then a deletion;
+    - creations during a scan;
+    - directories not scanned again, and scans below a root;
+    - watches added again on each scan, waits, `RESET`, directories lost during a scan;
+    - bad commands;
+    - Windows' matching.
+  - `tests/helper.rs` drives the helper over its stdin and stdout on real directories, on all three systems. Its eight scenarios include a directory deleted, created again and scanned again.
+    - On Linux the changes must be exactly those made, and with `GEMEL_REFERENCE_FSMONITOR` OCaml's helper must report the same, as sets.
+    - Elsewhere the changes reported must cover those made.
+  - `tests/ocaml_client.rs` (Unix) runs OCaml's `-repeat watch` with this helper as its `unison-fsmonitor`, and checks that a new file and a deletion propagate.
+    - It passes with Homebrew's 2.54.0 on macOS, which has no watcher of its own, and with 8772d26 on Linux.
+    - Without a helper, OCaml's watch mode stops at once.
+  - CI's oracle job builds OCaml's helper and moves it away from OCaml's binary, which OCaml searches first.
 
 ## Verification
 
