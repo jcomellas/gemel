@@ -33,8 +33,10 @@ thread) is done too, and so is the `gemel` program's text interface:
 `unison -ui text` does, with its keys, matching conditions and proceed
 menu, in raw mode or in a dumb terminal, and syncs, prints and logs as it
 does, in batch mode too; Ctrl-C and `SIGTERM` are handled as OCaml 5
-handles them. `-repeat`, the profile manager (`-i`) and `-help`'s list of
-options, the GUI and remote connections are still to come.
+handles them. `-repeat` with an interval and the profile manager (`-i`) work as
+OCaml's do, and `-help` lists the options as OCaml's does, except
+`-acl` and `-xattrs`. Watching for changes, the GUI and remote
+connections are still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 

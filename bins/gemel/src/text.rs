@@ -25,7 +25,9 @@
 //! being scanned, finishes first), and the session's end releases the
 //! locks held.
 //!
-//! Not ported yet (phase 8c): `-repeat`, the profile manager (`-i`).
+//! `-repeat` syncs again after an interval, until the user asks to stop
+//! between syncs (`SIGUSR2`); with the file watcher (`watch`) is phase 9.
+//! The profile manager (`-i`) lists the profiles to choose one.
 
 mod interact;
 
@@ -48,6 +50,7 @@ use gemel_ui_api::session::{
     self, Command, Config, Event, ItemView, LogKind, Outcome, Overrides, Progress, Question,
     RootNames, Settings, Summary, Updates,
 };
+use gemel_ui_api::uicommon::startup::ProfileInfo;
 use gemel_ui_api::uicommon::{self, Action, Repeat};
 
 use crate::infos::{self, Infos};
@@ -162,6 +165,12 @@ struct Text {
     in_sync: bool,
     /// The interrupts during syncs (`intrcount`).
     interrupts: usize,
+    /// `dumbtty` and `color` from the command line, before a profile is
+    /// loaded (the profile manager's).
+    cl_dumbtty: bool,
+    cl_color: BoolWithDefault,
+    /// The user asked to stop between syncs (`safeStopReqd`).
+    safe_stop: bool,
     /// The session was told to interrupt its step.
     interrupted: bool,
     /// And it has.
@@ -219,6 +228,10 @@ fn catch_signals(inputs: mpsc::Sender<Input>, cbreak: Cbreak) {
     });
     if listening.is_ok() {
         let _ = signal::catch(Signal::Interrupt);
+        // `setupSafeStop`.
+        if signal::supported() {
+            let _ = signal::catch(Signal::SafeStop);
+        }
     }
 }
 
@@ -262,6 +275,17 @@ pub fn start(args: Vec<String>, interface: Interface) -> i32 {
             return ExitCode::Fatal as i32;
         }
     };
+    // `dumbtty` and `color` as the command line sets them.
+    let (cl_dumbtty, cl_color) = gemel_ui_api::new_prefs()
+        .ok()
+        .and_then(|mut p| {
+            p.parse_cmd_line(&args).ok()?;
+            Some((
+                *p.read(&gemel_ui_api::cli::DUMBTTY),
+                *p.read(&gemel_ui_api::cli::COLOR),
+            ))
+        })
+        .unwrap_or_default();
     let mut ui = Text {
         session,
         inputs,
@@ -283,6 +307,9 @@ pub fn start(args: Vec<String>, interface: Interface) -> i32 {
         progress: None,
         in_sync: false,
         interrupts: 0,
+        cl_dumbtty,
+        cl_color,
+        safe_stop: false,
         interrupted: false,
         stopped: false,
     };
@@ -328,7 +355,9 @@ impl Text {
     }
 
     fn dumbtty(&self) -> bool {
-        self.settings.as_ref().is_some_and(|s| s.dumbtty)
+        self.settings
+            .as_ref()
+            .map_or(self.cl_dumbtty, |s| s.dumbtty)
     }
 
     /// The progress line and the scanned paths are shown only without
@@ -392,12 +421,12 @@ impl Text {
 
     /// `setColorPreference`.
     fn set_color_preference(&mut self) {
-        let s = self.settings();
+        let color = self.settings.as_ref().map_or(self.cl_color, |s| s.color);
         let env_ok = std::env::var_os("NO_COLOR").is_none();
         let term_ok = std::env::var_os("TERM").is_none_or(|t| t != "dumb");
         let tty_ok = io::stdout().is_terminal() && io::stderr().is_terminal();
-        let ok = env_ok && term_ok && tty_ok && !s.dumbtty;
-        self.colors = match s.color {
+        let ok = env_ok && term_ok && tty_ok && !self.dumbtty();
+        self.colors = match color {
             BoolWithDefault::True => true,
             BoolWithDefault::False => false,
             BoolWithDefault::Default => {
@@ -512,8 +541,34 @@ impl Text {
                 Ok(())
             }
             Signal::Interrupt => Err(self.brk()),
+            // `safeStop`.
+            Signal::SafeStop => {
+                self.safe_stop = true;
+                Ok(())
+            }
             _ => Ok(()),
         }
+    }
+
+    /// `interruptibleSleep`: waits `secs` seconds, or until the user asks
+    /// to stop between syncs.
+    fn interruptible_sleep(&mut self, secs: i64) -> Result<(), Stop> {
+        let end = Instant::now() + std::time::Duration::from_secs(secs.max(0) as u64);
+        while !self.safe_stop {
+            let Some(left) = end.checked_duration_since(Instant::now()) else {
+                return Ok(());
+            };
+            match self.inputs.recv_timeout(left) {
+                Ok(Input::Signal(s)) => self.on_signal(s)?,
+                Ok(Input::Event(e)) => self.deferred.push_back(*e),
+                Ok(Input::Key(k)) => self.ready = self.reading.take().map(|raw| (raw, k)),
+                Ok(Input::Ended) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Stop::Error("The session stopped unexpectedly".to_owned()));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => return Ok(()),
+            }
+        }
+        Ok(())
     }
 
     /// Sends `c` and handles the events up to its reply.
@@ -627,7 +682,7 @@ impl Text {
                     self.display("[");
                     for c in choices {
                         if c.names[0].is_empty() {
-                            self.display(&input::format_name(c.names[1]));
+                            self.display(&input::format_name(&c.names[1]));
                         }
                     }
                     self.display("] ");
@@ -663,7 +718,7 @@ impl Text {
                 again(self);
                 continue;
             }
-            if let Some(c) = choices.iter().find(|c| c.names.contains(&a.as_str())) {
+            if let Some(c) = choices.iter().find(|c| c.names.contains(&a)) {
                 return Ok(c.act);
             }
             self.new_line();
@@ -837,9 +892,13 @@ impl Text {
         };
         let profile = match profile {
             Some(p) => p,
-            // `getProfile`, without the profile manager.
             None if self.profile_manager_asked() => {
-                return Err(self.unsupported("The interactive profile manager (-i)"));
+                let p = self.get_profile("default");
+                self.restore_terminal();
+                match p? {
+                    Some(p) => p,
+                    None => return Ok(0),
+                }
             }
             None => "default".to_owned(),
         };
@@ -863,10 +922,98 @@ impl Text {
             }
         }
         if self.settings().repeat != Repeat::NoRepeat {
-            return Err(self.unsupported("-repeat"));
+            let o = Overrides {
+                batch: Some(true),
+                ..Overrides::default()
+            };
+            if let Event::ProfileLoaded(s) = self.call(Command::Configure(o))? {
+                let dumbtty = self.dumbtty();
+                self.settings = Some(Settings { dumbtty, ..s });
+            }
         }
         self.set_color_preference();
         self.start2()
+    }
+
+    /// `getProfile`: the profile manager. Lists the profiles (unless there
+    /// are none, or too many) and asks for one; `None` if the user chooses
+    /// none.
+    fn get_profile(&mut self, default: &str) -> Result<Option<String>, Stop> {
+        let mut profiles = match self.call(Command::ScanProfiles)? {
+            Event::Profiles(p) => p,
+            e => return Err(Stop::Error(format!("unexpected {e:?}"))),
+        };
+        if profiles.len() > 10 {
+            let dir = gemel_fs::os::unison_dir();
+            self.log(
+                LogKind::Log,
+                format!(
+                    "You have too many profiles in {} for interactive selection. Please \
+                     specify profile or roots on command line.\n",
+                    dir.display()
+                ),
+            );
+            self.log(LogKind::Log, "The profile names are:\n".to_owned());
+            for (p, _) in &profiles {
+                self.log(LogKind::Log, format!("  {p}\n"));
+            }
+            self.log(LogKind::Log, "\n".to_owned());
+            return Ok(Some(default.to_owned()));
+        }
+        if profiles.is_empty() {
+            return Ok(Some(default.to_owned()));
+        }
+        profiles.sort_by(|(p, _), (q, _)| p.cmp(q));
+        let list = add_profile_keys(&profiles, default);
+        self.setup_terminal();
+        self.set_color_preference();
+        use Color::*;
+        self.display("Available profiles:\n key:  profilename         label\n");
+        for (key, (profile, info)) in &list {
+            self.display(&format!(
+                "  {}{key}{} :",
+                self.color(Focus),
+                self.color(Reset)
+            ));
+            self.display(&format!(
+                "  {}{profile:<18}{}  {}{}{}\n",
+                self.color(Focus),
+                self.color(Reset),
+                self.color(Information),
+                info.label.as_deref().unwrap_or(""),
+                self.color(Reset)
+            ));
+            for (i, root) in info.roots.iter().enumerate() {
+                self.display(&format!("         root {} = {root}\n", i + 1));
+            }
+        }
+        self.display("\n");
+        let mut choices = vec![
+            Choice::new(&["", "n", "/"], "Don't select any profile", None),
+            Choice::new(&["q"], format!("exit {MY_NAME}"), Some(None)),
+        ];
+        choices.extend(list.iter().enumerate().map(|(i, (key, (profile, _)))| {
+            Choice::new(
+                &[key.as_str()],
+                format!("Profile: {profile}"),
+                Some(Some(i)),
+            )
+        }));
+        self.display("Select a profile ");
+        let a = self.select_action(None, &choices, &|t| t.display("Select a profile "))?;
+        self.new_line();
+        match a {
+            None => {
+                self.display("\nNo profile selected\n\n");
+                Ok(None)
+            }
+            Some(None) => Err(self.brk()),
+            Some(Some(i)) => {
+                let profile = list[i].1.0.clone();
+                self.display(&format!("\nProfile {profile} selected\n\n"));
+                Ok(Some(profile))
+            }
+        }
     }
 
     fn profile_manager_asked(&self) -> bool {
@@ -896,17 +1043,42 @@ impl Text {
             self.setup_terminal();
         }
         self.running = true;
-        self.synchronize_until_no_failures()
+        self.synchronize_until_done()
+    }
+
+    /// `synchronizeUntilDone`: syncs once, or with `-repeat` again after
+    /// each interval until the user asks to stop between syncs.
+    fn synchronize_until_done(&mut self) -> Result<i32, Stop> {
+        let interval = match self.settings().repeat.clone() {
+            Repeat::NoRepeat => return self.synchronize_until_no_failures(false),
+            Repeat::Interval(i) => i,
+            Repeat::Watch | Repeat::WatchAndInterval(_) => {
+                return Err(self.unsupported("-repeat watch"));
+            }
+            Repeat::Invalid(_, e) => return Err(Stop::Error(e)),
+        };
+        loop {
+            let code = self.synchronize_until_no_failures(true)?;
+            if self.safe_stop {
+                return Ok(code);
+            }
+            self.status(&format!("\nSleeping for {interval} seconds...\n"));
+            self.interruptible_sleep(interval)?;
+            if self.safe_stop {
+                return Ok(code);
+            }
+        }
     }
 
     /// `synchronizeUntilNoFailures`: syncs, then the paths that failed
-    /// again, `retry` times.
-    fn synchronize_until_no_failures(&mut self) -> Result<i32, Stop> {
+    /// again, `retry` times (in repeat mode, unless the user asked to
+    /// stop).
+    fn synchronize_until_no_failures(&mut self, repeat: bool) -> Result<i32, Stop> {
         let mut tries_left = self.settings().retry;
         let mut paths = None;
         loop {
             let (code, failed) = self.synchronize_once(paths)?;
-            if failed.is_empty() || tries_left == 0 {
+            if failed.is_empty() || tries_left == 0 || (repeat && self.safe_stop) {
                 return Ok(code);
             }
             tries_left -= 1;
@@ -1445,6 +1617,42 @@ enum Ask {
     Sort(session::SortKind),
     Reverse,
     Quit,
+}
+
+/// `addProfileKeys`: a key for each profile (sorted by name): its own, `d`
+/// for the default, or the next digit no profile has; sorted by key.
+fn add_profile_keys(
+    profiles: &[(String, ProfileInfo)],
+    default: &str,
+) -> Vec<(String, (String, ProfileInfo))> {
+    // `profileKeymap`: the scan has checked that each key is a digit.
+    let taken: Vec<i64> = profiles
+        .iter()
+        .filter_map(|(_, i)| i.key.as_deref().and_then(util::int_of_string))
+        .collect();
+    let next_avail_key = |i: usize| {
+        (i + 1..10)
+            .find(|n| !taken.contains(&(*n as i64)))
+            .unwrap_or(10.max(i + 1))
+    };
+    let mut keyed = Vec::new();
+    let mut i = 0;
+    for (p, info) in profiles {
+        let key = match &info.key {
+            Some(k) => k.clone(),
+            None if p == default => "d".to_owned(),
+            None => {
+                let k = i.to_string();
+                i = next_avail_key(i);
+                k
+            }
+        };
+        keyed.push((key, (p.clone(), info.clone())));
+    }
+    // OCaml builds the list backwards, and sorts it stably.
+    keyed.reverse();
+    keyed.sort_by(|(a, _), (b, _)| a.cmp(b));
+    keyed
 }
 
 /// `shorten`: a path of at most 70 bytes, with its middle left out.

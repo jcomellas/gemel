@@ -11,8 +11,9 @@
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 //!
 //! `main.ml`'s options handled before any profile is loaded: `-version`,
-//! and (not supported yet) `-doc`, `-prefsdocs`, `-prefsman`, `-server`
-//! and `-socket`; then the text interface, whatever `-ui` asks for.
+//! `-prefsman short`, and (not supported yet) `-doc`, `-prefsdocs`,
+//! `-prefsman full`, `-server` and `-socket`; then the text interface,
+//! whatever `-ui` asks for.
 
 mod infos;
 mod input;
@@ -39,15 +40,28 @@ fn run(args: Vec<String>) -> i32 {
     };
     let argv = match prefs.scan_cmd_line(&args) {
         Ok(a) => a,
-        Err(e) => return usage_error(&e),
+        Err(e) => return usage_error(&prefs, &e),
     };
     if argv.contains_key(cli::VERSION.name()) {
         println!("{MY_NAME} version {MY_VERSION}");
         return 0;
     }
+    if argv.contains_key(cli::PREFS_DOCS.name()) {
+        eprintln!("{MY_NAME}: -prefsdocs is not supported yet");
+        return 1;
+    }
+    if let Some(v) = argv.get(cli::PREFS_MAN.name()) {
+        match v.first().map(String::as_str) {
+            Some("short") => print!("{}", prefs.usage_for_man()),
+            Some("full") => {
+                eprintln!("{MY_NAME}: -prefsman full is not supported yet");
+                return 1;
+            }
+            _ => {}
+        }
+        return 0;
+    }
     for (pref, what) in [
-        (cli::PREFS_DOCS.name(), "-prefsdocs"),
-        (cli::PREFS_MAN.name(), "-prefsman"),
         (cli::DOC.name(), "-doc"),
         (cli::SERVER.name(), "-server"),
         (cli::SOCKET.name(), "-socket"),
@@ -62,8 +76,7 @@ fn run(args: Vec<String>) -> i32 {
         Some(s) if s == "text" => Interface::Text,
         Some(s) if s == "graphic" => Interface::Graphic,
         Some(_) => {
-            // `Prefs.printUsage`, without the list of options (phase 8b).
-            println!("{}", gemel_ui_api::uicommon::usage_msg());
+            print_usage(&prefs);
             return 1;
         }
     };
@@ -71,13 +84,21 @@ fn run(args: Vec<String>) -> i32 {
 }
 
 /// `Uarg.parse`'s `stop`: the error, then the usage; exits with 2. For
-/// `-help`, only the usage, on stdout. (The list of options is phase 8b.)
-fn usage_error(e: &UsageError) -> i32 {
+/// `-help`, only the usage, on stdout.
+fn usage_error(prefs: &gemel_base::prefs::Prefs, e: &UsageError) -> i32 {
     let progname = std::env::args().next().unwrap_or_else(|| "(?)".to_owned());
     match e {
         UsageError::Unknown(s) if s == "-help" => {}
         e => eprintln!("{progname}: {e}."),
     }
-    println!("{}", gemel_ui_api::uicommon::usage_msg());
+    print_usage(prefs);
     2
+}
+
+/// `Prefs.printUsage` (`Uarg.usage`): the usage and the options.
+fn print_usage(prefs: &gemel_base::prefs::Prefs) {
+    println!(
+        "{}",
+        prefs.one_line_docs(&gemel_ui_api::uicommon::usage_msg(), "", "")
+    );
 }

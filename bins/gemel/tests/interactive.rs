@@ -307,3 +307,48 @@ fn the_fourth_interrupt_stops_at_once() {
     );
     assert_eq!(locks(&g), Vec::<String>::new());
 }
+
+/// The profile manager (`-i`): the profiles listed with their keys, labels
+/// and roots, and one chosen (by its own key, a digit given, or `d` for the
+/// default); none; quitting; and an unknown key.
+#[test]
+fn the_profile_manager() {
+    let (g, o) = twins(
+        "int-profiles",
+        &["times = true", "label = the first"],
+        |r, side| {
+            write(r, &format!("new-{side}"), side, T0);
+        },
+    );
+    for p in [&g, &o] {
+        p.profile("default", &["times = true"]);
+        p.profile("keyed", &["times = true", "key = 1", "label = with a key"]);
+        p.profile("other", &["times = true"]);
+    }
+    for keys in ["1\n", "z\nd\n", "\n", "q\n", "0\n"] {
+        let r = same(&g, &o, &["-i", "-batch"], keys);
+        assert!(
+            r.stdout.iter().any(|l| l == "Available profiles:"),
+            "{r:#?}"
+        );
+    }
+}
+
+/// Too many profiles to choose from, or none: the default.
+#[test]
+fn the_profile_manager_without_a_choice() {
+    let (g, o) = twins("int-many-profiles", &["times = true"], |_, _| {});
+    // Only `p`, and none chosen; then 11.
+    let r = same(&g, &o, &["-i", "-batch"], "\n");
+    assert_eq!(r.code, Some(0), "{r:#?}");
+    for p in [&g, &o] {
+        for i in 0..10 {
+            p.profile(&format!("p{i}"), &[]);
+        }
+    }
+    let r = same(&g, &o, &["-i", "-batch"], "");
+    assert!(
+        !r.stdout.iter().any(|l| l == "Available profiles:"),
+        "{r:#?}"
+    );
+}

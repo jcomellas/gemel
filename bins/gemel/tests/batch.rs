@@ -143,10 +143,9 @@ fn startup_errors() {
     assert_eq!(r.code, Some(3), "{r:#?}");
 }
 
-/// `-version`, and options that don't exist (OCaml then lists every
-/// option: only the first line is compared).
+/// `-version`.
 #[test]
-fn version_and_unknown_options() {
+fn version() {
     let pair = Pair::new("batch-version");
     let r = gemel(&pair, &["-version"]);
     assert_eq!(r.code, Some(0));
@@ -154,24 +153,47 @@ fn version_and_unknown_options() {
         r.stdout,
         [format!("gemel version {}", env!("CARGO_PKG_VERSION"))]
     );
-    let r = gemel(&pair, &["-nosuchoption"]);
-    assert_eq!(r.code, Some(2));
-    let first = r.stderr[0]
-        .rsplit_once('/')
-        .map_or(&r.stderr[0][..], |(_, l)| l);
-    let first = first.rsplit_once('\\').map_or(first, |(_, l)| l);
-    if let Some(theirs) = ocaml(&pair, &["-nosuchoption"]) {
-        assert_eq!(r.code, theirs.code);
-        let t = &theirs.stderr[0];
-        let t = t.rsplit_once('/').map_or(&t[..], |(_, l)| l);
-        assert_eq!(
-            first.split_once(':').map(|x| x.1),
-            t.split_once(':').map(|x| x.1)
-        );
-    } else {
-        assert!(
-            first.ends_with(": unknown option `-nosuchoption'."),
-            "{first}"
-        );
+}
+
+/// What gemel doesn't register yet, and OCaml lists (xattrs and ACLs).
+const NOT_YET: [&str; 2] = ["   -acl ", "   -xattrs "];
+
+/// The usage and every option, from `-help` and after a usage error; the
+/// options for the manual page (`-prefsman short`).
+#[test]
+fn the_list_of_options() {
+    let pair = Pair::new("batch-help");
+    for (args, code) in [
+        (&["-help"][..], 2),
+        (&["-nosuchoption"][..], 2),
+        (&["-ui", "neither"][..], 1),
+        (&["-prefsman", "short"][..], 0),
+    ] {
+        let r = gemel(&pair, args);
+        assert_eq!(r.code, Some(code), "{args:?}");
+        assert!(r.stdout.iter().any(|l| l.contains("-batch ")), "{r:#?}");
+        // OCaml gets `-ui text` after the arguments, which would win.
+        let Some(theirs) = ocaml(&pair, args).filter(|_| args[0] != "-ui") else {
+            continue;
+        };
+        assert_eq!(r.code, theirs.code, "{args:?}");
+        let usage = |ls: &[String]| -> Vec<String> {
+            ls.iter()
+                .filter(|l| {
+                    !NOT_YET
+                        .iter()
+                        .any(|n| l.starts_with(n) || l.contains(&format!("\"{}\"", n.trim())))
+                })
+                // The usage and some docs name the program.
+                .map(|l| l.replace("unison", "gemel"))
+                .collect()
+        };
+        assert_eq!(usage(&r.stdout), usage(&theirs.stdout), "{args:?}");
+        // The error names the program as it was run.
+        let message = |ls: &[String]| {
+            ls.first()
+                .and_then(|l| l.split_once(": ").map(|(_, m)| m.to_owned()))
+        };
+        assert_eq!(message(&r.stderr), message(&theirs.stderr), "{args:?}");
     }
 }

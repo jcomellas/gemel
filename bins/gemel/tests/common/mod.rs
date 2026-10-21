@@ -350,9 +350,18 @@ impl Driven {
 
     /// Waits until stdout shows `s` for the `n`th time.
     pub fn wait_for(&self, s: &str, n: usize) {
+        Driven::wait_in(&self.stdout, s, n);
+    }
+
+    /// Waits until stderr shows `s` for the `n`th time.
+    pub fn wait_for_err(&self, s: &str, n: usize) {
+        Driven::wait_in(&self.stderr, s, n);
+    }
+
+    fn wait_in(output: &Mutex<Vec<u8>>, s: &str, n: usize) {
         let t0 = Instant::now();
         loop {
-            let out = String::from_utf8_lossy(&self.stdout.lock().unwrap()).into_owned();
+            let out = String::from_utf8_lossy(&output.lock().unwrap()).into_owned();
             if out.matches(s).count() >= n {
                 return;
             }

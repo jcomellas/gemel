@@ -39,15 +39,15 @@ pub(super) enum Proceed {
 /// A choice for `selectAction`: its keys (a first `""` makes it the
 /// default, named by the second), what it does, and the answer.
 pub(super) struct Choice<A> {
-    pub names: &'static [&'static str],
+    pub names: Vec<String>,
     pub doc: String,
     pub act: A,
 }
 
 impl<A> Choice<A> {
-    pub fn new(names: &'static [&'static str], doc: impl Into<String>, act: A) -> Choice<A> {
+    pub fn new(names: &[&str], doc: impl Into<String>, act: A) -> Choice<A> {
         Choice {
-            names,
+            names: names.iter().map(|n| (*n).to_owned()).collect(),
             doc: doc.into(),
             act,
         }

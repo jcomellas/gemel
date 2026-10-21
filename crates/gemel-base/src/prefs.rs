@@ -851,6 +851,80 @@ impl Prefs {
         names
     }
 
+    /// `Prefs.oneLineDocs`: `usage`, then each documented option (each
+    /// heading between `hpre` and `hpost`) with its one-line
+    /// documentation, by group and topic, as `Format` lays them out on 80
+    /// columns.
+    pub fn one_line_docs(&self, usage: &str, hpre: &str, hpost: &str) -> String {
+        const TOPICS: [Topic; 7] = [
+            Topic::Sync,
+            Topic::Syncprocess,
+            Topic::Syncprocess_CLI,
+            Topic::CLI,
+            Topic::GUI,
+            Topic::Remote,
+            Topic::Archive,
+        ];
+        let mut out = String::new();
+        let mut names: Vec<&str> = self.by_name.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        let topic = |out: &mut String, c: Category| {
+            let prefs: Vec<&dyn AnyPref> = names
+                .iter()
+                .filter(|n| self.category_of(n) == Some(c))
+                .map(|n| self.cells[self.by_name[*n]].def)
+                .collect();
+            if prefs.is_empty() {
+                return;
+            }
+            let title = match c {
+                Category::Advanced(Topic::Sync) => "Fine-tune sync",
+                Category::Advanced(Topic::General) => "Other",
+                Category::Basic(t) | Category::Advanced(t) => t.title(),
+                Category::Expert | Category::Internal(_) => "",
+            };
+            if !title.is_empty() {
+                out.push_str(&format!("\n{hpre}  {title}:{hpost}\n"));
+            }
+            for p in prefs {
+                let arg = match p.kind() {
+                    Kind::Bool => "",
+                    Kind::Int => "n",
+                    _ => "xxx",
+                };
+                let s = if arg.is_empty() {
+                    p.name().to_owned()
+                } else {
+                    format!("{} {arg}", p.name())
+                };
+                format_pref(out, &s, p.deprecated(), &p.doc());
+            }
+        };
+        out.push_str(usage);
+        if !usage.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!("{hpre}Basic options:{hpost}\n"));
+        for t in std::iter::once(Topic::General).chain(TOPICS) {
+            topic(&mut out, Category::Basic(t));
+        }
+        out.push_str(&format!("\n{hpre}Advanced options:{hpost}\n"));
+        for t in TOPICS.into_iter().chain(std::iter::once(Topic::General)) {
+            topic(&mut out, Category::Advanced(t));
+        }
+        out.push_str(&format!("\n{hpre}Expert options:{hpost}\n"));
+        topic(&mut out, Category::Expert);
+        out
+    }
+
+    /// `Prefs.printUsageForMan`'s text: the options for the manual page.
+    pub fn usage_for_man(&self) -> String {
+        format!(
+            ".Bd -literal\n{}.Ed\n",
+            self.one_line_docs("", ".Sy \"", "\"")
+        )
+    }
+
     /// The current values as profile lines' right-hand sides, by name (the
     /// `printers`, as `dumpPrefsToStderr` shows them).
     pub fn printed_values(&self) -> BTreeMap<&'static str, Vec<String>> {
@@ -1319,6 +1393,78 @@ fn uncapitalize(s: &str) -> String {
         Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
         None => String::new(),
     }
+}
+
+/// `oneLineDocs`'s `formatPref`: `   -s`, then in a box (indented to
+/// column 23, or just past `s`) "(deprecated)" and `doc`, wrapped at the
+/// spaces to 80 columns, as `Format` (with a margin of 81) lays it out.
+fn format_pref(out: &mut String, s: &str, deprecated: bool, doc: &str) {
+    const LAST: usize = 80;
+    enum Tok<'a> {
+        /// `pp_print_break n offset`.
+        Break(usize, isize),
+        /// `pp_force_newline`.
+        Newline,
+        Text(&'a str),
+    }
+    let head = format!("   -{s}");
+    let l = 19usize.saturating_sub(s.len()).max(1);
+    let indent = head.len() + l;
+    let mut toks = vec![Tok::Break(l, 1 - l as isize)];
+    if deprecated {
+        toks.extend([Tok::Text("(deprecated)"), Tok::Break(1, 0)]);
+    }
+    // `pp_print_text`.
+    let mut start = 0;
+    for (i, c) in doc.char_indices() {
+        if c == ' ' || c == '\n' {
+            if i > start {
+                toks.push(Tok::Text(&doc[start..i]));
+            }
+            toks.push(if c == ' ' {
+                Tok::Break(1, 0)
+            } else {
+                Tok::Newline
+            });
+            start = i + 1;
+        }
+    }
+    if start < doc.len() {
+        toks.push(Tok::Text(&doc[start..]));
+    }
+    out.push_str(&head);
+    let mut col = head.len();
+    for (i, t) in toks.iter().enumerate() {
+        match t {
+            Tok::Text(w) => {
+                out.push_str(w);
+                col += w.len();
+            }
+            Tok::Break(n, offset) => {
+                let block: usize = toks[i + 1..]
+                    .iter()
+                    .map_while(|t| match t {
+                        Tok::Text(w) => Some(w.len()),
+                        _ => None,
+                    })
+                    .sum();
+                if col + n + block <= LAST {
+                    out.push_str(&" ".repeat(*n));
+                    col += n;
+                } else {
+                    col = (indent as isize + offset) as usize;
+                    out.push('\n');
+                    out.push_str(&" ".repeat(col));
+                }
+            }
+            Tok::Newline => {
+                out.push('\n');
+                out.push_str(&" ".repeat(indent));
+                col = indent;
+            }
+        }
+    }
+    out.push('\n');
 }
 
 /// `Prefs.mdumpedPrefs`: marshals a dump.
