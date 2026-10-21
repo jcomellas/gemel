@@ -86,6 +86,11 @@ impl Monitor {
             self.ack(&format!("DIR {}", q(d)));
         }
         self.send("DONE");
+        // `DONE` has no answer. Wait until the watcher has had it, so that
+        // the changes the test makes next come after the scan: during a
+        // scan, a creation counts as a modification.
+        self.send("CHANGES h");
+        while self.line() != "DONE" {}
     }
 
     /// Waits until the watcher says replica `h` has changed.
