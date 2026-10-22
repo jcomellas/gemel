@@ -42,8 +42,11 @@ works too: `-repeat watch` syncs whenever `gemel-fsmonitor`, the file
 watcher, reports changes, and scans only what changed. The watcher runs on
 Linux, macOS (FSEvents, which OCaml has no watcher for) and Windows, and
 OCaml Unison uses it as its `unison-fsmonitor` on Linux and macOS.
-Synchronising xattrs and ACLs, the GUI and remote connections are still
-to come.
+Remote roots are under way: `gemel -server` serves OCaml clients (2.52 on)
+over ssh, and they sync with it as with an OCaml server. A gemel client
+can't reach a remote root yet, nor can gemel serve on a socket.
+Synchronising xattrs and ACLs, the GUI and the rest of remote connections
+are still to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 
