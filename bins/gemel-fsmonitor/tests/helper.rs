@@ -114,13 +114,22 @@ impl Monitor {
         }
     }
 
-    /// The changes reported once the watcher says there are some. FSEvents
-    /// may deliver a burst of events in several batches, so off Linux this
-    /// asks again until the changes reported cover `changed`.
+    /// The changes reported once the watcher says there are some. A change
+    /// is reported once it is half a second old, so changes made in a burst
+    /// can come in several reports when the machine is slow; and FSEvents
+    /// may deliver a burst of events in several batches. So this asks again
+    /// until the changes reported include (on Linux) or cover `changed`.
     fn settle(&mut self, changed: &[&str]) -> BTreeSet<String> {
         self.wait();
         let mut reported = self.changes();
-        while !EXACT && !covers(&reported, changed) {
+        let all = |r: &BTreeSet<String>| {
+            if EXACT {
+                changed.iter().all(|c| r.contains(*c))
+            } else {
+                covers(r, changed)
+            }
+        };
+        while !all(&reported) {
             self.wait();
             reported.extend(self.changes());
         }
