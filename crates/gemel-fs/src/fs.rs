@@ -66,6 +66,12 @@ pub fn open_out_new(f: &Fspath, perm: u32) -> SysResult<std::fs::File> {
     system::open_out_new(f.as_bytes(), perm)
 }
 
+/// `Fs.open_out_gen [Open_wronly; Open_binary]`: an existing file, for
+/// writing (see [`system::open_out_existing`]).
+pub fn open_out_existing(f: &Fspath) -> SysResult<std::fs::File> {
+    system::open_out_existing(f.as_bytes())
+}
+
 /// `Fs.mkdir`.
 pub fn mkdir(f: &Fspath, perm: u32) -> SysResult<()> {
     system::mkdir(f.as_bytes(), perm)

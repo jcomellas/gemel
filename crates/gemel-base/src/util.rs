@@ -378,6 +378,21 @@ pub fn int_of_string(s: &str) -> Option<i64> {
     Some(if neg { n.wrapping_neg() } else { n })
 }
 
+/// `String.escaped`, for messages.
+pub fn escaped(s: &[u8]) -> String {
+    s.iter()
+        .map(|&b| match b {
+            b'"' => "\\\"".to_owned(),
+            b'\\' => "\\\\".to_owned(),
+            b'\n' => "\\n".to_owned(),
+            b'\t' => "\\t".to_owned(),
+            b'\r' => "\\r".to_owned(),
+            0x20..=0x7e => char::from(b).to_string(),
+            _ => format!("\\{b:03}"),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

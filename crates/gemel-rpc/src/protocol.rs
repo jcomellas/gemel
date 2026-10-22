@@ -11,7 +11,7 @@
 //! ([`Header`]). [`crate::connection`] puts them together; the version
 //! handshake comes later in milestone 3.
 
-use gemel_base::util::Error;
+use gemel_base::util::{Error, escaped};
 use gemel_compat::umarshal::{self, Reader, Writer};
 
 /// RPC versions this implementation speaks, newest first. Must match
@@ -127,21 +127,6 @@ pub fn decode_section<T>(
 ) -> Result<T, Error> {
     let (body, _) = split_section(buf)?;
     decode_section_body(tag, body, read)
-}
-
-/// `String.escaped`, for messages.
-fn escaped(s: &[u8]) -> String {
-    s.iter()
-        .map(|&b| match b {
-            b'"' => "\\\"".to_owned(),
-            b'\\' => "\\\\".to_owned(),
-            b'\n' => "\\n".to_owned(),
-            b'\t' => "\\t".to_owned(),
-            b'\r' => "\\r".to_owned(),
-            0x20..=0x7e => char::from(b).to_string(),
-            _ => format!("\\{b:03}"),
-        })
-        .collect()
 }
 
 /// What a message is (`Remote.header`).

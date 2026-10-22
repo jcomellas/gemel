@@ -10,11 +10,16 @@
 //! copy itself is synchronous, with callbacks for progress and abort
 //! checks, so that [`file`] runs it off the engine thread.
 //!
-//! Not ported yet (milestone 3, with remote roots): transfers between
-//! hosts (`transferFile`, rsync, compression, resuming a partial
-//! transfer, `copyprog`), and with them the shortcut of copying an
-//! identical local file instead (`tryCopyMovedFile`), which OCaml only
-//! takes for remote transfers. Their preferences are registered.
+//! The remote half: transferring a file between hosts (`transferFile`),
+//! whose destination asks the source to `compress` it, as it is or as
+//! rsync deltas ([`crate::transfer`]), and decodes the chunks streamed back
+//! (`processTransferInstruction`).
+//!
+//! Not ported yet: resuming a partial transfer (`validFilePrefix`) and
+//! copying an identical file already on the destination instead
+//! (`tryCopyMovedFile`), in phase 5 of milestone 3; external copy
+//! programs (`copyprog`), which are ignored with a warning. Their
+//! preferences are registered.
 //! A copy reports its progress to the client's progress printer
 //! ([`crate::uutil`]), and stops when everything is aborted
 //! ([`crate::abort::AllFlag`]), as it runs.
@@ -34,13 +39,15 @@ use gemel_fs::os::{self, FullFingerprint, TempNames};
 use gemel_fs::osx::{self, RessStamp};
 use gemel_fs::props::{Filesize, Props, PropsConfig};
 use gemel_fs::reflink;
+use gemel_rpc::connection::{Connection, STREAMING_ACTIVATED};
 use gemel_rpc::host::Host;
-use gemel_rpc::registry::{RootCmd, Rpc};
+use gemel_rpc::registry::{RootCmd, Rpc, ServerCmd, StreamCmd};
 use gemel_rpc::root::Root;
 
 use crate::abort::Abort;
 use crate::pred::{self, Compiled};
-use crate::{exclusive, fpcache, update, uutil};
+use crate::transfer::{self, rsync};
+use crate::{exclusive, fpcache, update, uutil, xferhint};
 
 // ---- Preferences ----
 
@@ -673,6 +680,714 @@ pub fn local_file(
     set_fileinfo(ctx, fspath_to, path_to, real_path_to, replacing, desc)
 }
 
+// ---- Transfers between hosts ----
+//
+// The destination's host runs `transferFile`, with the connection to the
+// source's. For each fork, it asks the source to `compress` the file, which
+// streams the tokens back (`processTransferInstruction`): as they are, or,
+// when the destination has an old version to start from, as rsync deltas
+// against its block information. The destination decodes each chunk as it
+// arrives, into the temporary file.
+
+/// Which fork a transfer carries, and from where (`` `DATA | `DATA_APPEND
+/// of len | `RESS ``).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    /// The data fork.
+    Data,
+    /// The data fork, from this offset on (a partial transfer resumed).
+    DataAppend(Filesize),
+    /// The resource fork.
+    Ress,
+}
+
+impl FileKind {
+    /// `mdata`.
+    fn marshal(self, w: &mut Writer) {
+        match self {
+            FileKind::Data => w.tag(0),
+            FileKind::DataAppend(len) => {
+                w.tag(1);
+                w.int64(len);
+            }
+            FileKind::Ress => w.tag(2),
+        }
+    }
+
+    /// `mdata`.
+    fn unmarshal(r: &mut Reader<'_>) -> umarshal::Result<FileKind> {
+        Ok(match r.tag(3)? {
+            0 => FileKind::Data,
+            1 => FileKind::DataAppend(r.int64()?),
+            _ => FileKind::Ress,
+        })
+    }
+
+    fn fork(self) -> Fork {
+        match self {
+            FileKind::Ress => Fork::Ress,
+            _ => Fork::Data,
+        }
+    }
+}
+
+/// `openFileIn'`: the source, from where the transfer starts.
+fn open_file_in(
+    fspath: &Fspath,
+    path: &Path<Local>,
+    kind: FileKind,
+) -> Result<std::fs::File, Error> {
+    const WHAT: &str = "transferring file contents";
+    let mut f = open_in(fspath, path, kind.fork(), WHAT)?;
+    if let FileKind::DataAppend(len) = kind {
+        f.seek(SeekFrom::Start(len as u64))
+            .map_err(|e| io_error(WHAT, &e))?;
+    }
+    Ok(f)
+}
+
+/// `openFileOut'`: the destination; a resumed one keeps what it has.
+fn open_file_out(
+    ctx: &Ctx,
+    fspath: &Fspath,
+    path: &Path<Local>,
+    kind: FileKind,
+) -> Result<std::fs::File, Error> {
+    const WHAT: &str = "transferring file contents";
+    match kind {
+        FileKind::DataAppend(len) => {
+            let full = fspath.concat(path);
+            let mut f = fs::open_out_existing(&full).map_err(|e| e.to_transient(WHAT))?;
+            if !ctx.fs.dont_chmod {
+                fs::chmod(&full, 0o600).map_err(|e| e.to_transient(WHAT))?;
+            }
+            f.seek(SeekFrom::Start(len as u64))
+                .map_err(|e| io_error(WHAT, &e))?;
+            Ok(f)
+        }
+        _ => open_out(ctx, fspath, path, kind.fork(), WHAT),
+    }
+}
+
+/// `compress`'s argument: the destination's block information (for
+/// rsync), the source and its fork, the length to send, the item, and the
+/// destination's id for the transfer.
+#[derive(Debug, Clone)]
+pub struct CompressArgs {
+    /// The destination's old file, for rsync.
+    pub block_info: Option<rsync::BlockInfo>,
+    /// The source's root.
+    pub fspath_from: Fspath,
+    /// The source.
+    pub path_from: Path<Local>,
+    /// Which fork, from where.
+    pub kind: FileKind,
+    /// How many bytes to send.
+    pub size_from: Filesize,
+    /// The item, for progress and aborts.
+    pub id: FileId,
+    /// The destination's id for the transfer, which each chunk carries.
+    pub file_id: i64,
+}
+
+/// `compress` (`mcompress`).
+pub static COMPRESS: ServerCmd<CompressArgs, ()> = ServerCmd::new(
+    "compress",
+    |a, w, _| {
+        w.option(a.block_info.as_ref(), |w, b| b.marshal(w));
+        a.fspath_from.marshal(w);
+        a.path_from.marshal(w);
+        a.kind.marshal(w);
+        w.int64(a.size_from);
+        w.int(a.id.0);
+        w.int(a.file_id);
+    },
+    |r, _| {
+        Ok(CompressArgs {
+            block_info: r.option(rsync::BlockInfo::unmarshal)?,
+            fspath_from: Fspath::unmarshal(r)?,
+            path_from: Path::unmarshal(r)?,
+            kind: FileKind::unmarshal(r)?,
+            size_from: r.int64()?,
+            id: FileId(r.int()?),
+            file_id: r.int()?,
+        })
+    },
+    |(), _, _| {},
+    |_, _| Ok(()),
+    |conn, args| Box::pin(compress(conn, args)),
+);
+
+/// A chunk of a transfer: the destination's id for it, and the tokens.
+pub type Instruction = (u32, Vec<u8>);
+
+/// `processTransferInstruction`: decodes a chunk of a transfer into its
+/// destination. Its argument is the transfer's id (encoded as message ids
+/// are), then the tokens, raw.
+pub static PROCESS_TRANSFER_INSTRUCTION: StreamCmd<Instruction> = StreamCmd::new(
+    "processTransferInstruction",
+    "processTransferInstructionPing",
+    |(id, data), out| {
+        out.extend_from_slice(&gemel_rpc::protocol::encode_int(*id));
+        out.extend_from_slice(data);
+    },
+    |b| {
+        let id = gemel_rpc::protocol::decode_int(b)?;
+        Ok((id, b[gemel_rpc::protocol::INT_SIZE..].to_vec()))
+    },
+    |conn, (id, data)| Box::pin(process_transfer_instruction(conn, id, data)),
+);
+
+/// Reports a transfer's progress, on the host doing it, as `"r"`; and stops
+/// it when everything is aborted, except for a resource fork.
+fn transfer_progress(
+    host: &Host,
+    id: FileId,
+    kind: FileKind,
+) -> impl FnMut(usize) -> Result<(), Error> + Send + 'static {
+    let printer = uutil::progress_printer(host);
+    let abort = host.state::<Abort>().borrow().all_flag();
+    move |n| {
+        if kind != FileKind::Ress {
+            abort.check()?;
+        }
+        if let Some(p) = &printer {
+            p(id, n as Filesize, "r");
+        }
+        Ok(())
+    }
+}
+
+/// `Abort.check`, on the host.
+fn abort_check(host: &Host, id: FileId) -> Result<(), Error> {
+    let max = *host.prefs().borrow().read(&crate::abort::MAX_ERRORS);
+    host.state::<Abort>().borrow().check(id, max)
+}
+
+/// `compress`, on the source's host: streams the fork's tokens to the
+/// destination, as they are or as rsync deltas.
+async fn compress(conn: Connection, a: CompressArgs) -> Result<(), Error> {
+    let host = conn.host().clone();
+    let streaming = *host.prefs().borrow().read(&STREAMING_ACTIVATED);
+    let file_id = u32::try_from(a.file_id).map_err(|_| internal("a transfer's id out of range"))?;
+    conn.stream(
+        &PROCESS_TRANSFER_INSTRUCTION,
+        streaming,
+        |sender| async move {
+            // The transfer is aborted on error only if it hasn't started.
+            if a.kind != FileKind::Ress {
+                abort_check(&host, a.id)?;
+            }
+            let mut progress = transfer_progress(&host, a.id, a.kind);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+            // Read off the engine thread, the chunks coming back as they are
+            // made; if sending fails, reading stops at the next chunk.
+            let reading = tokio::task::spawn_blocking(move || -> Result<(), Error> {
+                let mut f = open_file_in(&a.fspath_from, &a.path_from, a.kind)?;
+                // `showPrefixProgress`: a resumed transfer's prefix counts.
+                if let FileKind::DataAppend(len) = a.kind {
+                    progress(len as usize)?;
+                }
+                let mut transmit = |c: &[u8]| {
+                    tx.blocking_send(c.to_vec())
+                        .map_err(|_| Error::Transient("Streaming aborted".into()))
+                };
+                match &a.block_info {
+                    None => transfer::send(&mut f, a.size_from, &mut progress, &mut transmit),
+                    Some(bi) => {
+                        rsync::compress(bi, &mut f, a.size_from, &mut progress, &mut transmit)
+                    }
+                }
+            });
+            while let Some(chunk) = rx.recv().await {
+                sender.send(&(file_id, chunk)).await?;
+            }
+            match reading.await {
+                Ok(r) => r,
+                Err(e) => std::panic::resume_unwind(e.into_panic()),
+            }
+        },
+    )
+    .await
+}
+
+/// A transfer the destination is receiving (`decompressor`'s entries): the
+/// files are opened when the first chunk comes, and closed after the last.
+struct Receiving {
+    ctx: Ctx,
+    fspath_to: Fspath,
+    path_to: Path<Local>,
+    real_path_to: Path<Local>,
+    kind: FileKind,
+    rsync: Option<rsync::Decompressor>,
+    out: Option<std::io::BufWriter<std::fs::File>>,
+    reference: Option<std::fs::File>,
+    progress: Box<dyn FnMut(usize) -> Result<(), Error> + Send>,
+    done: bool,
+}
+
+impl Receiving {
+    /// Decodes a chunk; at the end, closes the files.
+    fn chunk(&mut self, data: &[u8]) -> Result<(), Error> {
+        if self.done {
+            return Err(internal("a chunk after the end of a transfer"));
+        }
+        if self.out.is_none() {
+            let f = open_file_out(&self.ctx, &self.fspath_to, &self.path_to, self.kind)?;
+            self.out = Some(std::io::BufWriter::new(f));
+            if let FileKind::DataAppend(len) = self.kind {
+                (self.progress)(len as usize)?;
+            }
+        }
+        let out = self.out.as_mut().expect("opened");
+        let eof = match &mut self.rsync {
+            None => transfer::receive(out, &mut *self.progress, data)?,
+            Some(d) => {
+                if self.reference.is_none() {
+                    self.reference = Some(open_file_in(
+                        &self.fspath_to,
+                        &self.real_path_to,
+                        self.kind,
+                    )?);
+                }
+                let reference = self.reference.as_mut().expect("opened");
+                d.chunk(reference, out, &mut *self.progress, data)?
+            }
+        };
+        if eof {
+            self.close()?;
+        }
+        Ok(())
+    }
+
+    /// `close_all`.
+    fn close(&mut self) -> Result<(), Error> {
+        self.done = true;
+        self.reference = None;
+        if let Some(out) = self.out.take() {
+            out.into_inner()
+                .map_err(|e| io_error("closing files", e.error()))?;
+        }
+        Ok(())
+    }
+}
+
+/// The transfers a host is receiving, by their ids.
+#[derive(Default)]
+struct Transfers(std::collections::HashMap<u32, Arc<std::sync::Mutex<Receiving>>>);
+
+/// `processTransferInstruction`, on the destination's host.
+async fn process_transfer_instruction(
+    conn: Connection,
+    file_id: u32,
+    data: Vec<u8>,
+) -> Result<(), Error> {
+    let host = conn.host().clone();
+    let receiving = host
+        .state::<Transfers>()
+        .borrow()
+        .0
+        .get(&file_id)
+        .cloned()
+        .ok_or_else(|| internal("a chunk for an unknown transfer"))?;
+    exclusive::blocking(&host, move || {
+        receiving
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .chunk(&data)
+    })
+    .await
+}
+
+/// `transferFileContents`, on the destination's host: receives a fork from
+/// the source over `conn_from`, as rsync deltas when both files are big
+/// enough and there is an old file to start from.
+#[allow(clippy::too_many_arguments)]
+async fn transfer_file_contents(
+    conn_from: &Connection,
+    a: &TransferArgs,
+    kind: FileKind,
+    size_from: Filesize,
+) -> Result<(), Error> {
+    let host = conn_from.host().clone();
+    let ctx = Ctx::of(&host)?;
+    let dest_size = match (a.replacing, kind) {
+        (Replacing::Copy, _) => 0,
+        (Replacing::Update(_, ress), FileKind::Ress) => ress,
+        (Replacing::Update(data, _), _) => data,
+    };
+    let use_rsync = *host.prefs().borrow().read(&RSYNC_ACTIVATED)
+        && rsync::above_rsync_threshold(dest_size)
+        && rsync::above_rsync_threshold(size_from);
+    let block_info = if use_rsync {
+        let (fspath, path) = (a.fspath_to.clone(), a.real_path_to.clone());
+        Some(
+            exclusive::blocking(&host, move || {
+                let mut f = open_file_in(&fspath, &path, kind)?;
+                rsync::preprocess(&mut f, size_from, dest_size)
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
+    // The transfer is aborted on error only if it hasn't started.
+    if kind != FileKind::Ress {
+        abort_check(&host, a.id)?;
+    }
+    let receiving = Receiving {
+        ctx,
+        fspath_to: a.fspath_to.clone(),
+        path_to: a.path_to.clone(),
+        real_path_to: a.real_path_to.clone(),
+        kind,
+        rsync: block_info
+            .as_ref()
+            .map(|b| rsync::Decompressor::new(b.block_size)),
+        out: None,
+        reference: None,
+        progress: Box::new(transfer_progress(&host, a.id, kind)),
+        done: false,
+    };
+    let file_id = conn_from.endpoint().new_msg_id();
+    let receiving = Arc::new(std::sync::Mutex::new(receiving));
+    host.state::<Transfers>()
+        .borrow_mut()
+        .0
+        .insert(file_id, receiving.clone());
+    let args = CompressArgs {
+        block_info,
+        fspath_from: a.fspath_from.clone(),
+        path_from: a.path_from.clone(),
+        kind,
+        size_from,
+        id: a.id,
+        file_id: i64::from(file_id),
+    };
+    let result = conn_from.call(&COMPRESS, args).await;
+    host.state::<Transfers>().borrow_mut().0.remove(&file_id);
+    let closed = exclusive::blocking(&host, move || {
+        receiving.lock().unwrap_or_else(|e| e.into_inner()).close()
+    })
+    .await;
+    result.and(closed)
+}
+
+/// `transferFile`'s argument (`mfinishExternalTransfer`).
+#[derive(Debug, Clone)]
+pub struct TransferArgs {
+    /// The source's root.
+    pub fspath_from: Fspath,
+    /// The source.
+    pub path_from: Path<Local>,
+    /// The destination's root, or the directory the copy goes in.
+    pub fspath_to: Fspath,
+    /// The temporary file to copy to.
+    pub path_to: Path<Local>,
+    /// The file it will replace.
+    pub real_path_to: Path<Local>,
+    /// What it replaces.
+    pub replacing: Replacing,
+    /// The source's props.
+    pub desc: Props,
+    /// The source's fingerprint.
+    pub fp: FullFingerprint,
+    /// The source's resource fork.
+    pub ress: RessStamp,
+    /// The item.
+    pub id: FileId,
+}
+
+impl TransferArgs {
+    fn marshal(&self, w: &mut Writer, c: &PropsConfig) {
+        self.fspath_from.marshal(w);
+        self.path_from.marshal(w);
+        self.fspath_to.marshal(w);
+        self.path_to.marshal(w);
+        self.real_path_to.marshal(w);
+        match self.replacing {
+            Replacing::Copy => w.tag(0),
+            Replacing::Update(data, ress) => {
+                w.tag(1);
+                w.int64(data);
+                w.int64(ress);
+            }
+        }
+        self.desc.marshal(w, c);
+        self.fp.marshal(w);
+        self.ress.marshal_stamp(w);
+        w.int(self.id.0);
+    }
+
+    fn unmarshal(r: &mut Reader<'_>, c: &PropsConfig) -> umarshal::Result<TransferArgs> {
+        Ok(TransferArgs {
+            fspath_from: Fspath::unmarshal(r)?,
+            path_from: Path::unmarshal(r)?,
+            fspath_to: Fspath::unmarshal(r)?,
+            path_to: Path::unmarshal(r)?,
+            real_path_to: Path::unmarshal(r)?,
+            replacing: match r.tag(2)? {
+                0 => Replacing::Copy,
+                _ => Replacing::Update(r.int64()?, r.int64()?),
+            },
+            desc: Props::unmarshal(r, c)?,
+            fp: FullFingerprint::unmarshal(r)?,
+            ress: RessStamp::unmarshal_stamp(r)?,
+            id: FileId(r.int()?),
+        })
+    }
+}
+
+impl TransferStatus {
+    /// `mtransferStatus`.
+    fn marshal(&self, w: &mut Writer, c: &PropsConfig) {
+        match self {
+            TransferStatus::Succeeded(info) => {
+                w.tag(0);
+                info.marshal(w, c);
+            }
+            TransferStatus::NeedsDoubleCheckAgainstCurrentSource(info, fp) => {
+                w.tag(1);
+                info.marshal(w, c);
+                fp.marshal(w);
+            }
+            TransferStatus::Failed(reason) => {
+                w.tag(2);
+                w.string(reason.as_bytes());
+            }
+        }
+    }
+
+    /// `mtransferStatus`.
+    fn unmarshal(r: &mut Reader<'_>, c: &PropsConfig) -> umarshal::Result<TransferStatus> {
+        Ok(match r.tag(3)? {
+            0 => TransferStatus::Succeeded(Info::unmarshal(r, c)?),
+            1 => TransferStatus::NeedsDoubleCheckAgainstCurrentSource(
+                Info::unmarshal(r, c)?,
+                FullFingerprint::unmarshal(r)?,
+            ),
+            _ => TransferStatus::Failed(String::from_utf8_lossy(&r.string()?).into_owned()),
+        })
+    }
+}
+
+/// What `transferFile` did (`mtransferFile`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Transferred {
+    /// The transfer's status, and a message for the log if it took a
+    /// shortcut.
+    Done(Box<TransferStatus>, Option<String>),
+    /// An external program is to copy it (whether the destination has a
+    /// partial copy already); OCaml servers answer this with `copyprog`.
+    External(bool),
+}
+
+/// `transferFile` (a root command with the connection): transfers a file
+/// to the destination's host, which runs it.
+pub static TRANSFER_FILE: ServerCmd<TransferArgs, Transferred> = ServerCmd::new(
+    "transferFile",
+    |a, w, f| a.marshal(w, &PropsConfig::default().with_features(f)),
+    |r, f| TransferArgs::unmarshal(r, &PropsConfig::default().with_features(f)),
+    |t, w, f| match t {
+        Transferred::Done(status, msg) => {
+            w.tag(0);
+            status.marshal(w, &PropsConfig::default().with_features(f));
+            w.option(msg.as_ref(), |w, m| w.string(m.as_bytes()));
+        }
+        Transferred::External(existing) => {
+            w.tag(1);
+            w.bool(*existing);
+        }
+    },
+    |r, f| {
+        Ok(match r.tag(2)? {
+            0 => Transferred::Done(
+                Box::new(TransferStatus::unmarshal(
+                    r,
+                    &PropsConfig::default().with_features(f),
+                )?),
+                r.option(|r| Ok(String::from_utf8_lossy(&r.string()?).into_owned()))?,
+            ),
+            _ => Transferred::External(r.bool()?),
+        })
+    },
+    |conn, a| Box::pin(transfer_file_local(conn, a)),
+);
+
+/// `fileIsTransferred`: whether the temporary file is the source already
+/// (from an interrupted transfer), and its info.
+fn file_is_transferred(ctx: &Ctx, a: &TransferArgs) -> Result<(Info, bool), Error> {
+    let info = fileinfo::get_basic_with_ress(false, &a.fspath_to, &a.path_to, &|_| false, &ctx.fs)?;
+    let done = info.typ == Typ::File
+        && info.desc.length() == a.desc.length()
+        && osx::ress_length(&info.os_x.ress_info) == osx::ress_length(&a.ress)
+        && fingerprint(ctx, &a.fspath_to, &a.path_to, info.typ)? == a.fp;
+    Ok((info, done))
+}
+
+/// `shouldUseExternalCopyprog`: what OCaml would hand to `copyprog`.
+fn should_use_external_copyprog(prefs: &Prefs, a: &TransferArgs) -> bool {
+    let threshold = *prefs.read(&COPYTHRESHOLD);
+    !prefs.read(&COPYPROG).is_empty()
+        && threshold >= 0
+        && a.desc.length() >= 1
+        && a.desc.length() >= 1000 * threshold
+        && a.replacing == Replacing::Copy
+}
+
+/// Whether the warning that `copyprog` is ignored was given, on a host.
+#[derive(Default)]
+struct WarnedCopyprog(bool);
+
+/// `transferFileLocal`, on the destination's host, with the connection to
+/// the source's.
+async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<Transferred, Error> {
+    let host = conn_from.host().clone();
+    let ctx = Ctx::of(&host)?;
+    let (temp_info, transferred) = {
+        let (ctx, a) = (ctx.clone(), a.clone());
+        exclusive::blocking(&host, move || file_is_transferred(&ctx, &a)).await?
+    };
+    let hint = (a.fspath_to.clone(), a.path_to.clone(), a.fp.clone());
+    if transferred {
+        // From an interrupted transfer: only the props are left to set.
+        let msg = format!(
+            "{}/{} has already been transferred\n",
+            gemel_base::util::escaped(a.fspath_to.as_bytes()),
+            String::from_utf8_lossy(a.real_path_to.as_bytes())
+        );
+        if let Some(p) = uutil::progress_printer(&host) {
+            p(a.id, a.desc.length() + osx::ress_length(&a.ress), "alr");
+        }
+        {
+            let (ctx, a) = (ctx.clone(), a.clone());
+            exclusive::blocking(&host, move || {
+                set_fileinfo(
+                    &ctx,
+                    &a.fspath_to,
+                    &a.path_to,
+                    &a.real_path_to,
+                    a.replacing,
+                    &a.desc,
+                )
+            })
+            .await?;
+        }
+        xferhint::insert_entry(&host, hint);
+        return Ok(Transferred::Done(
+            Box::new(TransferStatus::Succeeded(temp_info)),
+            Some(msg),
+        ));
+    }
+    // Not ported yet (phase 5): copying an identical file already on this
+    // host instead (`tryCopyMovedFile`, after `registerFileTransfer`).
+    if should_use_external_copyprog(&host.prefs().borrow(), &a) {
+        let warned = host.state::<WarnedCopyprog>();
+        if !std::mem::replace(&mut warned.borrow_mut().0, true) {
+            host.warn(
+                "External copy programs (copyprog, copythreshold) are not supported; \
+                 transferring files with the built-in protocol instead.\n",
+            );
+        }
+    }
+    let status = really_transfer_file(&conn_from, &ctx, &a, &temp_info).await?;
+    xferhint::insert_entry(&host, hint);
+    Ok(Transferred::Done(Box::new(status), None))
+}
+
+/// `reallyTransferFile`: the data fork, then the resource fork and the
+/// props, then the check.
+async fn really_transfer_file(
+    conn_from: &Connection,
+    ctx: &Ctx,
+    a: &TransferArgs,
+    _temp_info: &Info,
+) -> Result<TransferStatus, Error> {
+    let host = conn_from.host().clone();
+    // Not ported yet (phase 5): resuming a partial transfer
+    // (`validFilePrefix`), so what was transferred before goes.
+    {
+        let (ctx, f, p) = (ctx.clone(), a.fspath_to.clone(), a.path_to.clone());
+        exclusive::blocking(&host, move || remove_old_temp_file(&ctx, &f, &p)).await?;
+    }
+    transfer_file_contents(conn_from, a, FileKind::Data, a.desc.length()).await?;
+    // `transferResourceForkAndSetFileinfo`.
+    let ress_length = osx::ress_length(&a.ress);
+    if ress_length > 0 {
+        transfer_file_contents(conn_from, a, FileKind::Ress, ress_length).await?;
+    }
+    let (ctx, a) = (ctx.clone(), a.clone());
+    exclusive::blocking(&host, move || {
+        set_fileinfo(
+            &ctx,
+            &a.fspath_to,
+            &a.path_to,
+            &a.real_path_to,
+            a.replacing,
+            &a.desc,
+        )?;
+        paranoid_check(&ctx, &a.fspath_to, &a.path_to, &a.fp)
+    })
+    .await
+}
+
+/// `transferFile`'s client side: transfers to `root_to` from `root_from`,
+/// one of which is remote.
+#[allow(clippy::too_many_arguments)]
+async fn transfer_file(
+    rpc: &Rpc,
+    root_from: &Root,
+    path_from: &Path<Local>,
+    root_to: &Root,
+    fspath_to: &Fspath,
+    path_to: &Path<Local>,
+    real_path_to: &Path<Local>,
+    replacing: Replacing,
+    source: &Source,
+    id: FileId,
+) -> Result<TransferStatus, Error> {
+    abort_check(rpc.client_host(), id)?;
+    let args = TransferArgs {
+        fspath_from: root_from.fspath.clone(),
+        path_from: path_from.clone(),
+        fspath_to: fspath_to.clone(),
+        path_to: path_to.clone(),
+        real_path_to: real_path_to.clone(),
+        replacing,
+        desc: source.desc.clone(),
+        fp: source.fp.clone(),
+        ress: source.ress.clone(),
+        id,
+    };
+    match rpc
+        .call_root_with_connection(&TRANSFER_FILE, root_to, root_from, args)
+        .await?
+    {
+        Transferred::Done(status, msg) => {
+            if let Some(msg) = msg {
+                // Done on the server without a transfer: the progress the
+                // transfer would have shown.
+                if !root_to.is_local()
+                    && let Some(p) = uutil::progress_printer(rpc.client_host())
+                {
+                    p(
+                        id,
+                        source.desc.length() + osx::ress_length(&source.ress),
+                        "rem",
+                    );
+                }
+                crate::with_trace(rpc, |t, p| t.log(p, &msg))?;
+            }
+            Ok(*status)
+        }
+        Transferred::External(_) => Err(Error::Transient(format!(
+            "The server would copy {} with an external program (copyprog), which isn't \
+             supported: set copythreshold to -1",
+            String::from_utf8_lossy(real_path_to.as_bytes())
+        ))),
+    }
+}
+
 /// What [`file`] copies: the source's archived record.
 #[derive(Debug, Clone)]
 pub struct Source {
@@ -689,7 +1404,8 @@ pub struct Source {
 /// `Copy.file`: copies the file at `path_from` on `root_from` to `path_to`
 /// on `root_to` (a temporary name for `real_path_to`), checks the copy and
 /// that the source didn't change meanwhile, and returns the copy's info.
-/// Only between local roots so far.
+/// Between local roots, the file is copied here; otherwise the
+/// destination's host has it transferred from the source's.
 #[allow(clippy::too_many_arguments)]
 pub async fn file(
     rpc: &Rpc,
@@ -703,14 +1419,23 @@ pub async fn file(
     source: &Source,
     id: FileId,
 ) -> Result<Info, Error> {
-    if !(root_from.is_local() && root_to.is_local()) {
-        return Err(Error::Fatal(
-            "Copying between hosts is not supported yet".to_owned(),
-        ));
-    }
-    let ctx = Ctx::of(rpc.local_host())?;
     let timer = crate::start_timer(rpc, "Transmitting file")?;
-    let status = {
+    let status = if !(root_from.is_local() && root_to.is_local()) {
+        transfer_file(
+            rpc,
+            root_from,
+            path_from,
+            root_to,
+            fspath_to,
+            path_to,
+            real_path_to,
+            replacing,
+            source,
+            id,
+        )
+        .await?
+    } else {
+        let ctx = Ctx::of(rpc.local_host())?;
         let (fspath_from, path_from) = (root_from.fspath.clone(), path_from.clone());
         let (fspath_to, path_to, real_path_to) =
             (fspath_to.clone(), path_to.clone(), real_path_to.clone());
@@ -834,7 +1559,10 @@ pub fn recursively(
 pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
     let r = rpc.registry_mut();
     r.register_root(&CHECK_FOR_CHANGES_TO_SOURCE)?;
-    r.register_root(&SAVE_TEMP_FILE)
+    r.register_root(&SAVE_TEMP_FILE)?;
+    r.register_stream(&PROCESS_TRANSFER_INSTRUCTION)?;
+    r.register_server(&COMPRESS)?;
+    r.register_server(&TRANSFER_FILE)
 }
 
 #[cfg(test)]

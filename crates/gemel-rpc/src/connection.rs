@@ -187,6 +187,8 @@ struct Inner {
     stream_aborted_src: Cell<u32>,
     stream_aborted_dst: Cell<bool>,
     stream_errors: RefCell<HashMap<u32, Error>>,
+    emitted: Cell<u64>,
+    received: Cell<u64>,
 }
 
 /// A connection with the other side (`Remote.connection`). Clones are the
@@ -244,6 +246,8 @@ impl Connection {
             stream_aborted_src: Cell::new(0),
             stream_aborted_dst: Cell::new(false),
             stream_errors: RefCell::default(),
+            emitted: Cell::new(0),
+            received: Cell::new(0),
         }));
         runtime::spawn_local(conn.clone().write(output));
         conn
@@ -262,6 +266,17 @@ impl Connection {
     /// Whether this end is the server.
     pub fn is_server(&self) -> bool {
         self.0.is_server
+    }
+
+    /// The bytes written to the connection so far (`emittedBytes`, for
+    /// this connection).
+    pub fn bytes_emitted(&self) -> u64 {
+        self.0.emitted.get()
+    }
+
+    /// The bytes read from the connection so far (`receivedBytes`).
+    pub fn bytes_received(&self) -> u64 {
+        self.0.received.get()
     }
 
     /// `connectionVersion`: the RPC version agreed on.
@@ -323,6 +338,9 @@ impl Connection {
                 let next = self.0.queues.borrow_mut().pop();
                 if let Some(((message, written), kind)) = next {
                     w.write_all(&message).await?;
+                    self.0
+                        .emitted
+                        .set(self.0.emitted.get() + message.len() as u64);
                     if kind == Kind::Urgent {
                         w.flush().await?;
                     }
@@ -362,6 +380,7 @@ impl Connection {
                 };
                 if token {
                     w.write_all(&protocol::encode_int(0)).await?;
+                    self.0.emitted.set(self.0.emitted.get() + INT_SIZE as u64);
                 }
                 w.flush().await?;
             }
@@ -471,6 +490,8 @@ impl Connection {
     }
 
     async fn receive_message(&self, input: &mut Input) -> Result<(), Error> {
+        let mut input = Counted(input, &self.0.received);
+        let input = &mut input;
         let mut id = [0; INT_SIZE];
         read(input, &mut id).await?;
         let num_id = protocol::decode_int(&id)?;
@@ -645,14 +666,19 @@ impl Connection {
     }
 }
 
+/// The input, counting what is read from it.
+struct Counted<'a>(&'a mut Input, &'a Cell<u64>);
+
 /// Reads exactly `buf.len()` bytes (`grab`); the end of the input, or any
 /// error reading it, is a lost connection.
-async fn read(input: &mut Input, buf: &mut [u8]) -> Result<(), Error> {
-    input.read_exact(buf).await.map(drop).map_err(|_| lost())
+async fn read(input: &mut Counted<'_>, buf: &mut [u8]) -> Result<(), Error> {
+    input.0.read_exact(buf).await.map_err(|_| lost())?;
+    input.1.set(input.1.get() + buf.len() as u64);
+    Ok(())
 }
 
 /// `receivePacket`: a packet's length, then its body.
-async fn receive_packet(input: &mut Input) -> Result<Vec<u8>, Error> {
+async fn receive_packet(input: &mut Counted<'_>) -> Result<Vec<u8>, Error> {
     let mut len = [0; INT_SIZE];
     read(input, &mut len).await?;
     let mut buf = vec![0; protocol::decode_int(&len)? as usize];

@@ -356,6 +356,22 @@ pub fn get_basic(
     })
 }
 
+/// `Fileinfo.getBasicWithRess`: with the props `stat` gives, and the
+/// type and creator.
+pub fn get_basic_with_ress(
+    from_root: bool,
+    fspath: &Fspath,
+    path: &Path<Local>,
+    follow: &dyn Fn(&Path<Local>) -> bool,
+    c: &FsConfig,
+) -> Result<Info, Error> {
+    get_aux(from_root, fspath, path, follow, c, &|st, os_x| {
+        let mut p = Props::get_basic(st, &c.props);
+        p.type_creator = crate::props::type_creator_get(st, os_x, &c.props);
+        p
+    })
+}
+
 /// `Fileinfo.get`: with all the props.
 pub fn get(
     from_root: bool,
