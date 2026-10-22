@@ -525,6 +525,15 @@ pub fn open_out_new(p: &[u8], perm: u32) -> SysResult<fs::File> {
     .map_err(|e| SysError::new("open", p, e))
 }
 
+/// `open_out_gen [Open_wronly; Open_binary]`: an existing file, for writing
+/// at a position (resuming a transfer).
+pub fn open_out_existing(p: &[u8]) -> SysResult<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(os_path(p))
+        .map_err(|e| SysError::new("open", p, e))
+}
+
 /// The number of hard links to `p` (`st_nlink`).
 #[cfg(unix)]
 pub fn link_count(p: &[u8]) -> SysResult<u64> {

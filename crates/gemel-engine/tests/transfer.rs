@@ -3,13 +3,36 @@
 //! the rolling checksum, rsync's sizes, the block information, and every
 //! chunk of tokens the source sends, for rsync and for plain contents. Then
 //! the chunks decode back to the source file.
+//!
+//! Then whole transfers between two hosts (`copy::file` with a root behind
+//! an in-memory connection), in both directions: plain, rsync deltas,
+//! without streaming, without rsync, and a transfer that comes out wrong.
 
+mod support;
+
+use std::cell::RefCell;
 use std::io::Cursor;
+use std::path::Path as StdPath;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
-use gemel_base::util::Error;
+use gemel_base::clroot::Clroot;
+use gemel_base::path::{Local, Path};
+use gemel_base::util::{Error, FileId};
 use gemel_compat::umarshal;
+use gemel_engine::copy::{self, Replacing, Source};
+use gemel_engine::globals::{self, Roots};
 use gemel_engine::transfer::{self, checksum, rsync};
+use gemel_engine::{negotiate, uutil};
+use gemel_fs::fileinfo::{self, FsConfig, Typ};
+use gemel_fs::fspath::Fspath;
+use gemel_fs::os;
+use gemel_fs::system;
+use gemel_rpc::host::Host;
+use gemel_rpc::registry::{Dispatch, Rpc};
+use gemel_rpc::root::{self, Root};
 use md5::{Digest, Md5};
+use support::{TempDir, block_on, new_features, new_prefs};
 
 const VECTORS: &str = include_str!("../../gemel-compat/tests/fixtures/transfer.txt");
 
@@ -345,5 +368,278 @@ fn bad_streams_are_errors() {
         e.to_string()
             .starts_with("Internal error during rsync transfer (compression)"),
         "{e}"
+    );
+}
+
+// ---- Between two hosts ----
+
+/// A client with root `a` here and root `b` on a server named "server",
+/// behind an in-memory connection; and the progress the client saw.
+struct Hosts {
+    rpc: Rpc,
+    roots: Roots,
+    server: Rc<Host>,
+    dir: TempDir,
+    progress: Arc<Mutex<Vec<(i64, String)>>>,
+}
+
+fn hosts(tag: &str, prefs: &[&str]) -> Hosts {
+    let dir = TempDir::new(tag);
+    for d in ["a", "b", "u", "v"] {
+        std::fs::create_dir_all(dir.0.join(d)).unwrap();
+    }
+    let fspath = |d: &str| {
+        let bytes = system::name_bytes(dir.0.join(d).as_os_str());
+        Fspath::canonize(Some(&bytes)).unwrap()
+    };
+    let mut p = new_prefs();
+    p.parse_cmd_line(&prefs.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        .unwrap();
+    let client = Rc::new(Host::client(
+        Rc::new(RefCell::new(p)),
+        Rc::new(RefCell::new(new_features())),
+    ));
+    client.set_unison_dir(dir.0.join("u"));
+    let progress = Arc::new(Mutex::new(Vec::new()));
+    let seen = progress.clone();
+    uutil::set_progress_printer(
+        &client,
+        Some(Arc::new(move |_, n, how| {
+            seen.lock().unwrap().push((n, how.to_owned()))
+        })),
+    );
+    let mut rpc = Rpc::new(Dispatch::Direct(client));
+    gemel_engine::register_commands(&mut rpc).unwrap();
+    let server = Rc::new(Host::server(new_prefs(), new_features()));
+    server.set_host_name("server");
+    server.set_unison_dir(dir.0.join("v"));
+    let b = Root {
+        host: root::Host::Remote("server".into()),
+        fspath: fspath("b"),
+    };
+    let clroot = Clroot::ConnectBySocket {
+        host: "server".into(),
+        port: "1".into(),
+        path: None,
+    };
+    let roots = Roots::from_roots(vec![Root::local(fspath("a")), b.clone()]);
+    block_on(async {
+        rpc.connect_in_memory(clroot, b, server.clone());
+        negotiate::features(&rpc, &roots.in_canonical_order())
+            .await
+            .unwrap();
+        globals::propagate_prefs(&rpc, &roots).await.unwrap();
+    });
+    Hosts {
+        rpc,
+        roots,
+        server,
+        dir,
+        progress,
+    }
+}
+
+impl Hosts {
+    fn root(&self, side: &str) -> &Root {
+        &self.roots.list()[if side == "a" { 0 } else { 1 }]
+    }
+
+    fn path(&self, side: &str, name: &str) -> std::path::PathBuf {
+        self.dir.0.join(side).join(name)
+    }
+
+    /// The archive's record of a file, as update detection would make it.
+    fn source(&self, side: &str, name: &str) -> Source {
+        let fs = FsConfig::from_prefs(&self.rpc.client_host().prefs().borrow());
+        let root = self.root(side);
+        let p = local(name);
+        let info = fileinfo::get(true, &root.fspath, &p, &|_| false, &fs).unwrap();
+        let fp = os::fingerprint(&root.fspath, &p, info.typ.info_kind(), false).unwrap();
+        Source {
+            desc: info.desc.clone(),
+            fp,
+            stamp: None,
+            ress: info.ress_stamp(),
+        }
+    }
+
+    /// Transfers `from`'s `name` to a temporary file on the other root,
+    /// replacing its `name` if `update`.
+    fn transfer(&self, from: &str, name: &str, update: bool) -> Result<fileinfo::Info, Error> {
+        let to = if from == "a" { "b" } else { "a" };
+        let source = self.source(from, name);
+        let replacing = if update {
+            Replacing::Update(
+                std::fs::metadata(self.path(to, name)).unwrap().len() as i64,
+                0,
+            )
+        } else {
+            Replacing::Copy
+        };
+        self.transfer_with(from, name, replacing, &source)
+    }
+
+    fn transfer_with(
+        &self,
+        from: &str,
+        name: &str,
+        replacing: Replacing,
+        source: &Source,
+    ) -> Result<fileinfo::Info, Error> {
+        let to = if from == "a" { "b" } else { "a" };
+        let (root_from, root_to) = (self.root(from), self.root(to));
+        block_on(copy::file(
+            &self.rpc,
+            root_from,
+            &local(name),
+            root_to,
+            &root_to.fspath,
+            &local(&format!(".tmp-{name}")),
+            &local(name),
+            replacing,
+            source,
+            FileId(7),
+        ))
+    }
+
+    /// The bytes that crossed the connection so far, both ways.
+    fn wire(&self) -> u64 {
+        let c = self.rpc.connection_of_root(self.root("b")).unwrap();
+        c.bytes_emitted() + c.bytes_received()
+    }
+
+    /// The bytes the client's progress printer saw, and how.
+    fn take_progress(&self) -> (i64, Vec<String>) {
+        let mut p = self.progress.lock().unwrap();
+        let total = p.iter().map(|(n, _)| n).sum();
+        let mut how: Vec<String> = p.drain(..).map(|(_, h)| h).collect();
+        how.dedup();
+        (total, how)
+    }
+}
+
+fn local(s: &str) -> Path<Local> {
+    Path::from_bytes(s.as_bytes()).unwrap()
+}
+
+fn write_file(p: &StdPath, contents: &[u8]) {
+    std::fs::write(p, contents).unwrap();
+}
+
+/// A file's name, its contents, and the old version it replaces, if any.
+type Case = (&'static str, Vec<u8>, Option<Vec<u8>>);
+
+/// Each size class, both ways: below the rsync threshold, a new file,
+/// deltas against an old version, an append, and a file replaced by one
+/// with nothing in common.
+#[test]
+fn files_transfer_between_hosts_both_ways() {
+    for prefs in [&[][..], &["-stream=false"], &["-rsync=false"]] {
+        let h = hosts("two-hosts", prefs);
+        let base = random(40, 300_000);
+        for (from, to) in [("a", "b"), ("b", "a")] {
+            let cases: Vec<Case> = vec![
+                ("small", random(41, 500), None),
+                ("new", random(42, 200_000), None),
+                (
+                    "edited",
+                    cat(&[&base[..100_000], &random(43, 777), &base[100_000..]]),
+                    Some(base.clone()),
+                ),
+                (
+                    "appended",
+                    cat(&[&base, &random(44, 50_000)]),
+                    Some(base.clone()),
+                ),
+                ("replaced", random(45, 250_000), Some(base.clone())),
+                ("empty", Vec::new(), Some(base.clone())),
+            ];
+            for (name, contents, old) in cases {
+                let name = format!("{name}-{from}");
+                write_file(&h.path(from, &name), &contents);
+                if let Some(old) = &old {
+                    write_file(&h.path(to, &name), old);
+                }
+                let wire = h.wire();
+                let info = h
+                    .transfer(from, &name, old.is_some())
+                    .unwrap_or_else(|e| panic!("{name} {prefs:?}: {e}"));
+                let wire = h.wire() - wire;
+                // Deltas go when rsync is on and the files share most of
+                // their blocks; otherwise the whole file does.
+                let rsync = !prefs.contains(&"-rsync=false");
+                if rsync && (name.starts_with("edited") || name.starts_with("appended")) {
+                    let new_bytes = contents.len() - base.len().min(contents.len());
+                    assert!(
+                        wire < (new_bytes + 20_000) as u64,
+                        "{name} {prefs:?}: {wire} bytes"
+                    );
+                } else {
+                    assert!(
+                        wire >= contents.len() as u64,
+                        "{name} {prefs:?}: {wire} bytes"
+                    );
+                }
+                assert_eq!(info.typ, Typ::File, "{name}");
+                let tmp = h.path(to, &format!(".tmp-{name}"));
+                assert!(
+                    std::fs::read(&tmp).unwrap() == contents,
+                    "{name} {prefs:?}: the copy"
+                );
+                // The old version is still there, untouched.
+                if let Some(old) = &old {
+                    assert!(std::fs::read(h.path(to, &name)).unwrap() == *old, "{name}");
+                }
+                // The client sees the transfer's progress (whichever host
+                // sends or receives), as "r", for the whole file.
+                // (An empty file has nothing to report.)
+                let (total, how) = h.take_progress();
+                if !contents.is_empty() {
+                    assert_eq!(how, ["r"], "{name}");
+                }
+                assert!(total >= contents.len() as i64, "{name}: {total}");
+            }
+        }
+        // The server noted where it got each file, for later copies.
+        assert!(gemel_engine::xferhint::lookup(&h.server, &h.source("a", "new-a").fp).is_some());
+    }
+}
+
+/// A transfer that doesn't match the source's record fails; the source is
+/// checked, on its host, and the error says it changed.
+#[test]
+fn a_transfer_whose_source_changed_fails() {
+    for from in ["a", "b"] {
+        let h = hosts("two-hosts-bad", &[]);
+        write_file(&h.path(from, "f"), &random(50, 5000));
+        let mut source = h.source(from, "f");
+        // As if the file had changed after update detection: the source
+        // check reports that.
+        write_file(&h.path(from, "g"), &random(51, 5000));
+        source.fp = h.source(from, "g").fp;
+        let e = h
+            .transfer_with(from, "f", Replacing::Copy, &source)
+            .unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("has been modified during synchronization"),
+            "{from}: {e}"
+        );
+    }
+}
+
+/// A file already transferred (an interrupted sync left the temporary file
+/// whole) only gets its props, and the log says so.
+#[test]
+fn a_file_already_transferred_is_not_sent_again() {
+    let h = hosts("two-hosts-done", &[]);
+    let contents = random(60, 100_000);
+    write_file(&h.path("a", "f"), &contents);
+    write_file(&h.path("b", ".tmp-f"), &contents);
+    h.transfer("a", "f", false).unwrap();
+    let (total, how) = h.take_progress();
+    assert_eq!(
+        (total, how),
+        (contents.len() as i64, vec!["rem".to_owned()])
     );
 }
