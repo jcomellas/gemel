@@ -538,7 +538,11 @@ Unison has no FSEvents watcher on macOS, so gemel's helper would be an improveme
   - The paths left unsynchronised are scanned whatever the watcher says. A `find` without them, or with other paths or another directory stamp, scans everything again and restarts the watching.
   - A watcher error stops the scan with OCaml's message, at the next point the scan checks rather than where it happened.
 - **`waitForChanges`** is a root command of the engine (OCaml's is in `uitext.ml`), so a server will have it.
-- **As in OCaml**, a directory reached through a path tree is never said to be emptied: `buildUpdatePathTree` passes `false`, and only a whole scan of the directory computes it.
+- **As in OCaml**, a directory reached through a path tree:
+  - is never said to be emptied: `buildUpdatePathTree` passes `false`, and only a whole scan of the directory computes it;
+  - keeps the archive's props (`archDesc`), where a whole scan reads them. Unix's fast directory check makes the two agree, but Windows has no fast directory check, so there the directory's time differs.
+
+  On Windows a deletion counts as a change to its directory, as with OCaml's Windows watcher, so that directory is scanned whole.
 - **Tests:**
   - Unit tests for the path trees.
   - `tests/watch.rs`, directly and through the loopback, with the helper from `target/<profile>`:

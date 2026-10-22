@@ -156,7 +156,7 @@ fn the_watcher_finds_what_a_full_scan_finds() {
         wait(&s);
         let watched = find_watching(&s, reported());
         let full = s.find();
-        assert_eq!(watched, full, "loopback {loopback}");
+        assert_eq!(shapes(&watched), shapes(&full), "loopback {loopback}");
         assert_eq!(
             changed(&full),
             (
@@ -165,6 +165,33 @@ fn the_watcher_finds_what_a_full_scan_finds() {
             )
         );
     }
+}
+
+/// An update, with each directory's own props left out. Through a
+/// directory, OCaml's `buildUpdatePathTree` gives the archive's props
+/// (`archDesc`), where a whole scan gives those it reads: the same with
+/// Unix's fast directory check, but Windows has none, so the times differ.
+fn shape(ui: &UpdateItem) -> String {
+    match ui {
+        UpdateItem::Updates(UpdateContent::Dir(_, children, perm, emptied), prev) => {
+            let children: Vec<String> = children
+                .iter()
+                .map(|(n, ui)| format!("{}: {}", String::from_utf8_lossy(n.as_bytes()), shape(ui)))
+                .collect();
+            format!(
+                "Dir({perm:?}, {emptied}, [{}]) from {prev:?}",
+                children.join(", ")
+            )
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+fn shapes(found: &[PathUpdates]) -> Vec<String> {
+    found
+        .iter()
+        .map(|(a, b)| format!("{:?} {} | {:?} {}", a.0, shape(&a.1), b.0, shape(&b.1)))
+        .collect()
 }
 
 /// Whether a directory's update says it was emptied.
@@ -176,7 +203,7 @@ fn emptied(ui: &UpdateItem) -> bool {
 }
 
 #[test]
-fn a_watched_scan_does_not_say_a_directory_was_emptied() {
+fn only_a_whole_scan_says_a_directory_was_emptied() {
     for loopback in [false, true] {
         let dir = TempDir::new("watch-emptied");
         let s = synced(&dir, loopback);
@@ -191,9 +218,15 @@ fn a_watched_scan_does_not_say_a_directory_was_emptied() {
         };
         // OCaml's `buildUpdatePathTree` says that a directory it goes
         // through wasn't emptied; only a scan of the whole directory says
-        // it was.
+        // it was. On Windows a deletion counts as a change to its
+        // directory, as with OCaml's Windows watcher, so the watcher
+        // reports src/deep itself, which is scanned whole.
         assert!(emptied(&deep(&full)), "loopback {loopback}");
-        assert!(!emptied(&deep(&watched)), "loopback {loopback}");
+        assert_eq!(
+            emptied(&deep(&watched)),
+            cfg!(windows),
+            "loopback {loopback}"
+        );
         assert_eq!(names(&deep(&watched)), names(&deep(&full)));
     }
 }
