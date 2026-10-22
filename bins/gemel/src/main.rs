@@ -11,12 +11,13 @@
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 //!
 //! `main.ml`'s options handled before any profile is loaded: `-version`,
-//! `-prefsman short`, and (not supported yet) `-doc`, `-prefsdocs`,
-//! `-prefsman full`, `-server` and `-socket`; then the text interface,
+//! `-prefsman short`, `-server`, and (not supported yet) `-doc`,
+//! `-prefsdocs`, `-prefsman full` and `-socket`; then the text interface,
 //! whatever `-ui` asks for.
 
 mod infos;
 mod input;
+mod server;
 mod text;
 
 use gemel_base::uarg::UsageError;
@@ -61,15 +62,18 @@ fn run(args: Vec<String>) -> i32 {
         }
         return 0;
     }
-    for (pref, what) in [
-        (cli::DOC.name(), "-doc"),
-        (cli::SERVER.name(), "-server"),
-        (cli::SOCKET.name(), "-socket"),
-    ] {
-        if argv.contains_key(pref) {
-            eprintln!("{MY_NAME}: {what} is not supported yet");
-            return 1;
-        }
+    let unsupported = |what: &str| {
+        eprintln!("{MY_NAME}: {what} is not supported yet");
+        1
+    };
+    if argv.contains_key(cli::DOC.name()) {
+        return unsupported("-doc");
+    }
+    if argv.contains_key(cli::SERVER.name()) {
+        return server::run();
+    }
+    if argv.contains_key(cli::SOCKET.name()) {
+        return unsupported("-socket");
     }
     let interface = match argv.get(cli::UI.name()).and_then(|v| v.first()) {
         None => Interface::Text,
