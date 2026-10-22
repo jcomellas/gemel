@@ -31,7 +31,7 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     abort::register_prefs(prefs)?;
     gemel_fs::osx::register_prefs(prefs)?;
     fswatch::register_prefs(prefs)?;
-    gemel_fs::props::register_prefs(prefs)?;
+    update::register_props_prefs(prefs)?;
     gemel_fs::fileinfo::register_prefs(prefs)?;
     gemel_fs::os::register_prefs(prefs)?;
     xferhint::register_prefs(prefs)?;

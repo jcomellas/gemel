@@ -62,7 +62,7 @@ pub fn new_prefs() -> Prefs {
     case::register_prefs(&mut p).unwrap();
     gemel_fs::os::register_prefs(&mut p).unwrap();
     gemel_fs::fileinfo::register_prefs(&mut p).unwrap();
-    gemel_fs::props::register_prefs(&mut p).unwrap();
+    gemel_engine::update::register_props_prefs(&mut p).unwrap();
     gemel_fs::osx::register_prefs(&mut p).unwrap();
     gemel_engine::register_prefs(&mut p).unwrap();
     p

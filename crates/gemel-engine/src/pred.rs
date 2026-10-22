@@ -20,6 +20,7 @@
 use std::sync::{Arc, Mutex};
 
 use gemel_base::case::Mode;
+use gemel_base::features::Features;
 use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
 use gemel_base::rx::Rx;
 use gemel_base::util::{self, Error};
@@ -64,6 +65,12 @@ impl Pred {
     /// `~local:true`: see [`PrefDef::local`].
     pub const fn local(mut self) -> Pred {
         self.pref = self.pref.local();
+        self
+    }
+
+    /// `~send`: see [`PrefDef::send`].
+    pub const fn send(mut self, send: fn(&Prefs, &Features) -> bool) -> Pred {
+        self.pref = self.pref.send(send);
         self
     }
 
