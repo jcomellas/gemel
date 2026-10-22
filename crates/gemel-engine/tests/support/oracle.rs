@@ -25,8 +25,8 @@ impl Setup {
 }
 
 /// Both replicas of a sync, in step.
-pub fn synced(dir: &TempDir, loopback: bool, prefs: &[&str], build: fn(&StdPath)) -> Setup {
-    let s = setup(dir, loopback);
+pub fn synced(dir: &TempDir, via: Via, prefs: &[&str], build: fn(&StdPath)) -> Setup {
+    let s = setup(dir, via);
     s.init(prefs);
     build(&s.a());
     build(&s.b());
@@ -67,17 +67,60 @@ pub fn ocaml_sync(unison: &OsStr, s: &Setup, flags: &[String]) -> String {
     ocaml_run(unison, s, &all)
 }
 
+/// OCaml Unison on the replicas `a` and `b` in `base`, with its Unison
+/// directory there: reached as gemel reaches them `via`. With
+/// [`Via::Remote`], `b` is `ssh://server//...`, and an `-sshcmd` shim
+/// runs an OCaml server named [`SERVER`] here, with the same Unison
+/// directory, so both see the archives gemel's hosts made.
+pub fn ocaml_command(unison: &OsStr, base: &StdPath, via: Via) -> std::process::Command {
+    let mut c = std::process::Command::new(unison);
+    c.arg(base.join("a"));
+    if via == Via::Remote {
+        let shim = base.join("ocaml-ssh");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\n\
+                 # Drops ssh's arguments, then runs the server here, named {SERVER}.\n\
+                 while [ \"$1\" != -e ]; do shift; done; shift 2\n\
+                 UNISONLOCALHOSTNAME={SERVER} exec \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        c.arg(format!("ssh://{SERVER}/{}", base.join("b").display()))
+            .arg("-sshcmd")
+            .arg(&shim)
+            .arg("-servercmd")
+            .arg(unison);
+    } else {
+        c.arg(base.join("b"));
+    }
+    c.env("UNISON", base.join("u"))
+        .env("HOME", base)
+        .stdin(std::process::Stdio::null());
+    c
+}
+
+/// The way `s` was set up.
+pub fn via_of(s: &Setup) -> Via {
+    match (&s.server, s.rpc.is_loopback()) {
+        (Some(_), _) => Via::Remote,
+        (None, true) => Via::Loopback,
+        (None, false) => Via::Direct,
+    }
+}
+
 /// OCaml Unison, run in batch mode on `s`'s replicas with `flags`: its
 /// output.
 pub fn ocaml_run(unison: &OsStr, s: &Setup, flags: &[String]) -> String {
-    let out = std::process::Command::new(unison)
-        .arg(s.a())
-        .arg(s.b())
+    let out = ocaml_command(unison, &s.base, via_of(s))
         .args(["-batch", "-ui", "text", "-contactquietly", "-times"])
         .args(flags)
-        .env("UNISON", s.base.join("u"))
-        .env("HOME", &s.base)
-        .stdin(std::process::Stdio::null())
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr)

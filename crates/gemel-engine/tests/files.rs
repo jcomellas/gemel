@@ -74,9 +74,9 @@ fn assert_mirrored(s: &Setup) {
 
 #[test]
 fn new_files_and_trees_are_copied() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-new");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         write(&s.a(), "new", "a new file", T0 + 20.0);
         write(&s.a(), "tree/one", "1", T0 + 20.0);
         write(&s.a(), "tree/sub/two", "2", T0 + 20.0);
@@ -89,9 +89,9 @@ fn new_files_and_trees_are_copied() {
 
 #[test]
 fn changed_files_are_updated() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-update");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         write(&s.a(), "README", "read me again, please", T0 + 20.0);
         write(
             &s.b(),
@@ -107,11 +107,11 @@ fn changed_files_are_updated() {
 
 #[test]
 fn deletions_are_propagated_and_backed_up() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-delete");
         let backups = format!("backupdir = {}", dir.0.join("backups").display());
         let prefs = ["backup = Name *", backups.as_str()];
-        let s = synced(&dir, loopback, &prefs, build_tree);
+        let s = synced(&dir, via, &prefs, build_tree);
         std::fs::remove_file(s.a().join("README")).unwrap();
         std::fs::remove_dir_all(s.a().join("src")).unwrap();
         assert_eq!(s.propagate_ok(), ["README", "src"]);
@@ -134,9 +134,9 @@ fn deletions_are_propagated_and_backed_up() {
 #[test]
 fn props_are_set() {
     use std::os::unix::fs::PermissionsExt;
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-props");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         std::fs::set_permissions(s.a().join("README"), PermissionsExt::from_mode(0o600)).unwrap();
         set_mtime(&s.b().join("src/main.c"), T0 + 50.0);
         assert_eq!(s.propagate_ok(), ["README", "src/main.c"]);
@@ -153,9 +153,9 @@ fn props_are_set() {
 
 #[test]
 fn a_file_replaces_a_directory_and_back() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-replace");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         // Over a directory: moved aside first, under the commit log.
         std::fs::remove_dir_all(s.a().join("src")).unwrap();
         write(&s.a(), "src", "now a file", T0 + 20.0);
@@ -172,9 +172,9 @@ fn a_file_replaces_a_directory_and_back() {
 #[cfg(unix)]
 #[test]
 fn links_are_made() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-links");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         std::os::unix::fs::symlink("src/main.c", s.a().join("newlink")).unwrap();
         std::fs::remove_file(s.a().join("link")).unwrap();
         std::os::unix::fs::symlink("elsewhere", s.a().join("link")).unwrap();
@@ -193,9 +193,9 @@ fn a_partly_failed_copy_keeps_what_worked() {
         eprintln!("skipped: running as root");
         return;
     }
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-partial");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         write(&s.a(), "tree/ok", "fine", T0 + 20.0);
         write(&s.a(), "tree/secret", "unreadable", T0 + 20.0);
         let secret = s.a().join("tree/secret");
@@ -228,10 +228,10 @@ fn unsafe_euid_is_root() -> bool {
 
 #[test]
 fn conflicts_overridden_keep_a_copy() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-conflict");
         let prefs = ["copyonconflict = true", "prefer = a"];
-        let s = synced(&dir, loopback, &prefs, build_tree);
+        let s = synced(&dir, via, &prefs, build_tree);
         write(&s.a(), "README", "a's version", T0 + 20.0);
         write(&s.b(), "README", "b's version", T0 + 30.0);
         assert_eq!(s.propagate_ok(), ["README"]);
@@ -247,9 +247,9 @@ fn conflicts_overridden_keep_a_copy() {
 
 #[test]
 fn a_leftover_commit_log_stops_the_run() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-log");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         block_on(files::process_commit_logs(&s.rpc, &s.roots)).unwrap();
         let log = s.base.join("u/DANGER.README");
         std::fs::write(&log, "stopped").unwrap();
@@ -264,12 +264,8 @@ fn a_leftover_commit_log_stops_the_run() {
         );
         // OCaml stops the same way.
         if let Some(unison) = std::env::var_os("GEMEL_REFERENCE_UNISON") {
-            let out = std::process::Command::new(unison)
-                .arg(s.a())
-                .arg(s.b())
+            let out = ocaml_command(&unison, &s.base, via_of(&s))
                 .args(["-batch", "-ui", "text", "-contactquietly"])
-                .env("UNISON", s.base.join("u"))
-                .env("HOME", &s.base)
                 .stdin(std::process::Stdio::null())
                 .output()
                 .unwrap();
@@ -282,10 +278,10 @@ fn a_leftover_commit_log_stops_the_run() {
 
 #[test]
 fn moves_are_renames() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-moves");
         let prefs = ["moves-experimental = true"];
-        let s = synced(&dir, loopback, &prefs, build_tree);
+        let s = synced(&dir, via, &prefs, build_tree);
         std::fs::rename(s.a().join("README"), s.a().join("READ-ME")).unwrap();
         std::fs::rename(s.b().join("src"), s.b().join("source")).unwrap();
         // The moves keep the inodes: nothing is copied.
@@ -307,8 +303,8 @@ fn moves_are_renames() {
 /// Twin replicas with the same conflicting change to `m`, which the
 /// `merge` preference says to merge with `script`.
 #[cfg(unix)]
-fn merge_conflict(dir: &TempDir, loopback: bool, prefs: &[&str]) -> Setup {
-    let s = synced(dir, loopback, prefs, |r| write(r, "m", "base\n", T0));
+fn merge_conflict(dir: &TempDir, via: Via, prefs: &[&str]) -> Setup {
+    let s = synced(dir, via, prefs, |r| write(r, "m", "base\n", T0));
     write(&s.a(), "m", "base\na\n", T0 + 20.0);
     write(&s.b(), "m", "base\nb\n", T0 + 30.0);
     s
@@ -342,9 +338,10 @@ fn merges_like_ocaml() {
     for script in scripts {
         let merge = format!("merge = Name m -> {script}");
         let prefs = [merge.as_str()];
-        for loopback in [false, true] {
+        // Not yet with a remote root (phase 5 of milestone 3).
+        for via in [Via::Direct, Via::Loopback] {
             let dir = TempDir::new("files-merge");
-            let s = merge_conflict(&dir, loopback, &prefs);
+            let s = merge_conflict(&dir, via, &prefs);
             settle(&[&s.a(), &s.b()]);
             let found = s.find();
             let (items, _, _) =
@@ -388,10 +385,8 @@ fn merges_like_ocaml() {
                 continue;
             };
             let twin_dir = TempDir::new("files-merge-ocaml");
-            let twin = merge_conflict(&twin_dir, false, &prefs);
-            let out = std::process::Command::new(&unison)
-                .arg(twin.a())
-                .arg(twin.b())
+            let twin = merge_conflict(&twin_dir, Via::Direct, &prefs);
+            let out = ocaml_command(&unison, &twin.base, via_of(&twin))
                 .args([
                     "-batch",
                     "-ui",
@@ -401,18 +396,12 @@ fn merges_like_ocaml() {
                     "-times",
                 ])
                 .arg(format!("-merge=Name m -> {script}"))
-                .env("UNISON", twin.base.join("u"))
-                .env("HOME", &twin.base)
                 .stdin(std::process::Stdio::null())
                 .output()
                 .unwrap();
             let all = String::from_utf8_lossy(&out.stdout).into_owned()
                 + &String::from_utf8_lossy(&out.stderr);
-            assert_eq!(
-                ours,
-                listings(&twin),
-                "{script} (loopback {loopback}): {all}\n{r:?}"
-            );
+            assert_eq!(ours, listings(&twin), "{script} ({via}): {all}\n{r:?}");
             // gemel fails where OCaml does.
             assert_eq!(
                 r.is_err(),
@@ -433,7 +422,7 @@ fn merges_like_ocaml() {
 #[test]
 fn diffs_run_the_diff_command() {
     let dir = TempDir::new("files-diff");
-    let s = merge_conflict(&dir, false, &[]);
+    let s = merge_conflict(&dir, Via::Direct, &[]);
     settle(&[&s.a(), &s.b()]);
     let found = s.find();
     let (items, _, _) = block_on(recon::reconcile_all(&s.rpc, &s.roots, false, found)).unwrap();
@@ -497,9 +486,9 @@ fn missing_parents_get_their_props() {
         std::fs::set_permissions(s.a().join("x/y"), PermissionsExt::from_mode(0o705)).unwrap();
         std::fs::set_permissions(s.a().join("x"), PermissionsExt::from_mode(0o750)).unwrap();
     };
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("files-parents");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         s.set_prefs(|p| p.set(&gemel_engine::globals::PATHS, vec![global("x/y/z")]));
         make(&s);
         assert_eq!(s.propagate_ok(), ["x/y/z"]);
@@ -508,7 +497,7 @@ fn missing_parents_get_their_props() {
         assert_eq!(ours, (0o750, 0o705));
         if let Some(unison) = std::env::var_os("GEMEL_REFERENCE_UNISON") {
             let twin_dir = TempDir::new("files-parents-ocaml");
-            let twin = synced(&twin_dir, false, &[], build_tree);
+            let twin = synced(&twin_dir, Via::Direct, &[], build_tree);
             make(&twin);
             let all = ocaml_sync(&unison, &twin, &["-path=x/y/z".to_owned()]);
             let theirs = (mode(&twin.b().join("x")), mode(&twin.b().join("x/y")));
@@ -538,9 +527,9 @@ fn conflict_copies_like_ocaml() {
     ];
     let prefs = ["copyonconflict = true", "prefer = a"];
     for (what, change) in changes {
-        for loopback in [false, true] {
+        for via in Via::ALL {
             let dir = TempDir::new("files-conflicts");
-            let s = synced(&dir, loopback, &prefs, build_tree);
+            let s = synced(&dir, via, &prefs, build_tree);
             change(&s.a(), &s.b());
             for (ri, r) in s.propagate() {
                 r.unwrap_or_else(|e| panic!("{what}: {:?}: {e}", ri.path1));
@@ -549,7 +538,7 @@ fn conflict_copies_like_ocaml() {
                 continue;
             };
             let twin_dir = TempDir::new("files-conflicts-ocaml");
-            let twin = synced(&twin_dir, false, &prefs, build_tree);
+            let twin = synced(&twin_dir, Via::Direct, &prefs, build_tree);
             change(&twin.a(), &twin.b());
             let all = ocaml_sync(&unison, &twin, &flags_of(&prefs));
             assert_eq!(listings(&s), listings(&twin), "{what}: {all}");

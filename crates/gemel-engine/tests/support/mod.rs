@@ -12,6 +12,37 @@ use gemel_base::features::Features;
 use gemel_base::prefs::Prefs;
 use gemel_fs::system;
 
+/// How a suite's client reaches its roots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Via {
+    /// Both roots here, their commands called directly.
+    Direct,
+    /// Both roots here, their commands sent over an in-memory connection to
+    /// a separate host, as a server would get them.
+    Loopback,
+    /// Root `b` on another host, "server", behind an in-memory connection
+    /// (as `ssh://server//...`); root `a` here.
+    Remote,
+}
+
+impl Via {
+    /// Every way.
+    pub const ALL: [Via; 3] = [Via::Direct, Via::Loopback, Via::Remote];
+}
+
+impl std::fmt::Display for Via {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Via::Direct => "direct",
+            Via::Loopback => "loopback",
+            Via::Remote => "remote",
+        })
+    }
+}
+
+/// The host name of [`Via::Remote`]'s server.
+pub const SERVER: &str = "server";
+
 /// A directory removed when dropped.
 pub struct TempDir(pub PathBuf);
 

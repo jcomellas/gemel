@@ -19,6 +19,7 @@ use gemel_fs::fileinfo::Stamp;
 use gemel_fs::osx;
 use gemel_fs::props::{Perm, Props, PropsConfig};
 use gemel_fs::system;
+use support::oracle::{ocaml_command, via_of};
 use support::sync::*;
 use support::*;
 
@@ -31,8 +32,8 @@ fn name(s: &str) -> Name {
 }
 
 /// Two roots with the same tree, scanned and committed.
-fn committed(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
-    let s = setup_in(dir, loopback, mode);
+fn committed(dir: &TempDir, via: Via, mode: Mode) -> Setup {
+    let s = setup_in(dir, via, mode);
     build_tree(&s.root("a"));
     build_tree(&s.root("b"));
     let found = s.find();
@@ -43,8 +44,8 @@ fn committed(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
 impl Setup {
     fn file(&self, i: usize, v: ArchiveVersion) -> std::path::PathBuf {
         let (name, _) =
-            archive::archive_name(self.host(), &self.roots.list()[i].fspath, v).unwrap();
-        system::os_path(&self.host().file_in_unison_dir(&name))
+            archive::archive_name(self.host_of(i), &self.roots.list()[i].fspath, v).unwrap();
+        system::os_path(&self.host_of(i).file_in_unison_dir(&name))
     }
 
     fn fspath(&self, i: usize) -> &gemel_fs::fspath::Fspath {
@@ -54,19 +55,19 @@ impl Setup {
 
 #[test]
 fn commits_write_the_same_archive_on_both_roots() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("commit");
-        let s = committed(&dir, loopback, Mode::Sensitive);
+        let s = committed(&dir, via, Mode::Sensitive);
         let mut hashes = Vec::new();
         for i in 0..2 {
             assert!(!s.file(i, ArchiveVersion::ScratchArch).exists());
             assert!(!s.file(i, ArchiveVersion::NewArch).exists());
             assert!(!s.file(i, ArchiveVersion::Lock).exists(), "unlocked");
             let f = system::name_bytes(s.file(i, ArchiveVersion::MainArch).as_os_str());
-            let data = archive::load_archive_local(s.host(), &f, &s.this_root(i))
+            let data = archive::load_archive_local(s.host_of(i), &f, &s.this_root(i))
                 .unwrap()
                 .unwrap();
-            let c = PropsConfig::default().with_features(&s.host().features().borrow());
+            let c = PropsConfig::default().with_features(&s.host_of(i).features().borrow());
             assert_eq!(
                 archive::check_archive(&data.archive, Mode::Sensitive, &c).unwrap(),
                 data.hash
@@ -91,11 +92,16 @@ fn commits_write_the_same_archive_on_both_roots() {
 #[test]
 fn different_archives_are_not_committed() {
     let dir = TempDir::new("mismatch");
-    let s = committed(&dir, true, Mode::Sensitive);
+    let s = committed(&dir, Via::Loopback, Mode::Sensitive);
     let before = std::fs::read(s.file(0, ArchiveVersion::MainArch)).unwrap();
     // Root b no longer has README.
-    update::replace_archive_local(s.host(), s.fspath(1), &local("README"), Archive::NoArchive)
-        .unwrap();
+    update::replace_archive_local(
+        s.host_of(1),
+        s.fspath(1),
+        &local("README"),
+        Archive::NoArchive,
+    )
+    .unwrap();
     let e = block_on(update::commit_updates(&s.rpc, &s.roots))
         .unwrap_err()
         .to_string();
@@ -114,9 +120,9 @@ fn different_archives_are_not_committed() {
 
 #[test]
 fn destinations_are_checked_before_writing() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("check");
-        let s = committed(&dir, loopback, Mode::Sensitive);
+        let s = committed(&dir, via, Mode::Sensitive);
         let (host, fspath) = (s.host(), s.fspath(0));
         let readme = local("README");
         let check = |fast| {
@@ -158,7 +164,7 @@ fn destinations_are_checked_before_writing() {
 #[test]
 fn archives_are_changed_after_propagation() {
     let dir = TempDir::new("props");
-    let s = committed(&dir, true, Mode::Sensitive);
+    let s = committed(&dir, Via::Loopback, Mode::Sensitive);
     let (host, fspath) = (s.host(), s.fspath(0));
     // Propagated permissions.
     let mut desc = Props::template(Perm {
@@ -205,7 +211,7 @@ fn archives_are_changed_after_propagation() {
 #[test]
 fn equal_changes_are_marked_on_both_roots() {
     let dir = TempDir::new("equal");
-    let s = committed(&dir, false, Mode::Sensitive);
+    let s = committed(&dir, Via::Direct, Mode::Sensitive);
     let stashed = Rc::new(RefCell::new(Vec::new()));
     let st = stashed.clone();
     update::set_stasher_fun(
@@ -283,7 +289,7 @@ fn equal_changes_are_marked_on_both_roots() {
 #[test]
 fn replaced_archives_are_sorted_by_the_hosts_mode() {
     let dir = TempDir::new("replace");
-    let s = committed(&dir, true, Mode::UnicodeInsensitive);
+    let s = committed(&dir, Via::Loopback, Mode::UnicodeInsensitive);
     let leaf = || Archive::Symlink(b"t".to_vec());
     // Built in case-sensitive order: "B" before "a".
     let new = Archive::Dir(
@@ -361,9 +367,9 @@ fn ocaml_accepts_what_gemel_commits() {
         eprintln!("skipped: set GEMEL_REFERENCE_UNISON to an OCaml unison");
         return;
     };
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("accepted");
-        let s = setup_in(&dir, loopback, Mode::Sensitive);
+        let s = setup_in(&dir, via, Mode::Sensitive);
         // What OCaml's startup sets for these hosts.
         s.set_prefs(|p| {
             let osx_host = cfg!(target_os = "macos");
@@ -378,16 +384,14 @@ fn ocaml_accepts_what_gemel_commits() {
         // The hash each archive was committed with.
         let hash = |i: usize| {
             let f = system::name_bytes(s.file(i, ArchiveVersion::MainArch).as_os_str());
-            archive::load_archive_local(s.host(), &f, &s.this_root(i))
+            archive::load_archive_local(s.host_of(i), &f, &s.this_root(i))
                 .unwrap()
                 .unwrap()
                 .hash
         };
         let committed = [hash(0), hash(1)];
         let ocaml = |flags: &[&str]| {
-            let out = std::process::Command::new(&unison)
-                .arg(s.base.join("a"))
-                .arg(s.base.join("b"))
+            let out = ocaml_command(&unison, &s.base, via_of(&s))
                 .args([
                     "-batch",
                     "-ui",
@@ -397,8 +401,6 @@ fn ocaml_accepts_what_gemel_commits() {
                     "-times",
                 ])
                 .args(flags)
-                .env("UNISON", s.base.join("u"))
-                .env("HOME", &s.base)
                 .output()
                 .unwrap();
             let all = format!(

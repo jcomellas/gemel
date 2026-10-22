@@ -17,6 +17,7 @@ use gemel_engine::xferhint;
 use gemel_fs::osx;
 use gemel_fs::props::PropsConfig;
 use gemel_rpc::host::Host;
+use support::oracle::ocaml_command;
 use support::sync::*;
 use support::*;
 
@@ -137,9 +138,9 @@ fn paths_under_others_and_ignored_ones_are_left_out() {
 
 #[test]
 fn scans_find_changes_against_the_archive() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("scan");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         build_tree(&s.root("a"));
 
         // No archive: everything in a is new; b is an empty directory.
@@ -194,7 +195,7 @@ fn scans_find_changes_against_the_archive() {
             data: gemel_fs::fingerprint::Fingerprint(md5("int main(void) { return 0; }")),
             ress: gemel_fs::fingerprint::Fingerprint::DUMMY,
         };
-        let (hint_root, hint_path) = xferhint::lookup(s.host(), &main_c).unwrap();
+        let (hint_root, hint_path) = xferhint::lookup(s.host_of(1), &main_c).unwrap();
         assert_eq!(hint_root, s.roots.list()[1].fspath);
         assert_eq!(hint_path.as_bytes(), b"src/main.c");
 
@@ -283,7 +284,7 @@ fn scans_find_changes_against_the_archive() {
 #[test]
 fn new_times_go_to_the_archive() {
     let dir = TempDir::new("times");
-    let s = setup(&dir, true);
+    let s = setup(&dir, Via::Loopback);
     build_tree(&s.root("a"));
     build_tree(&s.root("b"));
     let found = s.find();
@@ -306,7 +307,7 @@ fn new_times_go_to_the_archive() {
 #[test]
 fn paths_are_checked_on_the_way_down() {
     let dir = TempDir::new("paths");
-    let s = setup(&dir, true);
+    let s = setup(&dir, Via::Loopback);
     build_tree(&s.root("a"));
     s.set_prefs(|p| {
         p.set(
@@ -344,7 +345,7 @@ fn paths_are_checked_on_the_way_down() {
 #[test]
 fn unchanged_directories_are_not_read() {
     let dir = TempDir::new("dirfast");
-    let s = setup(&dir, false);
+    let s = setup(&dir, Via::Direct);
     build_tree(&s.root("a"));
     build_tree(&s.root("b"));
     let found = s.find();
@@ -377,7 +378,7 @@ fn ocamls_archives_show_no_updates() {
         eprintln!("skipped: set GEMEL_REFERENCE_UNISON to an OCaml unison");
         return;
     };
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("reference");
         let base = std::fs::canonicalize(&dir.0).unwrap();
         for side in ["a", "b"] {
@@ -385,9 +386,7 @@ fn ocamls_archives_show_no_updates() {
         }
         build_tree(&base.join("a"));
         for _ in 0..2 {
-            let out = std::process::Command::new(&unison)
-                .arg(base.join("a"))
-                .arg(base.join("b"))
+            let out = ocaml_command(&unison, &base, via)
                 .args([
                     "-batch",
                     "-ui",
@@ -396,8 +395,6 @@ fn ocamls_archives_show_no_updates() {
                     "-contactquietly",
                     "-times",
                 ])
-                .env("UNISON", base.join("u"))
-                .env("HOME", &base)
                 .output()
                 .unwrap();
             assert!(
@@ -406,7 +403,7 @@ fn ocamls_archives_show_no_updates() {
                 String::from_utf8_lossy(&out.stderr)
             );
         }
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         // What OCaml's startup sets for these hosts.
         s.set_prefs(|p| {
             let osx_host = cfg!(target_os = "macos");
@@ -436,9 +433,9 @@ fn ocamls_archives_show_no_updates() {
 /// and the archive takes the new spelling.
 #[test]
 fn respelled_names_are_the_same_file() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("respell");
-        let s = setup_in(&dir, loopback, Mode::UnicodeInsensitive);
+        let s = setup_in(&dir, via, Mode::UnicodeInsensitive);
         for side in ["a", "b"] {
             write(&s.root(side), "readme", "read me", T0);
             set_mtime(&s.root(side), T0 + 10.0);
@@ -463,7 +460,7 @@ fn respelled_names_are_the_same_file() {
 #[test]
 fn names_equal_but_for_case_are_errors() {
     let dir = TempDir::new("dup");
-    let s = setup_in(&dir, false, Mode::UnicodeInsensitive);
+    let s = setup_in(&dir, Via::Direct, Mode::UnicodeInsensitive);
     write(&s.root("a"), "A", "upper", T0);
     write(&s.root("a"), "a", "lower", T0);
     if std::fs::read_dir(s.root("a")).unwrap().count() < 2 {
@@ -484,7 +481,7 @@ fn names_equal_but_for_case_are_errors() {
 #[test]
 fn followed_links_are_their_targets() {
     let dir = TempDir::new("follow");
-    let s = setup(&dir, true);
+    let s = setup(&dir, Via::Loopback);
     build_tree(&s.root("a"));
     s.set_prefs(|p| {
         p.parse_cmd_line(&["-follow".into(), "Path link".into()])
