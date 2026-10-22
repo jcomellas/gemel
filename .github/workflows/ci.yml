@@ -49,10 +49,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ocaml make
       # OCaml looks for its watcher next to its binary first; keep it
-      # elsewhere, so that each test chooses the watcher OCaml finds.
+      # elsewhere, so that each test chooses the watcher OCaml finds. The
+      # same goes for fsmonitor.py, which OCaml's old watcher runs when it
+      # sits there and which gemel doesn't port.
       - run: |
           make -C unison-src tui fsmonitor
           mv unison-src/src/unison-fsmonitor unison-src/fsmonitor-ocaml
+          mv unison-src/src/fsmonitor.py unison-src/fsmonitor.py
       # The harness's self-test, then gemel on generated scenarios.
       - run: cargo run --locked -p gemel-oracle -- --reference unison-src/src/unison --count 20
       - run: cargo build --locked -p gemel

@@ -253,7 +253,9 @@ fn syncs_whenever_the_watcher_reports_changes() {
 }
 
 /// Without a watcher, the first sync is a whole one, then waiting for
-/// changes is an error.
+/// changes is an error. (OCaml must not have `fsmonitor.py` next to it
+/// either: its old watcher would run that script, which gemel doesn't
+/// port. OCaml's source tree has one beside the binary it builds.)
 #[test]
 fn a_watcher_that_is_not_found() {
     let (g, o) = replicas("watch-none");
