@@ -172,6 +172,54 @@ impl<A, R> ServerCmd<A, R> {
     }
 }
 
+/// Writes a stream command's argument as raw bytes.
+pub type RawWrite<A> = fn(&A, &mut Vec<u8>);
+/// Reads a stream command's argument from raw bytes.
+pub type RawRead<A> = fn(&[u8]) -> Result<A, Error>;
+/// Runs a stream command on a chunk, given the connection it came on.
+pub type StreamFn<A> = fn(Connection, A) -> LocalBoxFuture<Result<(), Error>>;
+
+/// A command whose arguments are streamed: sent without waiting for a
+/// reply, then checked for errors with a ping (`Remote.registerStreamCmd`).
+/// Its argument is raw bytes, not a marshalled value. Registering it also
+/// registers the ping (`<name>Ping`), and the command itself as a request
+/// with no result, for when streaming is off (the `stream` preference).
+pub struct StreamCmd<A> {
+    name: &'static str,
+    ping: &'static str,
+    write: RawWrite<A>,
+    read: RawRead<A>,
+    run: StreamFn<A>,
+}
+
+impl<A> StreamCmd<A> {
+    /// A command named `name`, whose ping is `ping` (`<name>Ping`).
+    pub const fn new(
+        name: &'static str,
+        ping: &'static str,
+        write: RawWrite<A>,
+        read: RawRead<A>,
+        run: StreamFn<A>,
+    ) -> Self {
+        StreamCmd {
+            name,
+            ping,
+            write,
+            read,
+            run,
+        }
+    }
+
+    /// The command's name.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+fn str_tag(name: &str) -> String {
+    format!("{name}-str")
+}
+
 /// `commandAvailable`: whether the host of a root has a command. (A root
 /// command on the wire; it runs with the connection, to see its
 /// commands.)
@@ -196,10 +244,15 @@ pub static COMMAND_AVAILABLE: ServerCmd<(Fspath, String), bool> = ServerCmd::new
 /// the argument section's body in, the result section out.
 pub type ErasedFn = Box<dyn Fn(Connection, Vec<u8>) -> LocalBoxFuture<Result<Vec<u8>, Error>>>;
 
-/// The registered commands (`serverCmds`) and section tags
-/// (`registeredSet`).
+/// A stream command's server side, erased: the connection and the chunk's
+/// section body in.
+pub type ErasedStreamFn = Box<dyn Fn(Connection, Vec<u8>) -> LocalBoxFuture<Result<(), Error>>>;
+
+/// The registered commands (`serverCmds`), stream commands
+/// (`serverStreams`) and section tags (`registeredSet`).
 pub struct Registry {
     commands: HashMap<&'static str, ErasedFn>,
+    streams: HashMap<&'static str, ErasedStreamFn>,
     tags: HashSet<String>,
 }
 
@@ -223,6 +276,7 @@ impl Registry {
     pub fn new() -> Registry {
         let mut r = Registry {
             commands: HashMap::new(),
+            streams: HashMap::new(),
             tags: HashSet::from([HEADER_TAG.to_owned()]),
         };
         for cmd in [
@@ -306,6 +360,52 @@ impl Registry {
                 })
             }),
         )
+    }
+
+    /// Registers a stream command, its ping, and the command as a request
+    /// for when streaming is off.
+    pub fn register_stream<A: 'static>(&mut self, cmd: &'static StreamCmd<A>) -> Result<(), Error> {
+        // The request, with the same raw argument and no result.
+        self.insert(
+            cmd.name,
+            Box::new(move |conn, body| {
+                Box::pin(async move {
+                    let arg = (cmd.read)(protocol::strip_tag(&args_tag(cmd.name), &body)?)?;
+                    (cmd.run)(conn.clone(), arg).await?;
+                    encode_res(conn.host(), cmd.name, |_, _| {})
+                })
+            }),
+        )?;
+        // The ping: the error the stream met, if any.
+        self.insert(
+            cmd.ping,
+            Box::new(move |conn, body| {
+                Box::pin(async move {
+                    let id = decode_args(conn.host(), cmd.ping, &body, |r, _| r.int())?;
+                    conn.stream_ping(id)?;
+                    encode_res(conn.host(), cmd.ping, |_, _| {})
+                })
+            }),
+        )?;
+        if self.streams.contains_key(cmd.name) {
+            return Err(Error::Fatal(format!("{} already registered!", cmd.name)));
+        }
+        self.register_tag(str_tag(cmd.name))?;
+        self.streams.insert(
+            cmd.name,
+            Box::new(move |conn, body| {
+                Box::pin(async move {
+                    let arg = (cmd.read)(protocol::strip_tag(&str_tag(cmd.name), &body)?)?;
+                    (cmd.run)(conn, arg).await
+                })
+            }),
+        );
+        Ok(())
+    }
+
+    /// The server side of the stream command `name`.
+    pub fn stream_fn(&self, name: &str) -> Option<&ErasedStreamFn> {
+        self.streams.get(name)
     }
 
     /// Whether a command is registered (`Remote.commandAvailable`).
@@ -397,6 +497,100 @@ impl Connection {
     pub async fn call<A, R>(&self, cmd: &'static ServerCmd<A, R>, arg: A) -> Result<R, Error> {
         let args = encode_args(self.host(), cmd.name, |w, f| (cmd.write_arg)(&arg, w, f))?;
         self.call_encoded(cmd.name, args, cmd.read_res).await
+    }
+}
+
+/// Sends a stream's chunks (`registerStreamCmd`'s client side), from
+/// [`Connection::stream`].
+pub struct StreamSender<A: 'static> {
+    conn: Connection,
+    cmd: &'static StreamCmd<A>,
+    /// The stream's id; none when streaming is off, and each chunk is a
+    /// request.
+    id: Option<u32>,
+}
+
+impl<A> StreamSender<A> {
+    /// Sends a chunk, once the earlier ones are written; with streaming
+    /// off, as a request, and waits for it to be done. Fails once the
+    /// other side has aborted the stream.
+    pub async fn send(&self, v: &A) -> Result<(), Error> {
+        let mut payload = Vec::new();
+        (self.cmd.write)(v, &mut payload);
+        let name = self.cmd.name;
+        match self.id {
+            None => {
+                let args = protocol::encode_raw_section(&args_tag(name), &payload)?;
+                self.conn.call_encoded(name, args, |_, _| Ok(())).await
+            }
+            Some(id) => {
+                if self.conn.stream_aborted_src() == id {
+                    return Err(Error::Transient("Streaming aborted".into()));
+                }
+                let message = [
+                    &protocol::encode_int(id)[..],
+                    &protocol::Header::Stream(name.to_owned()).encode()?,
+                    &protocol::encode_raw_section(&str_tag(name), &payload)?,
+                ]
+                .concat();
+                self.conn
+                    .send_and_wait(connection::Kind::Idle, message)
+                    .await
+            }
+        }
+    }
+}
+
+impl Connection {
+    /// Runs `f` with a sender for `cmd`'s chunks (`registerStreamCmd`'s
+    /// client side). Streaming (the `stream` preference, as the caller
+    /// reads it), one stream at a time on this side; once `f` is done, a
+    /// ping fails with the error the other side met, if any. Without
+    /// streaming, each chunk is a request.
+    pub async fn stream<A, T, F, Fut>(
+        &self,
+        cmd: &'static StreamCmd<A>,
+        streaming: bool,
+        f: F,
+    ) -> Result<T, Error>
+    where
+        F: FnOnce(StreamSender<A>) -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        if !streaming {
+            return f(StreamSender {
+                conn: self.clone(),
+                cmd,
+                id: None,
+            })
+            .await;
+        }
+        let id = self.endpoint().new_msg_id();
+        let result = {
+            let _one = self.endpoint().stream_turn().await;
+            f(StreamSender {
+                conn: self.clone(),
+                cmd,
+                id: Some(id),
+            })
+            .await
+        };
+        let ping = |id: u32| async move {
+            let args = encode_args(self.host(), cmd.ping, |w, _| w.int(i64::from(id)))?;
+            self.call_encoded(cmd.ping, args, |_, _| Ok(())).await
+        };
+        match result {
+            Ok(v) => {
+                ping(id).await?;
+                Ok(v)
+            }
+            Err(e) => {
+                if self.stream_aborted_src() == id {
+                    ping(id).await?;
+                }
+                Err(e)
+            }
+        }
     }
 }
 
