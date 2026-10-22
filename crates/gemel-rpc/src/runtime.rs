@@ -105,6 +105,18 @@ impl<C: Send + 'static, E: Send + 'static> EngineThread<C, E> {
     }
 }
 
+/// Runs `engine` with this thread as the engine thread, for a process
+/// that is only an engine (a server). Blocking work still under way when
+/// it ends (reading standard input, say) is left to end with the process.
+pub fn run_here<F: Future>(engine: F) -> std::io::Result<F::Output> {
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let local = tokio::task::LocalSet::new();
+    let output = local.block_on(&runtime, engine);
+    drop(local);
+    runtime.shutdown_background();
+    Ok(output)
+}
+
 /// Runs blocking work off the engine thread and waits for it.
 ///
 /// # Panics

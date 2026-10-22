@@ -9,14 +9,17 @@
 //! commands and their dispatch (called directly, or over a connection),
 //! [`connection`] connections (packets, message ids, flow control, an
 //! in-memory one for tests), [`host`] the state a host keeps for its roots,
-//! [`protocol`] the byte-exact pieces of messages, and [`runtime`] the
-//! engine thread. The handshake, the server's own loop and the transports
-//! (ssh and sockets) come later in milestone 3.
+//! [`protocol`] the byte-exact pieces of messages, [`handshake`] the
+//! version handshake, [`server`] a server's command loop, and [`runtime`]
+//! the engine thread. The transports (ssh and sockets) come later in
+//! milestone 3.
 
 pub mod connection;
+pub mod handshake;
 pub mod host;
 pub mod protocol;
 pub mod registry;
 pub mod root;
 pub mod runtime;
+pub mod server;
 pub mod terminal;

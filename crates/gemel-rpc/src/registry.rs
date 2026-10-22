@@ -45,6 +45,7 @@ use crate::connection::{self, Connection, Endpoint, HALF_DUPLEX, NEGOCIATE_FLOW_
 use crate::host::Host;
 use crate::protocol::{self, HEADER_TAG};
 use crate::root::{Host as RootHost, Root};
+use crate::server::{FORWARD_MSG_TO_CLIENT, SHOW_WARNING_ON_CLIENT};
 
 /// A future on the engine thread.
 pub type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
@@ -304,7 +305,8 @@ impl Default for Registry {
 
 impl Registry {
     /// A registry with the header tag (`"rsp"`) taken, and `remote.ml`'s
-    /// own commands: `commandAvailable` and `negociateFlowControl`.
+    /// own commands: `commandAvailable`, `negociateFlowControl`,
+    /// `showWarningOnClient` and `forwardMsgToClient`.
     pub fn new() -> Registry {
         let mut r = Registry {
             commands: HashMap::new(),
@@ -314,6 +316,8 @@ impl Registry {
         for cmd in [
             &COMMAND_AVAILABLE as &dyn Registrable,
             &NEGOCIATE_FLOW_CONTROL,
+            &SHOW_WARNING_ON_CLIENT,
+            &FORWARD_MSG_TO_CLIENT,
         ] {
             cmd.register(&mut r)
                 .unwrap_or_else(|e| unreachable!("a fresh registry: {e}"));
