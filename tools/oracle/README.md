@@ -101,7 +101,9 @@ its Unison directory. The recheck runs the reference's client and server,
 so OCaml must accept both hosts' archives.
 
 A pairing with gemel at one end is compared with the same pairing with
-`8772d26` in gemel's place, the other end unchanged. Releases differ from
+`8772d26` in gemel's place, the other end unchanged: for a gemel server,
+`--reference <client> --reference-server <8772d26> --candidate <client>
+--candidate-server <gemel>`. Releases differ from
 one another: a 2.52.1 client prints its summary differently from 2.54,
 and a 2.52.1 server sometimes writes no fingerprint cache. 2.53.8 can't
 be told apart from 2.54 at either end.

@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 2c, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 3a, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -264,6 +264,36 @@ Built over the two-host in-memory connection (design decision 3), so that the ne
   - gemel clients against OCaml servers and OCaml clients against gemel servers, for the three versions, through the shim, with whole syncs from the oracle harness;
   - the compatibility mode, through a shim that starts a 2.52 or 2.53 server without `__new-rpc-mode`.
 
+It is split in two, since gemel's server can be tested against OCaml clients before gemel has a client to go with it:
+- **3a, the server:**
+  - `gemel -server`: the handshake's server side and `commandLoop`, `beAServer` and `catch_all`;
+  - warnings and messages forwarded to the client;
+  - tests: the server's side of the handshake against OCaml's, byte for byte, and the oracle harness with OCaml clients of each version and a gemel server.
+
+  `-killserver` only matters to socket servers, so it goes to phase 4 with them.
+- **3b, the client:**
+  - the handshake's client side, with the compatibility mode and the timeout;
+  - spawned connections;
+  - `canonizeRoot` opening them, and `isRootConnected`;
+  - `copythreshold = -1` sent to servers (phase 2b's notes);
+  - tests: gemel clients against OCaml servers and against gemel's; the arguments the shim records compared with OCaml's; the user interface's suites with a remote root (phase 2c's notes).
+
+**Notes (phase 3a, 2026-10-22):**
+- **The server:** `gemel -server` (with `__new-rpc-mode`, an anonymous argument, ignored) creates the Unison directory, changes to `HOME`, and serves on standard input and output with a host of its own: every preference and command registered, the preferences at their defaults until the client sends its own (`installPrefs`), its trace marked as a server's.
+  - **Its output is the connection,** so its trace writes to standard error. It writes nothing to its Unison directory that OCaml's doesn't: its log entries go to the client, as OCaml's do.
+  - **Failures** are shown as `catch_all` shows them (`Unison server failed: ...`) and exit with 1. OCaml raises `Sys_error` for `chdir`, so that message is `path: reason`, not `reason [chdir(path)]`.
+- **The handshake's server side** (`gemel_rpc::handshake`) reads from the buffer the connection then reads its packets from (OCaml's `inputBuffer`), so nothing sent right after a line is lost, and the rest of what's buffered is what OCaml's messages quote.
+  - A refused version gets `NOK` and the reason, and the server goes on serving, as OCaml's does, until the client hangs up.
+  - OCaml's server yields as it turns flow control on, so its write token goes out before it reads anything; gemel's waits for its writer to do the same.
+  - A client that sends nothing gets nothing from OCaml's server, whose header is still buffered when it sees the end of its input. Gemel's flushes its header first. No client hangs up before it has read the header, so that's left as it is.
+- **Warnings and messages** go to the client (`showWarningOnClient`, `forwardMsgToClient`), each queued as a request as it is made, so that it goes out before the reply to the request that caused it. OCaml waits for each one's reply; gemel doesn't, which only changes timing.
+  - A trace crosses threads, so its forwarder holds a key to its connection in a table on the engine thread, not the connection itself (OCaml's forwarder is a global).
+- **`tryCopyMovedFile`** came forward from phase 5. OCaml clients see it: with a gemel server, a file moved on the server's side was sent again rather than copied there, and the log lacked OCaml's `Shortcut: copied ...`.
+- **Against OCaml:**
+  - the server's output for each kind of first line, and its failures, byte for byte (`bins/gemel/tests/server.rs`, against literals recorded from 2.54, and against OCaml's server when there is one);
+  - whole syncs from the oracle harness, an OCaml client with a gemel server against the same client with `8772d26` as its server: on Linux, 50 of 50 scenarios with an `8772d26` client, and 30 of 30 with each of 2.53.8 and 2.52.1; on macOS, 40 of 40 with Homebrew's 2.54.0. CI runs 50, then 20 for each release.
+- **Left for phase 4:** `-socket`, and with it `-killserver`, which only socket servers read.
+
 ### Phase 4: sockets, prompts and the session (`remote.ml`'s sockets, `terminal.ml`, `pty.c`, `uicommon`'s `openConnection*`, ~0.9k)
 
 - **Sockets:**
@@ -284,7 +314,7 @@ Built over the two-host in-memory connection (design decision 3), so that the ne
 ### Phase 5: the rest of transfers, and concurrency (`copy.ml`, `transport.ml`, ~0.5k)
 
 - Resuming a partial transfer: `fingerprintSubfile`, `validFilePrefix` and the append threshold.
-- Copying a moved file instead (`tryCopyMovedFile`, with `xferhint`).
+- Copying a moved file instead (`tryCopyMovedFile`, with `xferhint`): done in phase 3a, since OCaml clients see it; `registerFileTransfer`, which has concurrent transfers of the same contents wait for the first, is left for here.
 - `checkForChangesToSource` across hosts.
 - Diff and merge with a remote root, copying the other side's file to a local temporary file.
 - **Concurrency:**
@@ -292,7 +322,6 @@ Built over the two-host in-memory connection (design decision 3), so that the ne
   - before that, `exclusive` is revisited. Milestone 2's phase 6c note says its locking per piece is only safe while items run one at a time, so it holds the lock for a whole command, or OCaml's yield points are matched.
 - **Tests:**
   - an interrupted transfer resumed;
-  - a moved file;
   - remote diff and merge;
   - concurrent items, with the log order checked against OCaml's.
 
