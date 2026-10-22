@@ -593,7 +593,14 @@ impl Rpc {
     /// use), and a remote host's from [`ClientConns`].
     pub fn connection(&self, host: &RootHost) -> Result<Option<Connection>, Error> {
         match host {
-            RootHost::Local => Ok(None),
+            RootHost::Local => Ok(self.loopback.as_ref().map(|l| {
+                l.conn
+                    .get_or_init(|| {
+                        let server = Endpoint::new(self.registry.clone(), l.server.clone());
+                        connection::pipe(self.endpoint().clone(), server, self.half_duplex())
+                    })
+                    .clone()
+            })),
             RootHost::Remote(h) => self
                 .conns
                 .borrow()
@@ -675,9 +682,6 @@ impl Rpc {
     /// (For a local root, OCaml looks in its own table, as here in direct
     /// mode.)
     pub async fn command_available(&self, root: &Root, name: &str) -> Result<bool, Error> {
-        if root.is_local() {
-            return Ok(self.registry.contains(name));
-        }
         match self.connection(&root.host)? {
             None => Ok(self.registry.contains(name)),
             Some(conn) => {
@@ -719,20 +723,6 @@ impl Rpc {
         arg: A,
     ) -> Result<R, Error> {
         self.check_registered(cmd.name)?;
-        if let (RootHost::Local, Some(l)) = (host, &self.loopback) {
-            let server = l.server.clone();
-            return self
-                .round_trip(
-                    cmd.name,
-                    &l.server,
-                    |w, f| (cmd.write_arg)(&arg, w, f),
-                    cmd.read_arg,
-                    |a| (cmd.run)(server, a),
-                    cmd.write_res,
-                    cmd.read_res,
-                )
-                .await;
-        }
         match self.connection(host)? {
             None => (cmd.run)(self.client.clone(), arg).await,
             Some(conn) => {
@@ -752,23 +742,6 @@ impl Rpc {
         arg: A,
     ) -> Result<R, Error> {
         self.check_registered(cmd.name)?;
-        if let (RootHost::Local, Some(l)) = (&root.host, &self.loopback) {
-            let server = l.server.clone();
-            return self
-                .round_trip(
-                    cmd.name,
-                    &l.server,
-                    |w, f| {
-                        root.fspath.marshal(w);
-                        (cmd.write_arg)(&arg, w, f);
-                    },
-                    |r, f| Ok((Fspath::unmarshal(r)?, (cmd.read_arg)(r, f)?)),
-                    |(p, a)| (cmd.run)(server, p, a),
-                    cmd.write_res,
-                    cmd.read_res,
-                )
-                .await;
-        }
         match self.connection(&root.host)? {
             None => (cmd.run)(self.client.clone(), root.fspath.clone(), arg).await,
             Some(conn) => {
@@ -800,31 +773,6 @@ impl Rpc {
         } else {
             self.connection_of_root(local_root)?.call(cmd, arg).await
         }
-    }
-}
-
-impl Rpc {
-    /// Loopback mode for now: encodes the argument as the client would
-    /// send it, decodes it on the loopback host, runs the command there,
-    /// and brings the result back the same way.
-    #[allow(clippy::too_many_arguments)]
-    async fn round_trip<A, R>(
-        &self,
-        name: &str,
-        server: &Rc<Host>,
-        write_arg: impl FnOnce(&mut Writer, &Features),
-        read_arg: impl FnOnce(&mut Reader<'_>, &Features) -> umarshal::Result<A>,
-        run: impl FnOnce(A) -> LocalBoxFuture<Result<R, Error>>,
-        write_res: Write<R>,
-        read_res: Read<R>,
-    ) -> Result<R, Error> {
-        let args = encode_args(&self.client, name, write_arg)?;
-        let (body, _) = protocol::split_section(&args)?;
-        let arg = decode_args(server, name, body, read_arg)?;
-        let res = run(arg).await?;
-        let res = encode_res(server, name, |w, f| write_res(&res, w, f))?;
-        let f = self.client.features().borrow();
-        protocol::decode_section(&res_tag(name), &res, |r| read_res(r, &f))
     }
 }
 

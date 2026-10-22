@@ -441,11 +441,19 @@ fn features(prev_state2: bool) -> Features {
     f
 }
 
+/// Runs `f` on this thread's current-thread runtime, as the engine thread
+/// does: tasks one call starts (a loopback connection's) live on into the
+/// next.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap();
-    tokio::task::LocalSet::new().block_on(&rt, f)
+    thread_local! {
+        static ENGINE: (tokio::runtime::Runtime, tokio::task::LocalSet) = (
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+            tokio::task::LocalSet::new(),
+        );
+    }
+    ENGINE.with(|(rt, local)| local.block_on(rt, f))
 }
 
 #[test]
