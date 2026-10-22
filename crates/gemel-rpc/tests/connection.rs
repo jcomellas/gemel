@@ -144,8 +144,19 @@ static COLLECTED: HostCmd<(), Vec<Vec<u8>>> = HostCmd::new(
     },
 );
 
+/// A reply larger than a connection's output buffer.
+static BIG: HostCmd<(), Vec<u8>> = HostCmd::new(
+    "big",
+    |(), _, _| {},
+    |_, _| Ok(()),
+    |s, w, _| w.string(s),
+    |r, _| r.string(),
+    |_, ()| Box::pin(async { Ok(vec![b'x'; 40_000]) }),
+);
+
 fn registry() -> Registry {
     let mut r = Registry::new();
+    r.register_host(&BIG).unwrap();
     r.register_host(&NAME).unwrap();
     r.register_host(&CANONIZE_ON_SERVER).unwrap();
     r.register_server(&ASK_BACK).unwrap();
@@ -746,5 +757,85 @@ fn without_streaming_a_failed_chunk_fails_at_once() {
             })
             .await;
         assert_eq!(r, Err(Error::Transient("bad chunk !bad".into())));
+    });
+}
+
+/// An output that keeps what is written until it is flushed, as standard
+/// output keeps what follows the last newline.
+struct HeldUntilFlush<W> {
+    inner: W,
+    held: Vec<u8>,
+}
+
+impl<W: tokio::io::AsyncWrite + Unpin> tokio::io::AsyncWrite for HeldUntilFlush<W> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.get_mut().held.extend_from_slice(buf);
+        std::task::Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        while !this.held.is_empty() {
+            let n =
+                std::task::ready!(std::pin::Pin::new(&mut this.inner).poll_write(cx, &this.held))?;
+            this.held.drain(..n);
+        }
+        std::pin::Pin::new(&mut this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::ready!(self.as_mut().poll_flush(cx))?;
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// `f`'s output, if it comes while the other tasks run `n` times.
+async fn within<F: std::future::Future>(n: usize, f: F) -> Option<F::Output> {
+    let mut f = std::pin::pin!(f);
+    let mut left = n;
+    std::future::poll_fn(|cx| match f.as_mut().poll(cx) {
+        std::task::Poll::Ready(v) => std::task::Poll::Ready(Some(v)),
+        std::task::Poll::Pending if left == 0 => std::task::Poll::Ready(None),
+        std::task::Poll::Pending => {
+            left -= 1;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+/// A reply larger than the output buffer is flushed too, on an output
+/// that keeps what isn't (standard output, for a server ssh started).
+#[test]
+fn a_large_reply_is_flushed_on_an_output_that_buffers() {
+    block_on(async {
+        let (client_end, server_end) = tokio::io::duplex(64 * 1024);
+        let (r, w) = tokio::io::split(server_end);
+        let endpoint = Endpoint::new(Rc::new(registry()), host("server", false));
+        let output = HeldUntilFlush {
+            inner: w,
+            held: Vec::new(),
+        };
+        gemel_rpc::runtime::spawn_local(async move {
+            let _ = connection::serve(endpoint, Box::new(r), Box::new(output)).await;
+        });
+        let (r, w) = tokio::io::split(client_end);
+        let client = Endpoint::new(Rc::new(registry()), host("client", false));
+        let conn = connection::start_client(client, Box::new(r), Box::new(w), false);
+        let big = within(10_000, conn.call_host(&BIG, ()))
+            .await
+            .expect("the reply arrives");
+        assert_eq!(big.unwrap().len(), 40_000);
     });
 }
