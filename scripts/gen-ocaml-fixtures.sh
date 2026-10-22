@@ -21,6 +21,9 @@
 #   module from uicommon.ml, copied out of those files, with unicode.ml and
 #   the stand-ins in uicommon_prelude.ml) writes the vectors for
 #   gemel-ui-api's uicommon and gemel-base's truncate_string;
+# - gen_transfer.ml (checksum.ml and transfer.ml, with Unison's Lwt and
+#   stand-ins for Trace and Uutil) writes the vectors for gemel-engine's
+#   transfer;
 # - gen_unicode.ml also writes Unison's Unicode tables as Rust source, to
 #   crates/gemel-compat/src/unicode/tables.rs.
 # With an output directory, everything goes there instead (for comparing
@@ -49,6 +52,9 @@ docker run --rm \
            /unison/unicode.ml /unison/unicode_tables.ml \
            /unison/ubase/rx.mli /unison/ubase/rx.ml \
            /unison/clroot.mli /unison/clroot.ml /unison/pred.ml \
+           /unison/bytearray.mli /unison/bytearray.ml /unison/checksum.ml \
+           /unison/transfer.ml /unison/lwt/lwt.mli /unison/lwt/lwt.ml \
+           /gen/gen_transfer.ml \
            /gen/gen_fixtures.ml /gen/gen_unicode.ml /gen/gen_names.ml \
            /gen/gen_base.ml /gen/gen_rx.ml /gen/gen_pred.ml /gen/stubs/*.ml . &&
         { cat /gen/uicommon_prelude.ml &&
@@ -72,6 +78,10 @@ docker run --rm \
             safelist.ml util.ml prefs.ml rx.mli rx.ml case.ml pred.ml gen_pred.ml &&
         ocamlopt -o gen_uicommon hash_compat.c unicode_tables.ml unicode.ml safelist.ml \
             util.ml gen_uicommon.ml &&
+        ocamlopt -o gen_transfer bytearray_stubs.c umarshal.mli umarshal.ml \
+            bytearray.mli bytearray.ml safelist.ml util.ml uutil.ml trace.ml \
+            lwt.mli lwt.ml \
+            checksum.ml transfer.ml gen_transfer.ml &&
         ./gen_rx /out &&
         for p in $(./gen_rx --anchors); do ./gen_rx --anchor "$p" >> /out/rx.txt; done &&
         ./gen_fixtures /out &&
@@ -79,5 +89,6 @@ docker run --rm \
         ./gen_names /out &&
         ./gen_pred /out &&
         ./gen_uicommon /out &&
+        ./gen_transfer /out &&
         ./gen_unicode /out /tables'
 echo "wrote $out and $tables"

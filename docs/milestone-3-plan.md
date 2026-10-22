@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 1, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 2, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -192,6 +192,26 @@ Built over the two-host in-memory connection (design decision 3), so that the ne
   - the golden vectors;
   - transfers of each size class (below the rsync threshold, deltas, appends) in both directions between the two in-memory hosts;
   - every milestone 2 suite with one root on the other host.
+
+**Notes (phase 2a, 2026-10-22):**
+- **Split in two:** 2a is `transfer.ml` and `checksum.ml` on their own, synchronous and tested against OCaml's vectors; 2b is streams, `compress` and `transferFile`, the engine's copies between hosts, and the suites with a root on the other host.
+- **Vectors** (`tools/ocaml-fixtures/gen_transfer.ml`, built against the real `transfer.ml` and `checksum.ml` with Unison's Lwt and stand-ins for `Trace`, `Uutil` and `Safelist`): checksums and rolls, `sizes` around the block-size roundings (2^(2k+1) ± 1) up to 1 TiB, and twelve rsync cases and seven plain ones. For each, the block information marshalled, and every chunk sent, as its length, MD5 and token counts. A 64-bit LCG, written the same in OCaml and Rust, makes the inputs, and each case records their MD5s.
+- **What the vectors pin down:**
+  - chunks break where OCaml's queue does: 65 500 bytes, a string's flush decided on its whole length, the end token in a chunk of its own when the queue is full;
+  - blocks merge up to 255;
+  - a bucket's blocks are tried highest first, so a zero-filled old file matches its last zero block every time, and those tokens don't merge.
+
+  Breaking either of the last two fails the test.
+- **Differences from OCaml:** a chunk that isn't a valid stream, or a block past the old file's end, is a transient error, where OCaml asserts or writes whatever its buffer held. Block information whose counts don't fit its checksums is refused with OCaml's message.
+- **For 2b:**
+  - `processTransferInstruction`'s section is the tag, the encoded file id, then the raw chunk, with no umarshal frame, so it needs a raw variant of `encode_section`;
+  - OCaml waits for each idle send to be buffered before the next chunk and before the `Ping`. Phase 1's sends don't wait, and normal messages go before idle ones, so the `Ping` and `compress`'s reply could overtake chunks. Idle sends must be awaitable;
+  - stream chunks are decoded in order within the receive loop, as OCaml awaits `processStream`;
+  - the file id comes from the endpoint's message ids;
+  - the client serves `compress` too, when the destination root is remote;
+  - `streamReg`, `rsyncReg` and `transferFileReg` (only with `stream` off), and the transfers' file descriptors, are where `lwtRegionWithConnCleanup` and `resourceWithConnCleanup` come in;
+  - the decompressor copies blocks by reading and writing; OCaml's `copyFileRange` (`copy_file_range`) comes with the destination's file handling;
+  - phase 5's pieces (`validFilePrefix`, `tryCopyMovedFile`, `checkForChangesToSource` across hosts) keep their call sites and return nothing.
 
 ### Phase 3: the handshake, the server and spawned connections (`remote.ml`, ~1.2k; `main.ml`'s server mode)
 
