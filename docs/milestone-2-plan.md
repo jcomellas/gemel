@@ -1,6 +1,6 @@
 # Milestone 2: local engine and text UI
 
-*Status: done (2026-10-21) but for the optional phase 9, which is in progress · Proposed 2026-10-19 · Follows milestone 1 (compat and base, PRs #2–#6) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: done (2026-10-21; phase 9, watch mode, 2026-10-22) · Proposed 2026-10-19 · Follows milestone 1 (compat and base, PRs #2–#6) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 2 is step 2 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): a local↔local engine plus the text UI. It ends with `gemel` synchronising two local directories, with OCaml Unison's results and archive format.
 
@@ -23,7 +23,7 @@ On macOS, Linux and Windows, for generated replica trees and change scripts:
 - **2's first half:** `gemel-engine`'s `tests/archives.rs` loads real OCaml archives on all three systems, checks their order and `checkArchive` hash, and stores them back byte for byte. `tests/update.rs` runs update detection against the archives OCaml writes.
 - **3:** `gemel-ui-api`'s `tests/startup.rs` runs whole syncs from a `.prf` profile and compares them with OCaml's.
 - **4:** `bins/gemel`'s `tests/interactive.rs` and `tests/terminal.rs` (a pty, on Unix).
-- Not done in M2: synchronising xattrs and ACLs (M5), and watch mode (phase 9, optional).
+- Not done in M2: synchronising xattrs and ACLs (M5). Watch mode (phase 9) was done after the close-out.
 
 Out of scope, and how each behaves until it is done:
 
@@ -33,7 +33,7 @@ Out of scope, and how each behaves until it is done:
 | `transfer.ml` (rsync deltas) | Not needed: local copies go through `Copy.localFile` and cloning | M3 |
 | Synchronising xattrs and ACLs | The features `Sync: xattr` and `Sync: ACL` **are** registered, for their archive format (see below), but the `xattrs` and `acl` preferences are not, so nothing is synchronised | M5 (not done in M2) |
 | Move detection (feature `Sync: Moves`) | Registered; `moves-experimental` turns detection on, as in OCaml | Done in phase 5 |
-| Watch mode / `gemel-fsmonitor` | `-repeat watch` is rejected | Last phase, optional |
+| Watch mode / `gemel-fsmonitor` | `-repeat watch` and `watch+n` work | Done in phase 9 |
 | GUI | Untouched (fake engine) | M4 |
 
 **Correction (phase 1a, 2026-10-19):** this plan first said not to register the xattr and ACL features. Real archives showed that OCaml Unison 2.54 enables both whenever the two sides support them, even with the `xattrs` and `acl` preferences off. Its archives therefore always record the change time, xattr and ACL fields, and name both features in their header. If gemel left the features unregistered, it would refuse every archive OCaml writes.
@@ -554,6 +554,33 @@ Unison has no FSEvents watcher on macOS, so gemel's helper would be an improveme
 
     With `GEMEL_REFERENCE_FSMONITOR`, OCaml's helper is used instead. CI's oracle job does that.
   - The roots share one helper, and any line from it ends every wait (OCaml's `has_changes`). So a wait can end with one replica's report, before the other's changes are old enough. The tests let the changes settle after each wait.
+
+**Notes (phase 9c, 2026-10-22):**
+- **`-repeat watch` and `watch+n`** (`synchronizePathsFromFilesystemWatcher`), in the text interface:
+  - A sync, with the paths ready to retry and those delayed as `subpaths`, or a whole one every `n` seconds. Then a second's sleep (`watchinterval`), and a wait for changes: until the watcher reports one, until the next retry or whole sync (if within `maxdelay`, 30 minutes), or until a stop is asked for.
+  - A path that fails is retried at once, then after 5 seconds (`retrydelay`), doubling up to 30 minutes.
+  - `SIGUSR2` stops the program between syncs, with the last sync's exit code. Ctrl-C while it waits stops it.
+- **The session:**
+  - `Command::Update` takes `want_watcher` and the `subpaths` (the paths left unsynchronised and those delayed).
+  - `Command::WaitForChanges` waits on every root until any replica changes (OCaml's `Lwt.choose`), replying `Event::Changed`; `Interrupt` ends it.
+  - The text interface ends the wait itself for a timeout or a stop, as it reads its inputs with a timeout.
+  - Retries after failures in `-repeat n` mode also pass `wantWatcher`, as OCaml's `synchronizeUntilNoFailures` does (without `watch`, nothing starts).
+- **Debug traces as OCaml's:** the protocol's lines under `fswatch+`, the rest under `fswatch`.
+- **As in OCaml:**
+  - Without a watcher, the first sync is a whole one, then waiting stops the program: "No file monitoring helper program found" (exit code 3).
+  - A watcher that goes during a wait ends it, and the next sync scans everything and starts another. One that goes at another time stops the program at the next wait: "File monitoring helper program not running".
+- **Divergence:** a new watcher starts watching no replica (`newWatchers` is cleared).
+  - OCaml keeps the replicas the last one watched. So, of a local sync's two replicas, the one scanned after a restart is taken for watched, and its changes are never reported.
+  - A test checks gemel alone.
+- **Tests** (`bins/gemel/tests/watch.rs`, Unix):
+  - new files and deletions propagating, then `SIGUSR2`;
+  - no watcher;
+  - a watcher killed during a wait (a wrapper script records its pid), on gemel and, with `GEMEL_REFERENCE_UNISON` and `GEMEL_REFERENCE_FSMONITOR`, on OCaml with its own watcher on `PATH`;
+  - the restart divergence.
+
+  Runs are compared on the actions taken (`[BGN]` lines), the replicas left and the exit code: how many syncs it takes depends on when the watcher reports what.
+  - A test kills the watcher only once the program is waiting, which its protocol trace shows.
+  - Spawning a program just copied retries on Linux's `ETXTBSY`: a process another test forks can hold it open for a moment.
 
 ## Verification
 

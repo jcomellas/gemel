@@ -141,10 +141,19 @@ pub enum Command {
         /// Keep errors deep in a directory in its item (`allowPartial`), as
         /// the text interface does.
         allow_partial: bool,
-        /// Only these paths, and nothing under them (`subpaths`); scanning
-        /// only them needs the file watcher (phase 9).
-        paths: Option<Vec<Path<Global>>>,
+        /// Start the file watcher on the replicas if the scan is a whole
+        /// one (`wantWatcher`).
+        want_watcher: bool,
+        /// The paths left unsynchronised, and those whose retry is delayed
+        /// (`subpaths`). With a watcher running since the last whole scan,
+        /// only these and what the watcher reported are scanned; otherwise
+        /// everything is.
+        paths: update::Subpaths,
     },
+    /// `waitForChanges` on every root: replies [`Event::Changed`] once the
+    /// file watcher reports a change to any replica. [`Command::Interrupt`]
+    /// stops the wait.
+    WaitForChanges,
     /// Changes an item's action. Replies [`Event::Item`].
     SetAction(usize, SetAction),
     /// Propagates every item not propagated yet: all but the deletions,
@@ -292,6 +301,8 @@ pub enum Event {
     Synchronized(Summary),
     /// [`Command::Commit`]'s reply.
     Committed,
+    /// [`Command::WaitForChanges`]'s reply.
+    Changed,
     /// [`Command::Diff`]'s reply: the diffs shown (title and text), and
     /// why some couldn't be.
     Diff {
@@ -796,8 +807,13 @@ impl Session {
             }
             Command::Update {
                 allow_partial,
+                want_watcher,
                 paths,
-            } => self.update(allow_partial, paths).await?,
+            } => self.update(allow_partial, want_watcher, paths).await?,
+            Command::WaitForChanges => {
+                self.wait_for_changes().await?;
+                self.send(Event::Changed);
+            }
             Command::SetAction(i, a) => self.set_action(i, a)?,
             Command::Synchronize | Command::Interrupt => unreachable!("run handles it"),
             Command::Abort => self.abort(),
@@ -977,10 +993,33 @@ impl Session {
         self.ask_warnings().await
     }
 
+    /// `waitForChanges`: until the watcher reports a change to any of the
+    /// replicas (OCaml's `Lwt.choose` over the roots).
+    async fn wait_for_changes(&mut self) -> Result<(), Stop> {
+        self.connect().await?;
+        let (rpc, roots) = (self.ui.rpc(), self.roots()?);
+        let mut waits: Vec<_> = roots
+            .list()
+            .iter()
+            .map(|r| Box::pin(rpc.call_root(&gemel_engine::fswatch::WAIT_FOR_CHANGES, r, ())))
+            .collect();
+        std::future::poll_fn(|cx| {
+            for w in &mut waits {
+                if let Poll::Ready(r) = w.as_mut().poll(cx) {
+                    return Poll::Ready(r);
+                }
+            }
+            Poll::Pending
+        })
+        .await?;
+        Ok(())
+    }
+
     async fn update(
         &mut self,
         allow_partial: bool,
-        paths: Option<Vec<Path<Global>>>,
+        want_watcher: bool,
+        paths: update::Subpaths,
     ) -> Result<(), Stop> {
         self.items.borrow_mut().clear();
         self.connect().await?;
@@ -996,7 +1035,7 @@ impl Session {
                 })),
             );
         }
-        let found = update::find_updates(rpc, roots, false, paths.map(|p| (p, Vec::new()))).await;
+        let found = update::find_updates(rpc, roots, want_watcher, paths).await;
         if self.scan_status {
             uutil::set_update_status_printer(client, None);
             self.send(Event::Scanning(String::new()));

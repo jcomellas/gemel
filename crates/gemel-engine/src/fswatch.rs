@@ -26,7 +26,12 @@
 //! The old watchers of `fswatchold.ml`, which ran `fsmonitor.py` and read
 //! the changes from a file: nothing ships that script.
 //!
-//! # Divergence
+//! # Divergences
+//!
+//! When a watcher is started again, the replicas the last one watched are
+//! forgotten, so that each is scanned whole and told to the new one. OCaml
+//! keeps them: of a local sync's two replicas, the one scanned after the
+//! restart is taken for watched, and its changes are never reported.
 //!
 //! gemel looks for `gemel-fsmonitor`, then for OCaml's names:
 //! `unison-fsmonitor-2.54` (the version of the source ported) and
@@ -174,8 +179,10 @@ pub struct Slot {
     start_path: Vec<u8>,
     /// Whether to send `DEBUG` (the `fswatch` debug module).
     pub debug: bool,
-    /// The debug lines, for the host's trace.
-    pub trace: Vec<String>,
+    /// Whether to trace the lines exchanged (the `fswatch+` debug module).
+    pub verbose: bool,
+    /// The debug lines, for the host's trace, with their modules.
+    pub trace: Vec<(&'static str, String)>,
 }
 
 impl Slot {
@@ -211,9 +218,9 @@ impl Slot {
     /// `emitCmd`.
     fn emit(&mut self, cmd: &Cmd) -> Result<(), Error> {
         let line = cmd.to_line();
-        if self.debug {
+        if self.verbose {
             self.trace
-                .push(format!("<< {}", String::from_utf8_lossy(&line)));
+                .push(("fswatch+", format!("<< {}", String::from_utf8_lossy(&line))));
         }
         let c = self.current()?;
         let r = c.stdin.write_all(&line).and_then(|()| c.stdin.flush());
@@ -230,9 +237,9 @@ impl Slot {
     fn read_line(&mut self) -> Result<Vec<u8>, Error> {
         let c = self.current()?;
         let l = c.lines.recv().unwrap_or_else(|_| Err(died()))?;
-        if self.debug {
+        if self.verbose {
             self.trace
-                .push(format!(">> {}\n", String::from_utf8_lossy(&l)));
+                .push(("fswatch+", format!(">> {}\n", String::from_utf8_lossy(&l))));
         }
         Ok(l)
     }
@@ -273,7 +280,7 @@ impl Slot {
                 let mut lines = Vec::new();
                 let p = find_program(&mut |l| lines.push(l));
                 if self.debug {
-                    self.trace.extend(lines);
+                    self.trace.extend(lines.into_iter().map(|l| ("fswatch", l)));
                 }
                 self.program = Some(p.clone());
                 p
@@ -305,6 +312,10 @@ impl Slot {
             changes,
             alive,
         });
+        // A new watcher watches nothing yet. (OCaml keeps the replicas the
+        // last one watched, so after a restart a replica scanned later is
+        // taken for watched, and its changes are never reported.)
+        self.new_watchers.clear();
         Ok(true)
     }
 
@@ -314,7 +325,7 @@ impl Slot {
         if started {
             self.emit(&Cmd::Version(PROTOCOL_VERSION))?;
             if self.debug {
-                self.trace.push("debugging enabled\n".into());
+                self.trace.push(("fswatch", "debugging enabled\n".into()));
                 self.emit(&Cmd::Debug)?;
             }
             self.expect(b"VERSION", "VERSION")?;
@@ -458,14 +469,16 @@ pub async fn take(host: &Host) -> OwnedMutexGuard<Slot> {
     let slot = host.state::<Watch>().borrow().slot.clone();
     let mut guard = slot.lock_owned().await;
     let prefs = host.prefs().borrow();
-    guard.debug = gemel_base::trace::enabled(prefs.read(&gemel_base::trace::DEBUG), "fswatch");
+    let debugmods = prefs.read(&gemel_base::trace::DEBUG);
+    guard.debug = gemel_base::trace::enabled(debugmods, "fswatch");
+    guard.verbose = gemel_base::trace::enabled(debugmods, "fswatch+");
     guard
 }
 
 /// Passes the debug lines a scan collected to `host`'s trace.
 pub fn flush_trace(host: &Host, slot: &mut Slot) {
-    for l in std::mem::take(&mut slot.trace) {
-        crate::debug(host, "fswatch", || l);
+    for (module, l) in std::mem::take(&mut slot.trace) {
+        crate::debug(host, module, || l);
     }
 }
 

@@ -373,6 +373,11 @@ impl Driven {
         }
     }
 
+    /// What it has printed on stderr so far.
+    pub fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr.lock().unwrap()).into_owned()
+    }
+
     /// Types `keys`; nothing if the program has ended.
     pub fn type_keys(&mut self, keys: &[u8]) {
         let stdin = self.stdin.as_mut().unwrap();

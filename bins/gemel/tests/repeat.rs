@@ -1,6 +1,6 @@
 //! `-repeat`: the `gemel` program syncs again after each interval, in
 //! batch mode, until it is asked to stop between syncs (`SIGUSR2`), or
-//! stopped. With `GEMEL_REFERENCE_UNISON`, OCaml's `unison -ui text` is
+//! stopped (`tests/watch.rs` has `-repeat watch`). With `GEMEL_REFERENCE_UNISON`, OCaml's `unison -ui text` is
 //! driven the same way on a twin pair of replicas, and both runs must end
 //! the same.
 
@@ -69,19 +69,6 @@ fn a_setting_that_is_not_an_interval() {
             "Error: Value of 'repeat' preference (often) should be either a number, \
              'watch' or 'watch+<number>'"
         ),
-        "{r:#?}"
-    );
-}
-
-/// Watching for changes needs the file watcher (phase 9).
-#[test]
-fn watching_is_not_supported_yet() {
-    let (g, _) = changed("repeat-watch");
-    let r = common::gemel(&g, &["p", "-repeat", "watch"]);
-    assert_eq!(r.code, Some(1), "{r:#?}");
-    assert_eq!(
-        r.stderr.last().map(String::as_str),
-        Some("gemel: -repeat watch is not supported yet"),
         "{r:#?}"
     );
 }
