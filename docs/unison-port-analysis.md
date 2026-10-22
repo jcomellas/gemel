@@ -115,7 +115,7 @@ Three constraints from the Unison sources shaped this layering:
   4. GUI
   5. platform polish
 
-  The text UI is the first frontend *and* the test harness. Milestone 1 is done; milestone 2 is planned in [milestone-2-plan.md](milestone-2-plan.md).
+  The text UI is the first frontend *and* the test harness. Milestones 1 and 2 are done ([milestone-2-plan.md](milestone-2-plan.md)); milestone 3 is planned in [milestone-3-plan.md](milestone-3-plan.md).
 - **Verification:**
   - Differential testing against the OCaml binary on identical replica trees: same recon result, same final trees, byte-identical or semantically equal archives.
   - Mixed-version client/server matrices (Tier A).
