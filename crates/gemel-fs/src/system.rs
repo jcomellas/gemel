@@ -68,16 +68,22 @@ impl SysError {
     /// `Sys_error` (from channels: `open_in`, `input`, ...):
     /// `"Error in m:\n<param>: <message>"`.
     pub fn to_transient_sys(&self, what: &str) -> Error {
-        Error::Transient(format!(
-            "Error in {what}:\n{}: {}",
-            self.param,
-            self.message()
-        ))
+        Error::Transient(self.text_sys(what))
     }
 
     /// `Util.convertUnixErrorsToFatal m`.
     pub fn to_fatal(&self, what: &str) -> Error {
         Error::Fatal(self.text(what))
+    }
+
+    /// Like [`SysError::to_fatal`], for errors OCaml raises as `Sys_error`
+    /// (`Sys.chdir`): `"Error in m:\n<param>: <message>"`.
+    pub fn to_fatal_sys(&self, what: &str) -> Error {
+        Error::Fatal(self.text_sys(what))
+    }
+
+    fn text_sys(&self, what: &str) -> String {
+        format!("Error in {what}:\n{}: {}", self.param, self.message())
     }
 
     fn text(&self, what: &str) -> String {
