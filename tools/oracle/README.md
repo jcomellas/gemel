@@ -4,7 +4,8 @@ Differential test harness: it runs a candidate implementation and OCaml
 Unison (the reference) on identical generated replicas and compares the
 results. It is phase 0 of [milestone 2](../../docs/milestone-2-plan.md), and
 its agreement on all three operating systems is the milestone's definition
-of done.
+of done. With remote roots, it is phase 0 of
+[milestone 3](../../docs/milestone-3-plan.md) too.
 
 ## What a scenario is
 
@@ -63,6 +64,8 @@ scripts/oracle.sh /path/to/unison --count 30
 | `--replay FILE` | Compare the candidate with recorded outcomes, without a reference |
 | `--work DIR` | Where to work (default: a fresh temporary directory) |
 | `--keep` | Keep the work directories of scenarios that agree |
+| `--remote ssh\|socket` | Reach replica `b` through a server (see below) |
+| `--reference-server PATH`, `--candidate-server PATH` | Each side's server (default: its client) |
 
 A scenario that differs prints its operations and the first difference in
 each compared item, and its `<seed>-reference` and `<seed>-candidate`
@@ -72,6 +75,49 @@ With the reference as its own candidate, every scenario must agree. A
 candidate that runs the same unison with `-perms 0` fails every scenario,
 which shows the comparison is sensitive. CI's `oracle` job runs this
 self-test, then gemel as the candidate.
+
+## Remote roots
+
+With `--remote`, each sync reaches replica `b` through a server on the
+same machine, as milestone 3 needs (`docs/milestone-3-plan.md`):
+
+- **`ssh`:** the root is `ssh://server/b`, and `-sshcmd` is a shim that
+  runs the server command here instead of on a host. It records its
+  arguments in `remote/argv` and drops what precedes the server command
+  (`[-l user] [-p port] host -e none`). `-servercmd` names the server.
+  The shim is a shell script, so this is Unix only, and the paths must
+  have no spaces, since OCaml splits `servercmd` on them.
+- **`socket`:** the root is `socket://127.0.0.1:<port>/b`, served by a
+  fresh `-socket` server for each sync. The harness waits for "server
+  started" and kills the server afterwards: the client's preferences
+  replace the server's, `killserver` among them, so the server never
+  stops by itself.
+
+The server has its own Unison directory (`unison-server`), its home is the
+work directory (so `b` is relative to it), and the host names are fixed
+(`UNISONLOCALHOSTNAME` is `client` and `server`). The comparison adds the
+server's standard error, kept apart from the client's, and the files in
+its Unison directory. The recheck runs the reference's client and server,
+so OCaml must accept both hosts' archives.
+
+A pairing with gemel at one end is compared with the same pairing with
+`8772d26` in gemel's place, the other end unchanged. Releases differ from
+one another: a 2.52.1 client prints its summary differently from 2.54,
+and a 2.52.1 server sometimes writes no fingerprint cache. 2.53.8 can't
+be told apart from 2.54 at either end.
+
+```sh
+# Releases for the matrix, in Docker: target/oracle/unison-<version>-linux-<arch>
+scripts/build-ocaml-unison.sh /path/to/unison v2.52.1
+scripts/build-ocaml-unison.sh /path/to/unison v2.53.8
+
+# 2.54 client, 2.52.1 server, on a socket, against itself
+scripts/oracle.sh /path/to/unison --remote socket --count 10 \
+    --reference-server /work/target/oracle/unison-2.52.1-linux-<arch>
+```
+
+A candidate server that runs unison with `UNISONLOCALHOSTNAME=elsewhere`
+fails every scenario, over either transport.
 
 ## Recorded outcomes, for Windows
 
@@ -91,6 +137,18 @@ scripts/oracle.sh /path/to/unison --flavour windows --count 100 \
 # Replay, here with gemel
 cargo run -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt \
     --candidate target/debug/gemel
+```
+
+[`recorded/windows-socket.txt`](recorded/windows-socket.txt) holds 100
+Windows-flavour scenarios with replica `b` on a socket, recorded with
+`8772d26` at both ends. Its first lines say so (`remote socket`), and
+each step has the server's standard error, and each scenario the server's
+Unison directory. CI replays it with OCaml. Gemel replays it on Windows
+once it can serve on a socket (milestone 3, phase 4).
+
+```sh
+scripts/oracle.sh /path/to/unison --flavour windows --remote socket --count 100 \
+    --record /work/tools/oracle/recorded/windows-socket.txt
 ```
 
 A replay compares the same things, with what depends on the system

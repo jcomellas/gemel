@@ -64,6 +64,50 @@ jobs:
       # agrees with them here too.
       - run: cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt --candidate unison-src/src/unison
       - run: cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt --candidate target/debug/gemel
+      # Remote roots (milestone 3), over the ssh shim and on a socket: the
+      # pinned source at both ends, then mixed with the releases gemel must
+      # work with, built with the same OCaml and cached by tag. Each pairing
+      # is checked against itself; a gemel end will be checked against the
+      # pairing with the pinned source in its place.
+      - id: ocaml
+        run: echo "version=$(ocamlopt -version)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: releases
+        with:
+          path: releases
+          key: ocaml-unison-releases-v2.52.1-v2.53.8-${{ runner.os }}-ocaml-${{ steps.ocaml.outputs.version }}
+      - if: steps.releases.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: bcpierce00/unison
+          ref: v2.52.1
+          path: unison-2.52.1
+      - if: steps.releases.outputs.cache-hit != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: bcpierce00/unison
+          ref: v2.53.8
+          path: unison-2.53.8
+      # 2.52's Makefile has `text`; the build system 2.53 brought has `tui`.
+      - if: steps.releases.outputs.cache-hit != 'true'
+        run: |
+          make -C unison-2.52.1 text
+          make -C unison-2.53.8 tui
+          mkdir -p releases
+          cp unison-2.52.1/src/unison releases/unison-2.52.1
+          cp unison-2.53.8/src/unison releases/unison-2.53.8
+      - run: |
+          oracle() { cargo run --locked -q -p gemel-oracle -- "$@"; }
+          for remote in ssh socket; do
+            oracle --remote $remote --reference unison-src/src/unison --count 20
+            for v in 2.52.1 2.53.8; do
+              oracle --remote $remote --reference unison-src/src/unison --reference-server releases/unison-$v --count 10
+              oracle --remote $remote --reference releases/unison-$v --reference-server unison-src/src/unison --count 10
+            done
+          done
+        shell: bash
+      # Outcomes on a socket for Windows, still the reference's.
+      - run: cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-socket.txt --candidate unison-src/src/unison
       # gemel reads replicas as this OCaml Unison does (gemel-engine/tests/reading.rs),
       # finds no updates in the archives it writes (tests/update.rs), and accepts
       # the archives gemel commits (tests/commit.rs).

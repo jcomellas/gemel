@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: proposed (2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 0, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -8,7 +8,7 @@ Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.m
 
 For generated replica trees and change scripts, with one root reached over ssh or a socket:
 
-1. **Every pairing agrees with OCaml's,** on Linux live, on macOS against Homebrew's 2.54.0, and on Windows through recorded outcomes (see Verification). Each of these proposes the same actions and leaves the same trees as OCaml at both ends, for each server version in the matrix:
+1. **Every pairing agrees with OCaml's,** on Linux live, on macOS against Homebrew's 2.54.0, and on Windows through recorded outcomes (see Verification). Each of these proposes the same actions and leaves the same trees as the pairing with `8772d26` in place of each gemel end, for each version in the matrix:
    - a gemel client with an OCaml server;
    - an OCaml client with a gemel server;
    - gemel at both ends.
@@ -102,8 +102,36 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - gemel or OCaml;
   - which OCaml version.
 
-  It compares each pairing with OCaml against itself, the same version at both ends.
+  It compares a pairing with gemel at either end with the same pairing with `8772d26` in gemel's place: gemel × 2.52.1 with `8772d26` × 2.52.1. Releases differ from each other in what they print and in what they write (see the notes), so comparing with an OCaml version at both ends would report differences that aren't gemel's.
 - **Windows:** extends the recorded outcomes for Windows with remote scenarios over a socket, where a gemel client talks to a gemel server.
+
+**Notes (phase 0, 2026-10-22):**
+- **Builds:**
+  - `scripts/build-ocaml-unison.sh /path/to/unison <tag>` builds a release's text UI in Docker as `target/oracle/unison-<version>-linux-<arch>`: 2.52 with `make text` on bookworm, the others with `make tui` on trixie. Without a tag it builds the checked-out tree as before.
+  - CI builds both tags with apt's OCaml 4.14, which builds 2.52.1 too, so it needs no Docker. The binaries are cached by tag and compiler version.
+- **Harness** (`tools/oracle`, `--remote ssh|socket`, `--reference-server`, `--candidate-server`):
+  - **ssh:** `-sshcmd` is a shim that records its arguments, drops what precedes the server command (`[-l user] [-p port] host -e none`), and runs that command as the server. The argument order is the same in 2.52.1, 2.53.8 and `8772d26`.
+    - OCaml kills ssh as it exits (SIGTERM, then SIGKILL 10 ms later), and the server then ends on the end of its input. So the shim runs the server in a subshell the kill doesn't reach, which records the server's exit code, and the harness reads the server's standard error once the server has exited. That matters from phase 3, when a gemel server might write after the client has gone.
+    - The arguments recorded aren't checked yet; phase 3 compares those gemel passes with OCaml's.
+  - **Socket:** a fresh server for each sync, on a port the system chooses, listening on `127.0.0.1`. The harness waits for "server started", which goes to standard error, and kills the server afterwards: the client's preferences replace the server's, `killserver` included, so it never stops by itself.
+  - **The server's own state:**
+    - a Unison directory of its own;
+    - its home is the work directory, where the root `b` is;
+    - host names `client` and `server` (`UNISONLOCALHOSTNAME`);
+    - its standard error is compared on its own, since ssh would otherwise interleave it with the client's;
+    - its Unison directory is compared too.
+  - **The recheck** runs the reference pairing on the candidate's final state, so OCaml must accept both hosts' archives.
+- **What the releases do** (Linux, five scenarios of each pairing against `8772d26` at both ends):
+  - 2.53.8 can't be told apart from `8772d26` at either end, over ssh or a socket.
+  - A 2.52.1 server leaves no fingerprint cache in its Unison directory in one scenario of five.
+  - A 2.52.1 client prints its summary differently ("Propagating updates" on standard error, a line about donations) in every scenario.
+  - Every pairing agrees with itself, and the socket servers of 2.52.1 and 2.53.8 talk to `8772d26` clients in their compatibility mode.
+- **CI's oracle job:**
+  - `8772d26` at both ends, 20 scenarios over each transport;
+  - each release at each end with `8772d26` at the other, 10 scenarios each, each pairing against itself, until gemel can take an end;
+  - the recorded socket outcomes for Windows replayed with `8772d26`.
+- **Windows:** `recorded/windows-socket.txt` holds 100 Windows-flavour scenarios on a socket, recorded with `8772d26` at both ends. Gemel replays them from phase 4, when it can serve on a socket. Homebrew's 2.54.0 on macOS replays them, 100 of 100.
+- **Sensitivity:** a candidate server run with another host name differs in every scenario, over each transport.
 
 ### Phase 1: packets and dispatch (`remote.ml`, ~1.2k)
 
@@ -225,7 +253,7 @@ Built over the two-host in-memory connection (design decision 3), so that the ne
 |---|---|
 | A deadlock between flow control and ssh's buffering | Port OCaml's write tokens exactly, and keep `halfduplex`; test with large transfers in both directions at once |
 | rsync's token stream or checksums drift by a bit, which OCaml rejects or silently mis-decodes | Golden vectors from OCaml before any end-to-end test; compare the files transferred, not only the outcome |
-| 2.52.1 needs an OCaml 4 image, which may age out of Debian | The bookworm image is pinned by digest; if it stops building, 2.52 is dropped from the matrix and the plan says so |
+| 2.52.1 needs OCaml 4, which may age out of Debian, and of the CI runner's apt | Locally the bookworm image builds it. CI caches the binaries by tag and compiler version, so a runner whose apt moves to OCaml 5 fails to build them; then CI installs OCaml 4 through opam, or 2.52 is dropped from the matrix and the plan says so |
 | Prompts differ across ssh versions and platforms | Port `terminal.ml`'s patterns as they are, test them with the shim, and keep the real-sshd cell for drift |
 | ConPTY on Windows behaves differently from Unix pseudo-terminals | Phase 6 alone, after the Unix path is settled; OCaml's Windows code is the reference |
 | Concurrent transport exposes atomicity that milestone 2 relied on items running one at a time for | Revisit `exclusive` in phase 5 before turning `maxthreads` on |

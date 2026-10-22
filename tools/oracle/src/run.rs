@@ -1,10 +1,22 @@
 //! Running an implementation on a scenario and collecting what it did.
+//!
+//! With a remote root, replica `b` is reached as OCaml reaches another
+//! host, but on this one:
+//! - over ssh, through a shim given as `-sshcmd`, which runs the server
+//!   command itself instead of on a host;
+//! - on a socket, from a server the harness starts for each sync.
+//!
+//! Either way the server has a Unison directory, a home (the work
+//! directory, so that the root's path `b` is relative to it) and a host
+//! name of its own, and its standard error is kept apart from the
+//! client's.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -29,12 +41,54 @@ pub const FLAGS: &[&str] = &[
 
 const TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long a socket server may take to say it has started.
+const SERVER_START: Duration = Duration::from_secs(20);
+
+/// The host names of the two ends (`UNISONLOCALHOSTNAME`) with a remote
+/// root, which archive names and the output depend on.
+const CLIENT_HOST: &str = "client";
+const SERVER_HOST: &str = "server";
+
+/// How replica `b` is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remote {
+    Ssh,
+    Socket,
+}
+
+impl Remote {
+    pub fn name(self) -> &'static str {
+        match self {
+            Remote::Ssh => "ssh",
+            Remote::Socket => "socket",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Remote> {
+        match s {
+            "ssh" => Some(Remote::Ssh),
+            "socket" => Some(Remote::Socket),
+            _ => None,
+        }
+    }
+}
+
+/// The programs that run a sync: the client, and the server when replica
+/// `b` is remote.
+#[derive(Debug, Clone)]
+pub struct Pairing {
+    pub client: PathBuf,
+    pub server: PathBuf,
+}
+
 /// One invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
     pub exit: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    /// The server's standard error, with a remote root.
+    pub server: String,
 }
 
 /// What a replica looks like: each path's kind, permissions, content (or
@@ -50,55 +104,267 @@ pub struct Outcome {
     pub b: Snapshot,
     /// Files in the Unison directory (archives, fingerprint caches, ...).
     pub unison_dir: Vec<String>,
+    /// Files in the server's Unison directory, with a remote root.
+    pub server_dir: Vec<String>,
     /// The reference implementation, run again on this implementation's
     /// final state: it should find nothing to do.
     pub recheck: Step,
 }
 
-fn run(bin: &Path, work: &Path) -> io::Result<Step> {
-    let mut child = Command::new(bin)
-        .arg(work.join("a"))
-        .arg(work.join("b"))
+/// Reads a stream to its end on a thread of its own.
+fn drain(mut r: impl Read + Send + 'static) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = r.read_to_end(&mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
+    })
+}
+
+/// Waits for `child`, killing it after `TIMEOUT`; `None` if it was killed
+/// or died of a signal.
+fn wait(child: &mut Child) -> io::Result<Option<i32>> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status.code());
+        }
+        if start.elapsed() > TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A socket server, killed when dropped: the client's preferences replace
+/// the server's, `killserver` among them, so it never stops by itself.
+struct SocketServer {
+    child: Child,
+    port: u16,
+    stderr: Option<thread::JoinHandle<String>>,
+}
+
+impl SocketServer {
+    /// Starts `bin` serving `work`, and waits until it says so.
+    fn start(bin: &Path, work: &Path) -> io::Result<SocketServer> {
+        // A free port, as the system gives one; another process could take
+        // it before the server does, which is unlikely enough here.
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+            .local_addr()?
+            .port();
+        let mut child = Command::new(bin)
+            .args(["-socket", &port.to_string(), "-listen", "127.0.0.1"])
+            .current_dir(work)
+            .env("UNISON", work.join("unison-server"))
+            .env("HOME", work)
+            .env("UNISONLOCALHOSTNAME", SERVER_HOST)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", bin.display())))?;
+        // "server started" goes to standard error, which is read whole on
+        // a thread once the line has come.
+        let (tx, rx) = mpsc::channel();
+        let mut r = BufReader::new(child.stderr.take().expect("piped"));
+        let stderr = thread::spawn(move || {
+            let mut seen = String::new();
+            let mut line = String::new();
+            while r.read_line(&mut line).unwrap_or(0) > 0 {
+                seen.push_str(&line);
+                // A Windows server ends its lines with "\r\n".
+                if line.trim_end() == "server started" {
+                    let _ = tx.send(());
+                }
+                line.clear();
+            }
+            seen
+        });
+        let mut server = SocketServer {
+            child,
+            port,
+            stderr: Some(stderr),
+        };
+        if rx.recv_timeout(SERVER_START).is_err() {
+            let text = server.stop();
+            return Err(io::Error::other(format!(
+                "{} -socket {port} did not start:\n{text}",
+                bin.display()
+            )));
+        }
+        Ok(server)
+    }
+
+    /// Kills the server, and its standard error.
+    fn stop(&mut self) -> String {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.stderr
+            .take()
+            .map(|h| h.join().unwrap_or_default())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for SocketServer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// The `-sshcmd` shim: it records its arguments, skips what precedes the
+/// server command (`[-l user] [-p port] host -e none`), and runs that
+/// command as the server, with the server's environment and its standard
+/// error in a file of its own.
+///
+/// OCaml kills ssh as it exits (SIGTERM, then SIGKILL), and a server it
+/// reached through ssh then ends on the end of its input. So the server
+/// runs in a subshell, which the kill doesn't reach, and which writes the
+/// server's exit code to `remote/exit` once it has exited: the harness
+/// waits for that before it reads the server's standard error.
+///
+/// OCaml splits `servercmd` on spaces, so the paths it is given must have
+/// none.
+fn ssh_shim(work: &Path) -> io::Result<PathBuf> {
+    let dir = work.join("remote");
+    let shim = dir.join("ssh");
+    let path = |p: PathBuf| -> io::Result<String> {
+        let s = p.to_str().map(str::to_owned);
+        s.filter(|s| !s.contains([' ', '\'', '"', '\\', '$']))
+            .ok_or_else(|| io::Error::other(format!("{}: not a plain path", p.display())))
+    };
+    let script = format!(
+        "#!/bin/sh\n\
+         # Stands in for ssh: runs the server command here (tools/oracle/src/run.rs).\n\
+         printf '%s\\n' \"$*\" >> {log}\n\
+         while [ $# -gt 0 ] && [ \"$1\" != -e ]; do shift; done\n\
+         shift 2\n\
+         # A background command's input is /dev/null, so it comes through fd 3.\n\
+         exec 3<&0\n\
+         (\n\
+         \x20   env UNISON={unison} HOME={home} UNISONLOCALHOSTNAME={SERVER_HOST} \"$@\" <&3 3<&- 2>> {stderr}\n\
+         \x20   code=$?\n\
+         \x20   echo $code > {exit}\n\
+         \x20   exit $code\n\
+         ) &\n\
+         wait $!\n",
+        log = path(dir.join("argv"))?,
+        exit = path(dir.join("exit"))?,
+        unison = path(work.join("unison-server"))?,
+        home = path(work.to_owned())?,
+        stderr = path(dir.join("stderr"))?,
+    );
+    fs::write(&shim, script)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(shim)
+}
+
+/// The length of the ssh shim's record of the arguments it was given,
+/// which grows each time it runs a server.
+fn shim_runs(work: &Path) -> u64 {
+    fs::metadata(work.join("remote").join("argv")).map_or(0, |m| m.len())
+}
+
+fn run(p: &Pairing, remote: Option<Remote>, work: &Path) -> io::Result<Step> {
+    let mut cmd = Command::new(&p.client);
+    cmd.arg(work.join("a"));
+    let mut server = None;
+    let mut runs = 0;
+    let server_stderr = work.join("remote").join("stderr");
+    match remote {
+        None => {
+            cmd.arg(work.join("b"));
+        }
+        Some(Remote::Ssh) => {
+            if !cfg!(unix) {
+                return Err(io::Error::other(
+                    "the ssh shim is a shell script: Unix only",
+                ));
+            }
+            fs::write(&server_stderr, "")?;
+            let _ = fs::remove_file(work.join("remote").join("exit"));
+            runs = shim_runs(work);
+            cmd.arg(format!("ssh://{SERVER_HOST}/b"))
+                .arg("-sshcmd")
+                .arg(ssh_shim(work)?)
+                .arg("-servercmd")
+                .arg(&p.server);
+        }
+        Some(Remote::Socket) => {
+            let s = SocketServer::start(&p.server, work)?;
+            cmd.arg(format!("socket://127.0.0.1:{}/b", s.port));
+            server = Some(s);
+        }
+    }
+    if remote.is_some() {
+        cmd.env("UNISONLOCALHOSTNAME", CLIENT_HOST);
+    }
+    let mut child = cmd
         .args(FLAGS)
         .env("UNISON", work.join("unison"))
         .env("HOME", work)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
-    let drain = |mut r: Box<dyn Read + Send>| {
-        thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = r.read_to_end(&mut buf);
-            String::from_utf8_lossy(&buf).into_owned()
-        })
+        .spawn()
+        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.client.display())))?;
+    let out = drain(child.stdout.take().expect("piped"));
+    let err = drain(child.stderr.take().expect("piped"));
+    let exit = wait(&mut child)?;
+    let (stdout, stderr) = (
+        out.join().unwrap_or_default(),
+        err.join().unwrap_or_default(),
+    );
+    let (server, port) = match (remote, server) {
+        (None, _) => (String::new(), None),
+        (Some(Remote::Ssh), _) => {
+            // The client can finish before the server it started has; wait
+            // for the server, if the shim ran one.
+            let exit = work.join("remote").join("exit");
+            let start = Instant::now();
+            while shim_runs(work) > runs && !exit.exists() && start.elapsed() < SERVER_START {
+                thread::sleep(Duration::from_millis(20));
+            }
+            (fs::read_to_string(&server_stderr)?, None)
+        }
+        (Some(Remote::Socket), Some(mut s)) => (s.stop(), Some(s.port)),
+        (Some(Remote::Socket), None) => unreachable!("started above"),
     };
-    let out = drain(Box::new(child.stdout.take().expect("piped")));
-    let err = drain(Box::new(child.stderr.take().expect("piped")));
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break Some(status);
+    let norm = |s: &str| {
+        let s = normalize(s, work);
+        match port {
+            Some(p) => s.replace(&format!("127.0.0.1:{p}"), "127.0.0.1:<port>"),
+            None => s,
         }
-        if start.elapsed() > TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
-        }
-        thread::sleep(Duration::from_millis(20));
     };
     Ok(Step {
-        exit: status.and_then(|s| s.code()),
-        stdout: normalize(&out.join().unwrap_or_default(), work),
-        stderr: normalize(&err.join().unwrap_or_default(), work),
+        exit,
+        stdout: norm(&stdout),
+        stderr: norm(&stderr),
+        server: norm(&server),
     })
 }
 
-/// Runs `bin` through `scenario` in `work`, which is emptied first, then
-/// has `reference` recheck the result.
+fn listing(dir: &Path) -> io::Result<Vec<String>> {
+    let mut v: Vec<String> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    Ok(v)
+}
+
+/// Runs `p` through `scenario` in `work`, which is emptied first, then has
+/// `reference` recheck the result.
 pub fn outcome(
-    bin: &Path,
-    reference: &Path,
+    p: &Pairing,
+    reference: &Pairing,
+    remote: Option<Remote>,
     scenario: &Scenario,
     work: &Path,
 ) -> io::Result<Outcome> {
@@ -106,26 +372,31 @@ pub fn outcome(
         remove_all(work)?;
     }
     fs::create_dir_all(work.join("unison"))?;
+    if remote.is_some() {
+        fs::create_dir_all(work.join("unison-server"))?;
+        fs::create_dir_all(work.join("remote"))?;
+    }
     let (a, b) = (work.join("a"), work.join("b"));
     scenario::apply(&a, &scenario.initial_a)?;
     scenario::apply(&b, &scenario.initial_b)?;
-    let first = run(bin, work)?;
+    let first = run(p, remote, work)?;
     scenario::apply(&a, &scenario.changes_a)?;
     scenario::apply(&b, &scenario.changes_b)?;
-    let second = run(bin, work)?;
+    let second = run(p, remote, work)?;
     let (snap_a, snap_b) = (snapshot(&a)?, snapshot(&b)?);
-    let mut unison_dir: Vec<String> = fs::read_dir(work.join("unison"))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    unison_dir.sort();
-    let recheck = run(reference, work)?;
+    let unison_dir = listing(&work.join("unison"))?;
+    let server_dir = match remote {
+        Some(_) => listing(&work.join("unison-server"))?,
+        None => Vec::new(),
+    };
+    let recheck = run(reference, remote, work)?;
     Ok(Outcome {
         first,
         second,
         a: snap_a,
         b: snap_b,
         unison_dir,
+        server_dir,
         recheck,
     })
 }
