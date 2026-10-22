@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 0, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 1, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -155,6 +155,27 @@ There is one PR per phase, cut from `main` and merged before the next phase star
     - `-help` lists them, so `batch.rs` stops filtering `-acl` and `-xattrs` out;
     - a gemel client sends them to OCaml servers when the features are negotiated, which those accept.
 - **Tests:** dispatch, flow control and lost connections over the in-memory connection, and every milestone 2 suite through it.
+
+**Notes (phase 1, 2026-10-22):**
+- **Commits:** `xattrs`/`acl` first; then the connection layer, with loopback keeping its round trip through the codecs; then the swap on its own, which changes nothing but loopback's path.
+- **`xattrs` and `acl`:**
+  - **Four, not two:** `xattrignore` and `xattrignorenot` have the same send condition as `xattrs`. Milestone 2 registered them in `update.rs` without it, so gemel sent them to every server, and a 2.52 server, which has neither the features nor these preferences, would have refused them. All four are now sent only with their features, in `props.ml`'s place in the order: gemel-fs registers up to `xattrs`, gemel-engine the two predicates, then gemel-fs `acl`.
+  - **Refused:** each feature's validator refuses its preference set to true, enabled or not. A gemel server loading `xattrs = true` from an OCaml client doesn't refuse it yet; phase 3 decides whether its `installPrefs` should.
+  - **`prefs_dump.txt`** covers six other preferences and is unchanged.
+- **Connections** (`gemel-rpc`'s `connection` module):
+  - **Each side is an `Endpoint`:** its commands, its host and its message ids (2 up to 10⁹, then 2 again). OCaml's are a process's globals; the client and a loopback server share a process here. Replies are kept per connection.
+  - **A writer task** drains the queues: urgent writes at once and flushed, normal then idle ones only with the token, then a flush after a yield, handing the token over first when flow control is on. A token that crosses the negotiation (one that arrives after this side turned flow control off) is ignored, where OCaml would assert.
+  - **The receiver** spawns a task for each request from the other side. It doesn't yield first, as OCaml does: tokio wakes tasks that yielded in the same tick last first, which started two roots' scans in reverse and swapped the transfer hints' order.
+  - **Errors:** a fatal error from the other side becomes `Server: ...`, as in OCaml; loopback strips it, since it stands for local roots. A request for a command the server lacks gets a fatal error back, where OCaml's server stops and its client sees a lost connection.
+  - **A lost connection** (the end of the input, or any error reading or writing) fails every waiting request with "Lost connection with the server", runs the connection's close handlers, and ends `serve` quietly.
+  - **Streams:** a chunk for a stream the server doesn't know is aborted with an urgent `StreamAbort`, once, as OCaml does. `registerStreamCmd` comes with transfers (phase 2).
+  - **Checked against OCaml:** a session of Homebrew's 2.54.0 over a `tee`d ssh shim shows the server's token right after the handshake, the client's requests 2 and 3 then its token, no tokens once negotiated, and replies out of order. The tests' scripted peers expect that order.
+- **Dispatch** (`registry`): `ServerCmd` is `registerServerCmd`; `Rpc::call_root_with_connection` is `registerRootCmdWithConnection`'s client side; `commandAvailable` and `negociateFlowControl` are registered with every registry. `ClientConns` is `ClientConn`, and `Rpc::connection_checked` is `ofClrootConncheck`. A remote root without a connection gets "No connection with the server".
+- **Close handlers:** `Host::at_conn_close` and `Connection::at_close`. `resourceWithConnCleanup` and `lwtRegionWithConnCleanup` come with their first users: file descriptors and regions with transfers (phase 2), and locks with a socket server's successive clients (phase 4).
+- **The swap:**
+  - The tests' `block_on` keeps one runtime and `LocalSet` per thread, as the engine thread has one: a loopback connection's tasks, started in one call, must live into the next.
+  - A loopback host goes away once its connection's tasks have seen the connection closed, not when the client drops it. The archive test that checks a dropped host's locks lets them run first.
+- **Two hosts:** `Rpc::connect_in_memory` connects to a host standing for another machine, named with `Host::set_host_name`. A test checks that such a server names its root's archives after itself, in its own Unison directory.
 
 ### Phase 2: transferring contents (`copy.ml`'s transfers, `transfer.ml`, ~1.2k)
 
