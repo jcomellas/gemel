@@ -213,7 +213,7 @@ fn direct_and_loopback_agree() {
                 .await
                 .unwrap_err()
                 .to_string();
-            assert!(e.starts_with("Remote roots are not supported yet"), "{e}");
+            assert_eq!(e, "No connection with the server");
         }
     });
 }
