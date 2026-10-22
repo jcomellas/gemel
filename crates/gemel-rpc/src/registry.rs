@@ -147,6 +147,26 @@ pub struct ServerCmd<A, R> {
 }
 
 impl<A, R> ServerCmd<A, R> {
+    /// Decodes an argument section's body (as received), with `features`.
+    pub fn decode_arg(&self, body: &[u8], features: &Features) -> Result<A, Error> {
+        protocol::decode_section_body(&args_tag(self.name), body, |r| (self.read_arg)(r, features))
+    }
+
+    /// Encodes an argument section, with `features`.
+    pub fn encode_arg(&self, a: &A, features: &Features) -> Result<Vec<u8>, Error> {
+        protocol::encode_section(&args_tag(self.name), |w| (self.write_arg)(a, w, features))
+    }
+
+    /// Decodes a result section's body (as received), with `features`.
+    pub fn decode_res(&self, body: &[u8], features: &Features) -> Result<R, Error> {
+        protocol::decode_section_body(&res_tag(self.name), body, |r| (self.read_res)(r, features))
+    }
+
+    /// Encodes a result section, with `features`.
+    pub fn encode_res(&self, r: &R, features: &Features) -> Result<Vec<u8>, Error> {
+        protocol::encode_section(&res_tag(self.name), |w| (self.write_res)(r, w, features))
+    }
+
     /// A command named `name` (its wire name).
     pub const fn new(
         name: &'static str,
@@ -193,6 +213,18 @@ pub struct StreamCmd<A> {
 }
 
 impl<A> StreamCmd<A> {
+    /// Decodes a chunk's section body (as received).
+    pub fn decode_chunk(&self, body: &[u8]) -> Result<A, Error> {
+        (self.read)(protocol::strip_tag(&str_tag(self.name), body)?)
+    }
+
+    /// Encodes a chunk's section.
+    pub fn encode_chunk(&self, v: &A) -> Result<Vec<u8>, Error> {
+        let mut payload = Vec::new();
+        (self.write)(v, &mut payload);
+        protocol::encode_raw_section(&str_tag(self.name), &payload)
+    }
+
     /// A command named `name`, whose ping is `ping` (`<name>Ping`).
     pub const fn new(
         name: &'static str,

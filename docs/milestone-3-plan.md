@@ -191,7 +191,7 @@ Built over the two-host in-memory connection (design decision 3), so that the ne
 - **Tests:**
   - the golden vectors;
   - transfers of each size class (below the rsync threshold, deltas, appends) in both directions between the two in-memory hosts;
-  - every milestone 2 suite with one root on the other host.
+  - every milestone 2 suite with one root on the other host (phase 2c).
 
 **Notes (phase 2a, 2026-10-22):**
 - **Split in two:** 2a is `transfer.ml` and `checksum.ml` on their own, synchronous and tested against OCaml's vectors; 2b is streams, `compress` and `transferFile`, the engine's copies between hosts, and the suites with a root on the other host.
@@ -212,6 +212,24 @@ Built over the two-host in-memory connection (design decision 3), so that the ne
   - `streamReg`, `rsyncReg` and `transferFileReg` (only with `stream` off), and the transfers' file descriptors, are where `lwtRegionWithConnCleanup` and `resourceWithConnCleanup` come in;
   - the decompressor copies blocks by reading and writing; OCaml's `copyFileRange` (`copy_file_range`) comes with the destination's file handling;
   - phase 5's pieces (`validFilePrefix`, `tryCopyMovedFile`, `checkForChangesToSource` across hosts) keep their call sites and return nothing.
+
+**Notes (phase 2b, 2026-10-22):**
+- **Split again:** 2b is streams, `compress`, `transferFile` and the engine's copies between hosts, tested between two in-memory hosts; 2c runs every milestone 2 suite with root `b` on the other host. 2c needs a third setup mode in the suites' support, and a host per root wherever they look at a host's state.
+- **Streams** (`StreamCmd`, `Connection::stream`):
+  - chunks go as idle messages, each waited for until it is written (`send_and_wait`), so the ping and the reply after it can't overtake them;
+  - the receiver runs them in order, in its loop; one that fails aborts the stream (an urgent `StreamAbort`, once), the sender stops at its next chunk, and the ping brings back the error;
+  - one stream at a time leaves each side (`streamReg`, a semaphore on the endpoint);
+  - with `stream` off, each chunk is a request. `maxThreads` already read `stream`.
+- **Transfers** (`copy.rs`):
+  - the source reads on a blocking task, outside the host's lock, and the chunks come back over a channel of four; the destination decodes each chunk under the lock;
+  - a transfer's state lives on the destination's host, by the id the destination gives it, and goes when `compress` returns, as do its files. Failures propagate, and dropping releases the files and the stream's turn, so neither `resourceWithConnCleanup` nor `lwtRegionWithConnCleanup` is needed yet;
+  - `fileIsTransferred` is ported (a whole temporary file only gets its props);
+  - connections count the bytes they emit and receive (`emittedBytes`, `receivedBytes`).
+- **Checked against OCaml:** two syncs by Homebrew's 2.54.0 over a `tee`d ssh shim, the second with rsync both ways (`crates/gemel-engine/tests/captured/transfers.txt`). Every `transferFile`, `compress` (with and without block information), stream chunk and ping section decodes with gemel's codecs and encodes back to the same bytes.
+- **Moved:**
+  - `rsyncReg` and `transferFileReg` (memory and concurrency limits on transfers) go to phase 5, with items running concurrently;
+  - copying blocks with `copy_file_range` in the decompressor goes to phase 5;
+  - `copyprog` with an OCaml server: a gemel server ignores external copying with a warning, but an OCaml server decides from the client's preferences and can answer `EXTERNAL`, which the gemel client turns into an error for that file. Phase 3 sends `copythreshold = -1` to servers after the warning.
 
 ### Phase 3: the handshake, the server and spawned connections (`remote.ml`, ~1.2k; `main.ml`'s server mode)
 
