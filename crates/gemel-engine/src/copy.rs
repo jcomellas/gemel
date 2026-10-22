@@ -15,11 +15,12 @@
 //! rsync deltas ([`crate::transfer`]), and decodes the chunks streamed back
 //! (`processTransferInstruction`).
 //!
-//! Not ported yet: resuming a partial transfer (`validFilePrefix`) and
-//! copying an identical file already on the destination instead
-//! (`tryCopyMovedFile`), in phase 5 of milestone 3; external copy
-//! programs (`copyprog`), which are ignored with a warning. Their
-//! preferences are registered.
+//! A destination that already has a file with the same contents copies it
+//! instead (`tryCopyMovedFile`).
+//!
+//! Not ported yet: resuming a partial transfer (`validFilePrefix`), in
+//! phase 5 of milestone 3; external copy programs (`copyprog`), which are
+//! ignored with a warning. Their preferences are registered.
 //! A copy reports its progress to the client's progress printer
 //! ([`crate::uutil`]), and stops when everything is aborted
 //! ([`crate::abort::AllFlag`]), as it runs.
@@ -1247,6 +1248,87 @@ fn should_use_external_copyprog(prefs: &Prefs, a: &TransferArgs) -> bool {
 #[derive(Default)]
 struct WarnedCopyprog(bool);
 
+/// `tryCopyMovedFile`: copies a file this host already has with the same
+/// contents (found by `xferhint`), instead of transferring it. The copy's
+/// info and the message for the log, if it worked; if not, the hint is
+/// forgotten.
+async fn try_copy_moved_file(
+    host: &Host,
+    ctx: &Ctx,
+    a: &TransferArgs,
+) -> Result<Option<(Info, String)>, Error> {
+    if !*host.prefs().borrow().read(&xferhint::XFER_BY_COPYING) {
+        return Ok(None);
+    }
+    let Some((cand_fspath, cand_path)) = xferhint::lookup(host, &a.fp) else {
+        return Ok(None);
+    };
+    let printer = uutil::progress_printer(host);
+    let abort = host.state::<Abort>().borrow().all_flag();
+    let copied = {
+        let (ctx, a) = (ctx.clone(), a.clone());
+        exclusive::blocking(host, move || -> Result<Option<(Info, String)>, Error> {
+            // If the candidate is the replica's root, `from_root` is
+            // right; otherwise it isn't expected to be a link, and it is
+            // right still.
+            let info = fileinfo::get_basic(true, &cand_fspath, &cand_path, &|_| false, &ctx.fs)?;
+            if info.typ == Typ::Absent || info.desc.length() != a.desc.length() {
+                // The candidate has gone.
+                return Ok(None);
+            }
+            let mut progress = |n| {
+                if let Some(p) = &printer {
+                    p(a.id, n, "l");
+                }
+            };
+            let check = || abort.check();
+            local_file_contents(
+                &ctx,
+                (&cand_fspath, &cand_path),
+                (&a.fspath_to, &a.path_to),
+                &a.desc,
+                osx::ress_length(&a.ress),
+                &mut Progress {
+                    progress: &mut progress,
+                    check: &check,
+                },
+            )?;
+            // (OCaml reads the props' extended data here; gemel doesn't
+            // synchronise xattrs and ACLs yet.)
+            set_fileinfo(
+                &ctx,
+                &a.fspath_to,
+                &a.path_to,
+                &a.real_path_to,
+                a.replacing,
+                &a.desc,
+            )?;
+            let (info, transferred) = file_is_transferred(&ctx, &a)?;
+            if !transferred {
+                // The candidate has changed.
+                return Ok(None);
+            }
+            let msg = format!(
+                "Shortcut: copied {}/{} from local file {}/{}\n",
+                String::from_utf8_lossy(a.fspath_to.as_bytes()),
+                String::from_utf8_lossy(a.real_path_to.as_bytes()),
+                String::from_utf8_lossy(cand_fspath.as_bytes()),
+                String::from_utf8_lossy(cand_path.as_bytes()),
+            );
+            Ok(Some((info, msg)))
+        })
+        .await
+    };
+    match copied {
+        Ok(Some(done)) => Ok(Some(done)),
+        Ok(None) | Err(Error::Transient(_)) => {
+            xferhint::delete_entry(host, &a.fp);
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// `transferFileLocal`, on the destination's host, with the connection to
 /// the source's.
 async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<Transferred, Error> {
@@ -1287,8 +1369,15 @@ async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<T
             Some(msg),
         ));
     }
-    // Not ported yet (phase 5): copying an identical file already on this
-    // host instead (`tryCopyMovedFile`, after `registerFileTransfer`).
+    // Not ported yet (phase 5): `registerFileTransfer`, which has
+    // concurrent transfers of the same contents wait for the first.
+    if let Some((info, msg)) = try_copy_moved_file(&host, &ctx, &a).await? {
+        xferhint::insert_entry(&host, hint);
+        return Ok(Transferred::Done(
+            Box::new(TransferStatus::Succeeded(info)),
+            Some(msg),
+        ));
+    }
     if should_use_external_copyprog(&host.prefs().borrow(), &a) {
         let warned = host.state::<WarnedCopyprog>();
         if !std::mem::replace(&mut warned.borrow_mut().0, true) {

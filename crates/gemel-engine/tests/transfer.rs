@@ -660,6 +660,67 @@ fn a_file_already_transferred_is_not_sent_again() {
     );
 }
 
+/// A file the destination already has elsewhere, with the same contents, is
+/// copied there rather than sent (`tryCopyMovedFile`), and the log says
+/// so; a hint to a file that has since gone or changed is dropped, and the
+/// file sent.
+#[test]
+fn a_file_the_destination_has_is_copied_not_sent() {
+    for (case, prefs) in [
+        ("copied", &[][..]),
+        ("gone", &[]),
+        ("changed", &[]),
+        ("off", &["-xferbycopying=false"]),
+    ] {
+        let h = hosts("two-hosts-moved", prefs);
+        let contents = random(70, 100_000);
+        write_file(&h.path("a", "f"), &contents);
+        write_file(&h.path("b", "was-f"), &contents);
+        let fp = h.source("a", "f").fp;
+        let b = h.root("b").fspath.clone();
+        gemel_engine::xferhint::insert_entry(&h.server, (b.clone(), local("was-f"), fp.clone()));
+        match case {
+            "gone" => std::fs::remove_file(h.path("b", "was-f")).unwrap(),
+            "changed" => write_file(&h.path("b", "was-f"), &random(71, 100_000)),
+            _ => {}
+        }
+        let wire = h.wire();
+        h.transfer("a", "f", false)
+            .unwrap_or_else(|e| panic!("{case}: {e}"));
+        let wire = h.wire() - wire;
+        assert!(
+            std::fs::read(h.path("b", ".tmp-f")).unwrap() == contents,
+            "{case}: the copy"
+        );
+        let log = std::fs::read_to_string(h.dir.0.join("u").join("unison.log")).unwrap_or_default();
+        let b = String::from_utf8_lossy(b.as_bytes()).into_owned();
+        let shortcut = format!("Shortcut: copied {b}/f from local file {b}/was-f\n");
+        let (total, how) = h.take_progress();
+        if case == "copied" {
+            assert!(wire < 10_000, "{case}: {wire} bytes");
+            assert!(log.contains(&shortcut), "{case}: {log}");
+            // The client shows the progress a transfer would have.
+            assert_eq!(
+                (total, how),
+                (contents.len() as i64, vec!["rem".to_owned()])
+            );
+        } else {
+            assert!(wire >= contents.len() as u64, "{case}: {wire} bytes");
+            assert!(!log.contains("Shortcut"), "{case}: {log}");
+            assert_eq!(how, ["r"], "{case}");
+        }
+        // Either way, the server notes the file just made, for later
+        // copies.
+        let hint = gemel_engine::xferhint::lookup(&h.server, &fp).map(|(_, p)| p);
+        let expected = if case == "off" {
+            None
+        } else {
+            Some(local(".tmp-f"))
+        };
+        assert_eq!(hint, expected, "{case}");
+    }
+}
+
 // ---- Against OCaml's own sessions ----
 
 const CAPTURED: &str = include_str!("captured/transfers.txt");
