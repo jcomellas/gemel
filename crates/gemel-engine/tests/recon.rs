@@ -15,6 +15,7 @@ use gemel_engine::{archive, globals, moves, sortri};
 use gemel_fs::fileinfo::Typ;
 use gemel_fs::osx;
 
+use support::oracle::{ocaml_command, via_of};
 use support::sync::*;
 use support::*;
 
@@ -191,7 +192,14 @@ fn bytes2string(v: i64) -> String {
 
 /// The text UI's summary before propagating: how many items will be
 /// synced and skipped (problems and conflicts), and the bytes each way.
-fn summary(items: &[ReconItem]) -> Vec<String> {
+/// The summary of `items`, between the roots named `a` and `b` (or
+/// `local` and the server's name, with a remote root, as OCaml names them).
+fn summary(items: &[ReconItem], via: Via) -> Vec<String> {
+    let (a, b) = if via == Via::Remote {
+        ("local", SERVER)
+    } else {
+        ("a", "b")
+    };
     let (mut todo, mut skip, mut to1, mut to2) = (0, 0, 0, 0);
     for ri in items {
         if gemel_engine::common::problematic(ri) {
@@ -207,8 +215,8 @@ fn summary(items: &[ReconItem]) -> Vec<String> {
     }
     vec![
         format!("{todo} items will be synced, {skip} skipped"),
-        format!("{} to be synced from a to b", bytes2string(to2)),
-        format!("{} to be synced from b to a", bytes2string(to1)),
+        format!("{} to be synced from {a} to {b}", bytes2string(to2)),
+        format!("{} to be synced from {b} to {a}", bytes2string(to1)),
     ]
 }
 
@@ -233,8 +241,8 @@ fn conflict(reason: &str) -> Direction {
 /// which marks them equal and commits.
 /// Then a new client, as OCaml runs a new process each time (which
 /// matters for `foundArchives`), with `prefs`.
-fn synced(dir: &TempDir, loopback: bool, prefs: &[&str], build: fn(&StdPath)) -> Setup {
-    let s = setup(dir, loopback);
+fn synced(dir: &TempDir, via: Via, prefs: &[&str], build: fn(&StdPath)) -> Setup {
+    let s = setup(dir, via);
     s.init_prefs(&[]);
     build(&s.a());
     build(&s.b());
@@ -242,7 +250,7 @@ fn synced(dir: &TempDir, loopback: bool, prefs: &[&str], build: fn(&StdPath)) ->
     assert!(items.is_empty(), "{items:?}");
     assert!(equal && dangerous.is_empty());
     drop(s);
-    let s = setup(dir, loopback);
+    let s = setup(dir, via);
     s.init_prefs(prefs);
     s
 }
@@ -267,9 +275,9 @@ fn small_changes(a: &StdPath, b: &StdPath) {
 
 #[test]
 fn identical_replicas_are_marked_equal_and_committed() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("recon-equal");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         // Committed: nothing changed since.
         assert_eq!(s.reconcile(), (Vec::new(), false, Vec::new()));
         // Changed the same way on both sides: equal again.
@@ -283,9 +291,9 @@ fn identical_replicas_are_marked_equal_and_committed() {
 
 #[test]
 fn proposals_are_sorted_then_overridden() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("recon-small");
-        let s = synced(&dir, loopback, &[], small);
+        let s = synced(&dir, via, &[], small);
         small_changes(&s.a(), &s.b());
         assert_eq!(
             s.listing(),
@@ -324,7 +332,7 @@ fn proposals_are_sorted_then_overridden() {
 #[test]
 fn prefer_and_force_pick_directions() {
     let dir = TempDir::new("recon-prefer");
-    let s = synced(&dir, false, &[], small);
+    let s = synced(&dir, Via::Direct, &[], small);
     small_changes(&s.a(), &s.b());
     let directions = |prefs: &[&str]| {
         s.set_prefs(|p| {
@@ -386,7 +394,7 @@ fn prefer_and_force_pick_directions() {
 #[test]
 fn roots_are_named_by_prefix_or_suffix() {
     let dir = TempDir::new("recon-roots");
-    let s = setup(&dir, false);
+    let s = setup(&dir, Via::Direct);
     let prefs = s.rpc.client_host().prefs().borrow();
     let dir = |r: &str| recon::root_to_direction(&prefs, r);
     assert_eq!(dir("").unwrap(), None);
@@ -408,7 +416,7 @@ fn roots_are_named_by_prefix_or_suffix() {
 #[test]
 fn preferred_roots_are_checked_up_front() {
     let dir = TempDir::new("recon-check");
-    let s = setup(&dir, false);
+    let s = setup(&dir, Via::Direct);
     let check = |lines: &[&str]| {
         let mut prefs = new_prefs();
         globals::set_raw_roots(&mut prefs, &[s.raw("a"), s.raw("b")]);
@@ -446,7 +454,7 @@ fn preferred_roots_are_checked_up_front() {
 #[test]
 fn set_direction_follows_the_strength() {
     let dir = TempDir::new("recon-set");
-    let s = synced(&dir, false, &[], small);
+    let s = synced(&dir, Via::Direct, &[], small);
     small_changes(&s.a(), &s.b());
     let (mut items, _, _) = s.reconcile();
     let prefs = s.rpc.client_host().prefs();
@@ -472,11 +480,11 @@ fn set_direction_follows_the_strength() {
 
 #[test]
 fn merge_atomic_and_props_conflicts() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("recon-kinds");
         let s = synced(
             &dir,
-            loopback,
+            via,
             &["merge = Name m -> cat", "atomic = Name at"],
             |r| {
                 for f in ["m", "p", "at/x", "at/y", "same"] {
@@ -522,7 +530,7 @@ fn merge_atomic_and_props_conflicts() {
 #[test]
 fn no_prefs_and_size_threshold_make_conflicts() {
     let dir = TempDir::new("recon-no");
-    let s = synced(&dir, false, &[], |r| {
+    let s = synced(&dir, Via::Direct, &[], |r| {
         write(r, "keep/x", "x", T0);
         write(r, "big", "small", T0);
     });
@@ -574,7 +582,7 @@ fn no_prefs_and_size_threshold_make_conflicts() {
 #[test]
 fn sorting_follows_the_preferences() {
     let dir = TempDir::new("recon-sort");
-    let s = synced(&dir, false, &[], |r| write(r, "z", "z", T0));
+    let s = synced(&dir, Via::Direct, &[], |r| write(r, "z", "z", T0));
     for (f, content) in [("a/b", "12345"), ("a-b", "1"), ("B", "123"), ("z", "zz")] {
         write(&s.a(), f, content, T0 + 1.0);
     }
@@ -603,9 +611,9 @@ fn sorting_follows_the_preferences() {
 
 #[test]
 fn dangerous_paths_are_those_emptied_on_one_side() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("recon-dangerous");
-        let s = synced(&dir, loopback, &[], |r| {
+        let s = synced(&dir, via, &[], |r| {
             write(r, "d/x", "x", T0);
             write(r, "e/y", "y", T0);
             write(r, "f/z", "z", T0);
@@ -633,7 +641,7 @@ fn dangerous_paths_are_those_emptied_on_one_side() {
 #[test]
 fn equal_paths_are_marked_in_batches() {
     let dir = TempDir::new("recon-batches");
-    let s = synced(&dir, false, &[], |_| {});
+    let s = synced(&dir, Via::Direct, &[], |_| {});
     // 4999 files and their directory: 5000 equal paths, all marked by the
     // batch, which leaves the last one empty (so false, as in OCaml).
     for side in ["a", "b"] {
@@ -654,9 +662,9 @@ fn equal_paths_are_marked_in_batches() {
 
 #[test]
 fn moves_are_detected_when_asked() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("recon-moves");
-        let s = synced(&dir, loopback, &[], |r| {
+        let s = synced(&dir, via, &[], |r| {
             write(r, "old", "contents", T0);
             write(r, "dir/x", "x", T0);
             write(r, "dir/y", "y", T0);
@@ -730,11 +738,9 @@ fn moves_need_the_feature() {
 #[cfg(unix)]
 #[test]
 fn links_are_problems_when_not_synchronised() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("recon-links");
-        let s = synced(&dir, loopback, &["links = false"], |r| {
-            write(r, "f", "f", T0)
-        });
+        let s = synced(&dir, via, &["links = false"], |r| write(r, "f", "f", T0));
         std::os::unix::fs::symlink("f", s.a().join("l")).unwrap();
         std::os::unix::fs::symlink("f", s.a().join("both")).unwrap();
         write(&s.b(), "both", "file", T0);
@@ -753,9 +759,9 @@ fn links_are_problems_when_not_synchronised() {
 
 #[test]
 fn case_insensitive_spellings_pair_up() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("recon-case");
-        let s = setup_in(&dir, loopback, Mode::Insensitive);
+        let s = setup_in(&dir, via, Mode::Insensitive);
         write(&s.a(), "Dir/File", "same", T0);
         write(&s.b(), "dir/file", "same", T0);
         set_mtime(&s.a().join("Dir"), T0);
@@ -934,19 +940,17 @@ fn ocaml_proposes_the_same() {
         eprintln!("skipped: set GEMEL_REFERENCE_UNISON to an OCaml unison");
         return;
     };
-    for loopback in [false, true] {
+    for via in Via::ALL {
         for sc in scenarios() {
             let dir = TempDir::new("recon-oracle");
-            let s = synced(&dir, loopback, sc.prefs, sc.build);
+            let s = synced(&dir, via, sc.prefs, sc.build);
             (sc.change)(&s.a(), &s.b());
             // gemel first: it commits only paths updated the same way, which
             // neither lists.
             let (items, _, _) = s.reconcile();
             let found = archive::found_archives(&s.rpc);
             let ours: Vec<String> = items.iter().map(|ri| line(ri, found)).collect();
-            let out = std::process::Command::new(&unison)
-                .arg(s.a())
-                .arg(s.b())
+            let out = ocaml_command(&unison, &s.base, via_of(&s))
                 .args([
                     "-batch",
                     "-ui",
@@ -960,8 +964,6 @@ fn ocaml_proposes_the_same() {
                     let (k, v) = l.split_once(" = ").unwrap();
                     format!("-{k}={v}")
                 }))
-                .env("UNISON", s.base.join("u"))
-                .env("HOME", &s.base)
                 .stdin(std::process::Stdio::null())
                 .output()
                 .unwrap();
@@ -975,11 +977,11 @@ fn ocaml_proposes_the_same() {
             }
             let (theirs, their_summary, their_skipped) = ocaml_listing(&all);
             assert!(theirs.len() > 10, "{}: {all}", sc.name);
-            assert_eq!(summary(&items), their_summary, "{}: {all}", sc.name);
+            assert_eq!(summary(&items, via), their_summary, "{}: {all}", sc.name);
             if sc.name == "links" {
                 assert!(theirs.iter().any(|l| l.contains(" error ")), "{all}");
             }
-            assert_eq!(ours, theirs, "{} (loopback {loopback})", sc.name);
+            assert_eq!(ours, theirs, "{} ({via})", sc.name);
             assert_eq!(skipped(&items), their_skipped, "{}: {all}", sc.name);
         }
     }

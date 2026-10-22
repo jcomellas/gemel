@@ -18,6 +18,7 @@ use gemel_fs::fspath::Fspath;
 use gemel_fs::os::{self, FullFingerprint};
 use gemel_fs::osx;
 
+use support::oracle::{ocaml_command, via_of};
 use support::sync::*;
 use support::*;
 
@@ -129,9 +130,9 @@ fn mtime_of(p: &StdPath) -> f64 {
 
 #[test]
 fn copies_a_file_with_its_props() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("copy-file");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         write(&s.a(), "x", "contents", T0);
         #[cfg(unix)]
         std::fs::set_permissions(
@@ -156,7 +157,7 @@ fn copies_a_file_with_its_props() {
 #[test]
 fn large_files_copy_in_chunks() {
     let dir = TempDir::new("copy-large");
-    let s = setup(&dir, false);
+    let s = setup(&dir, Via::Direct);
     // More than the read buffer and the progress step.
     let big: String = (0..300_000)
         .map(|i| char::from(b'a' + (i % 26) as u8))
@@ -194,7 +195,7 @@ fn large_files_copy_in_chunks() {
 #[test]
 fn an_abort_stops_a_copy() {
     let dir = TempDir::new("copy-abort");
-    let s = setup(&dir, false);
+    let s = setup(&dir, Via::Direct);
     write(&s.a(), "x", &"x".repeat(200_000), T0);
     let source = s.source(0, "x");
     let mut seen = Vec::new();
@@ -242,7 +243,7 @@ fn an_abort_stops_a_copy() {
 fn replaced_files_keep_their_unsynchronised_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let dir = TempDir::new("copy-perms");
-    let s = setup(&dir, false);
+    let s = setup(&dir, Via::Direct);
     s.set_prefs(|p| p.set(&gemel_fs::props::PERMS, 0o700));
     write(&s.a(), "x", "new", T0);
     std::fs::set_permissions(s.a().join("x"), PermissionsExt::from_mode(0o755)).unwrap();
@@ -274,9 +275,9 @@ fn replaced_files_keep_their_unsynchronised_permissions() {
 
 #[test]
 fn a_source_changed_during_the_sync_fails_the_copy() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("copy-changed");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         write(&s.a(), "x", "before", T0);
         let source = s.source(0, "x");
         write(&s.a(), "x", "after the scan", T0 + 10.0);
@@ -294,9 +295,9 @@ fn a_source_changed_during_the_sync_fails_the_copy() {
 
 #[test]
 fn a_change_fast_checking_missed_is_recorded() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("copy-missed");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         write(&s.a(), "x", "same", T0);
         write(&s.b(), "x", "same", T0);
         s.commit(&s.find());
@@ -327,9 +328,9 @@ fn a_change_fast_checking_missed_is_recorded() {
 
 #[test]
 fn pseudo_fingerprints_are_checked_against_the_copy() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("copy-pseudo");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         write(&s.a(), "x", "contents", T0);
         let mut source = s.source(0, "x");
         source.fp = FullFingerprint::pseudo(b"x", 8);
@@ -369,9 +370,9 @@ fn pseudo_fingerprints_are_checked_against_the_copy() {
 
 #[test]
 fn a_bad_copy_is_kept_aside() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("copy-bad");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         write(&s.b(), "d/.unison.f.tmp", "garbled", T0);
         let roots = s.roots.list();
         let err = block_on(s.rpc.call_root(
@@ -410,7 +411,7 @@ fn a_bad_copy_is_kept_aside() {
 #[test]
 fn trees_copy_recursively() {
     let dir = TempDir::new("copy-tree");
-    let s = setup(&dir, false);
+    let s = setup(&dir, Via::Direct);
     build_tree(&s.a());
     copy::recursively(
         &s.ctx(),
@@ -436,9 +437,9 @@ fn trees_copy_recursively() {
 #[cfg(target_os = "macos")]
 #[test]
 fn resource_forks_are_copied() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("copy-rsrc");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         s.set_prefs(|p| osx::init(p, true));
         write(&s.a(), "x", "data", T0);
         let fork = s.a().join("x/..namedfork/rsrc");
@@ -461,13 +462,13 @@ fn backups_rotate_up_to_maxbackups() {
     if backup_dir_from_env() {
         return;
     }
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("stash-rotate");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         s.backups(&["backup = Name *"]);
         let backup = |s: &Setup| {
             backup_sync(
-                s.host(),
+                s.host_of(1),
                 &s.fspath(1),
                 &local("d/f"),
                 Disposition::AndRemove,
@@ -498,7 +499,7 @@ fn backups_rotate_up_to_maxbackups() {
         // By copying, the original stays.
         write(&s.b(), "d/f", "v5", T0);
         backup_sync(
-            s.host(),
+            s.host_of(1),
             &s.fspath(1),
             &local("d/f"),
             Disposition::ByCopying,
@@ -510,7 +511,7 @@ fn backups_rotate_up_to_maxbackups() {
         // Not matched by backup: just removed.
         s.backups(&["backup = Name *", "backupnot = Name f"]);
         backup_sync(
-            s.host(),
+            s.host_of(1),
             &s.fspath(1),
             &local("d/f"),
             Disposition::AndRemove,
@@ -524,9 +525,9 @@ fn backups_rotate_up_to_maxbackups() {
 
 #[test]
 fn local_backups_sit_next_to_the_file_and_are_ignored() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("stash-local");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         s.backups(&[
             "backup = Name *",
             "backuploc = local",
@@ -536,7 +537,7 @@ fn local_backups_sit_next_to_the_file_and_are_ignored() {
         for v in ["v1", "v2"] {
             write(&s.b(), "d/f", v, T0);
             backup_sync(
-                s.host(),
+                s.host_of(1),
                 &s.fspath(1),
                 &local("d/f"),
                 Disposition::AndRemove,
@@ -565,7 +566,7 @@ fn local_backups_sit_next_to_the_file_and_are_ignored() {
 #[test]
 fn backup_names_need_a_version() {
     let dir = TempDir::new("stash-names");
-    let s = setup(&dir, false);
+    let s = setup(&dir, Via::Direct);
     let init = |prefix: &str, suffix: &str| {
         s.set_prefs(|p| {
             p.load_strings(&[
@@ -601,9 +602,13 @@ fn the_current_version_is_stashed_when_marked_equal() {
     if backup_dir_from_env() {
         return;
     }
-    for loopback in [false, true] {
+    // Not with a remote root: both roots' backups go to one directory,
+    // where the second host finds the first's copy of the same file, which
+    // two hosts with their own locks would race for (real ones don't share
+    // a backup directory).
+    for via in [Via::Direct, Via::Loopback] {
         let dir = TempDir::new("stash-current");
-        let s = setup(&dir, loopback);
+        let s = setup(&dir, via);
         s.backups(&["backupcurr = Name README", "backupcurr = BelowPath src"]);
         build_tree(&s.a());
         build_tree(&s.b());
@@ -639,7 +644,7 @@ fn the_current_version_is_stashed_when_marked_equal() {
         assert_eq!(read(&backups.join("src/deep/x")), "x");
         // And it can be found again.
         let fp = s.source(1, "README").fp;
-        let found = recent_sync(s.host(), &s.fspath(1), &local("README"), &fp).unwrap();
+        let found = recent_sync(s.host_of(1), &s.fspath(1), &local("README"), &fp).unwrap();
         assert_eq!(
             found.map(|f| f.to_string()),
             Some(
@@ -650,7 +655,7 @@ fn the_current_version_is_stashed_when_marked_equal() {
         );
         let other = s.source(1, "src/main.c").fp;
         assert_eq!(
-            recent_sync(s.host(), &s.fspath(1), &local("README"), &other).unwrap(),
+            recent_sync(s.host_of(1), &s.fspath(1), &local("README"), &other).unwrap(),
             None
         );
     }
@@ -659,9 +664,7 @@ fn the_current_version_is_stashed_when_marked_equal() {
 // ---- Against OCaml ----
 
 fn ocaml(unison: &std::ffi::OsStr, s: &Setup, flags: &[String]) -> String {
-    let out = std::process::Command::new(unison)
-        .arg(s.a())
-        .arg(s.b())
+    let out = ocaml_command(unison, &s.base, via_of(s))
         .args([
             "-batch",
             "-ui",
@@ -672,8 +675,6 @@ fn ocaml(unison: &std::ffi::OsStr, s: &Setup, flags: &[String]) -> String {
             "-times",
         ])
         .args(flags)
-        .env("UNISON", s.base.join("u"))
-        .env("HOME", &s.base)
         .env_remove("UNISONBACKUPDIR")
         .env_remove("UNISONMIRRORDIR")
         .stdin(std::process::Stdio::null())
@@ -733,20 +734,20 @@ fn ocaml_ignores_the_same_backups() {
         eprintln!("skipped: set GEMEL_REFERENCE_UNISON to an OCaml unison");
         return;
     };
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("stash-oracle-ignore");
         for (k, lines) in backup_prefs(&dir.0).into_iter().enumerate() {
             let sub = TempDir::new(&format!("stash-oracle-ignore-{k}"));
-            let s = setup(&sub, loopback);
+            let s = setup(&sub, via);
             write(&s.a(), "f", "f", T0);
             ocaml(&unison, &s, &flags(&lines));
             let file = |i: usize| {
                 let (name, _) =
-                    archive::archive_name(s.host(), &s.fspath(i), ArchiveVersion::MainArch)
+                    archive::archive_name(s.host_of(i), &s.fspath(i), ArchiveVersion::MainArch)
                         .unwrap();
-                s.host().file_in_unison_dir(&name)
+                s.host_of(i).file_in_unison_dir(&name)
             };
-            let data = archive::load_archive_local(s.host(), &file(1), &s.this_root(1))
+            let data = archive::load_archive_local(s.host_of(1), &file(1), &s.this_root(1))
                 .unwrap()
                 .unwrap();
             let preds = data.props.props.find(&UPDATE_PREDICATES_KEY).unwrap();
@@ -797,7 +798,7 @@ fn ocaml_backs_up_the_same_way() {
                 for f in ["d/f", "top"] {
                     write(&s.b(), f, versions[i], T0);
                     backup_sync(
-                        s.host(),
+                        s.host_of(1),
                         &s.fspath(1),
                         &local(f),
                         Disposition::AndRemove,
@@ -826,10 +827,10 @@ fn ocaml_backs_up_the_same_way() {
                 .collect()
         };
         let theirs_lines = rebase(&lines, &theirs_dir.0);
-        let theirs = setup(&theirs_dir, false);
+        let theirs = setup(&theirs_dir, Via::Direct);
         steps(&theirs, &theirs_lines, false);
         let ours_lines = rebase(&lines, &ours_dir.0);
-        let ours = setup(&ours_dir, false);
+        let ours = setup(&ours_dir, Via::Direct);
         ours.backups(&ours_lines.iter().map(String::as_str).collect::<Vec<_>>());
         steps(&ours, &ours_lines, true);
         let backups = |s: &Setup| {

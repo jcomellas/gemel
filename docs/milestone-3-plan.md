@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 2, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 2c, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -230,6 +230,19 @@ Built over the two-host in-memory connection (design decision 3), so that the ne
   - `rsyncReg` and `transferFileReg` (memory and concurrency limits on transfers) go to phase 5, with items running concurrently;
   - copying blocks with `copy_file_range` in the decompressor goes to phase 5;
   - `copyprog` with an OCaml server: a gemel server ignores external copying with a warning, but an OCaml server decides from the client's preferences and can answer `EXTERNAL`, which the gemel client turns into an error for that file. Phase 3 sends `copythreshold = -1` to servers after the warning.
+
+**Notes (phase 2c, 2026-10-22):**
+- **Three ways** (`Via` in the engine suites' support): direct, loopback, and remote, where root `b` is `ssh://server//...` behind an in-memory connection to a host named "server", which keeps its archives in the same Unison directory. `archives`, `commit`, `copy`, `files`, `recon`, `transport`, `update` and `watch` run each test all three ways.
+- **The remote root is installed as a real one will be:** `Roots::install` canonizes it over the connection to its server (`canonizeRoot`'s second half: `canonizeOnServer`, then the connection is registered under the canonical root). Only opening the connection waits for phase 3.
+- **OCaml is run the same way:** with a remote root, the suites' OCaml runs reach root `b` as `ssh://server//...` through an `-sshcmd` shim that starts an OCaml server named "server", so OCaml sees the archives gemel's two hosts wrote. Reconciliation, propagation, moves, failures and the archives agree with OCaml's in remote mode.
+- **What the suites found:**
+  - **Concurrency:** with a remote root, items ran up to `maxthreads` at once, which milestone 2 found unsafe with `exclusive` locking pieces, not commands: an abort from another thread no longer stopped items that hadn't started. They run one at a time until phase 5. OCaml runs them concurrently, so its log interleaves `[END]` lines with the next items' `[BGN]`; until phase 5, the remote comparison takes the `[END]` lines without their order.
+  - **Error wording:** a transfer's destination opens its file as the first chunk is decoded, so OCaml's error reads "Error in processing a transfer instruction"; gemel used the source's wording.
+  - **A stray log:** phase 2b's two-host tests logged in the crate's directory, and committed `unison.log`; they log in their own now.
+- **Left out of remote mode:**
+  - merging (`files`' and `transport`'s merge tests), which is phase 5;
+  - one stasher test, where both hosts back up the same file into one shared backup directory, which real hosts don't share.
+- **Not yet:** the user interface's suites (`gemel-ui-api`'s `startup` and `session`, and `bins/gemel`'s) start from a profile, so their remote roots need a real connection: phase 3, with the oracle's remote mode.
 
 ### Phase 3: the handshake, the server and spawned connections (`remote.ml`, ~1.2k; `main.ml`'s server mode)
 

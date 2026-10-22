@@ -35,9 +35,9 @@ fn helper() -> PathBuf {
 }
 
 /// Two replicas with the same tree, synchronised, and `watch` set.
-fn synced(dir: &TempDir, loopback: bool) -> Setup {
+fn synced(dir: &TempDir, via: Via) -> Setup {
     fswatch::set_program(Some(helper()));
-    let s = setup(dir, loopback);
+    let s = setup(dir, via);
     build_tree(&s.a());
     build_tree(&s.b());
     let found = s.find();
@@ -104,9 +104,9 @@ fn v(l: &[&str]) -> Vec<String> {
 
 #[test]
 fn only_what_the_watcher_reports_is_scanned() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("watch-only");
-        let s = synced(&dir, loopback);
+        let s = synced(&dir, via);
         // The first scan with a watcher scans everything, and starts it.
         assert_eq!(changed(&find_watching(&s, None)), none());
         write(&s.a(), "new", "n", T0 + 50.0);
@@ -114,7 +114,7 @@ fn only_what_the_watcher_reports_is_scanned() {
         let found = find_watching(&s, reported());
         // The watcher reports a change once it is half a second old.
         if start.elapsed() < Duration::from_millis(400) {
-            assert_eq!(changed(&found), none(), "loopback {loopback}");
+            assert_eq!(changed(&found), none(), "{via}");
         }
         // The paths left unsynchronised are scanned whatever the watcher
         // says, and a scan without them scans everything.
@@ -133,7 +133,7 @@ fn only_what_the_watcher_reports_is_scanned() {
         wait_on(&s, 1);
         let found = find_watching(&s, reported());
         let (a, b) = changed(&found);
-        assert_eq!(b, v(&["src"]), "loopback {loopback}");
+        assert_eq!(b, v(&["src"]), "{via}");
         // The watcher has nothing more to say about a/new.
         assert!(a.is_empty() || a == v(&["new"]), "{a:?}");
     }
@@ -141,9 +141,9 @@ fn only_what_the_watcher_reports_is_scanned() {
 
 #[test]
 fn the_watcher_finds_what_a_full_scan_finds() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("watch-same");
-        let s = synced(&dir, loopback);
+        let s = synced(&dir, via);
         assert_eq!(changed(&find_watching(&s, None)), none());
         // Changes of each kind, on both sides.
         write(&s.a(), "README", "changed", T0 + 60.0);
@@ -156,7 +156,7 @@ fn the_watcher_finds_what_a_full_scan_finds() {
         wait(&s);
         let watched = find_watching(&s, reported());
         let full = s.find();
-        assert_eq!(shapes(&watched), shapes(&full), "loopback {loopback}");
+        assert_eq!(shapes(&watched), shapes(&full), "{via}");
         assert_eq!(
             changed(&full),
             (
@@ -212,9 +212,9 @@ fn emptied(ui: &UpdateItem) -> bool {
 
 #[test]
 fn only_a_whole_scan_says_a_directory_was_emptied() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("watch-emptied");
-        let s = synced(&dir, loopback);
+        let s = synced(&dir, via);
         assert_eq!(changed(&find_watching(&s, None)), none());
         std::fs::remove_file(s.a().join("src/deep/x")).unwrap();
         wait_on(&s, 0);
@@ -229,21 +229,17 @@ fn only_a_whole_scan_says_a_directory_was_emptied() {
         // it was. On Windows a deletion counts as a change to its
         // directory, as with OCaml's Windows watcher, so the watcher
         // reports src/deep itself, which is scanned whole.
-        assert!(emptied(&deep(&full)), "loopback {loopback}");
-        assert_eq!(
-            emptied(&deep(&watched)),
-            cfg!(windows),
-            "loopback {loopback}"
-        );
+        assert!(emptied(&deep(&full)), "{via}");
+        assert_eq!(emptied(&deep(&watched)), cfg!(windows), "{via}");
         assert_eq!(names(&deep(&watched)), names(&deep(&full)));
     }
 }
 
 #[test]
 fn directories_a_watched_scan_finds_are_watched() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("watch-new");
-        let s = synced(&dir, loopback);
+        let s = synced(&dir, via);
         assert_eq!(changed(&find_watching(&s, None)), none());
         std::fs::create_dir(s.a().join("made")).unwrap();
         std::fs::create_dir(s.b().join("made")).unwrap();

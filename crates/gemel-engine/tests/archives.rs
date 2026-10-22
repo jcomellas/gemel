@@ -410,23 +410,28 @@ fn root_aliases_and_names() {
 
 // ---- Commands on both roots ----
 
-/// A client with two local roots in `dir`, its archives in `dir/u`, and
+/// A client with roots `a` and `b` in `dir` (`b` on another host with
+/// [`Via::Remote`]), its archives in `dir/u` (the server's too), and
 /// warnings collected.
 struct Setup {
     rpc: Rpc,
     roots: Roots,
     warnings: Rc<RefCell<Vec<String>>>,
     unison_dir: PathBuf,
+    server: Option<Rc<Host>>,
 }
 
 const HOST_NAME: &str = "gemel-test-host";
 
-fn setup(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
-    let raw = ["a", "b"].map(|n| {
+fn setup(dir: &TempDir, via: Via, mode: Mode) -> Setup {
+    let mut raw = ["a", "b"].map(|n| {
         let p = dir.0.join(n);
         std::fs::create_dir_all(&p).unwrap();
         p.to_str().unwrap().to_owned()
     });
+    if via == Via::Remote {
+        raw[1] = format!("ssh://{SERVER}/{}", raw[1]);
+    }
     let unison_dir = dir.0.join("u");
     std::fs::create_dir_all(&unison_dir).unwrap();
     let mut prefs = new_prefs();
@@ -441,7 +446,7 @@ fn setup(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
     let warnings = Rc::new(RefCell::new(Vec::new()));
     let w = warnings.clone();
     client.set_warn_printer(Some(Rc::new(move |s| w.borrow_mut().push(s.to_owned()))));
-    let dispatch = if loopback {
+    let dispatch = if via == Via::Loopback {
         let server = Host::loopback_server(
             &client.prefs().borrow(),
             &client.features().borrow(),
@@ -459,8 +464,24 @@ fn setup(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
     };
     let mut rpc = Rpc::new(dispatch);
     gemel_engine::register_commands(&mut rpc).unwrap();
+    let server = (via == Via::Remote).then(|| {
+        let server = Rc::new(Host::server(new_prefs(), new_features()));
+        server.set_host_name(SERVER);
+        server.set_unison_dir(&unison_dir);
+        let w = warnings.clone();
+        server.set_warn_printer(Some(Rc::new(move |s| w.borrow_mut().push(s.to_owned()))));
+        server
+    });
     let roots = block_on(async {
         let raw = globals::raw_roots(&rpc.client_host().prefs().borrow());
+        if let Some(server) = &server {
+            let clroot = gemel_base::clroot::parse_root(&raw[1]).unwrap();
+            let provisional = gemel_rpc::root::Root {
+                host: gemel_rpc::root::Host::Remote(SERVER.into()),
+                fspath: Fspath::from_canonical(b"/".to_vec()),
+            };
+            rpc.connect_in_memory(clroot, provisional, server.clone());
+        }
         let roots = Roots::install(&rpc, &raw).await.unwrap();
         archive::store_roots_name(&rpc, &roots).unwrap();
         globals::propagate_prefs(&rpc, &roots).await.unwrap();
@@ -471,6 +492,7 @@ fn setup(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
         roots,
         warnings,
         unison_dir,
+        server,
     }
 }
 
@@ -479,21 +501,29 @@ impl Setup {
         self.rpc.local_host()
     }
 
+    /// The host of root `i` (in the user's order).
+    fn host_of(&self, i: usize) -> &Host {
+        match (&self.roots.list()[i].host, &self.server) {
+            (gemel_rpc::root::Host::Remote(_), Some(server)) => server,
+            _ => self.host(),
+        }
+    }
+
     /// The file of `v` for root `i` (0 or 1, in the user's order).
     fn file(&self, i: usize, v: ArchiveVersion) -> PathBuf {
         let (name, _) =
-            archive::archive_name(self.host(), &self.roots.list()[i].fspath, v).unwrap();
+            archive::archive_name(self.host_of(i), &self.roots.list()[i].fspath, v).unwrap();
         self.unison_dir.join(name)
     }
 
     fn this_root(&self, i: usize) -> String {
-        archive::this_roots_global_name(self.host(), &self.roots.list()[i].fspath).unwrap()
+        archive::this_roots_global_name(self.host_of(i), &self.roots.list()[i].fspath).unwrap()
     }
 
     /// Stores `data` as root `i`'s main archive.
     fn store(&self, i: usize, data: &ArchiveData) {
         let f = system::name_bytes(self.file(i, ArchiveVersion::MainArch).as_os_str());
-        archive::store_archive_local(self.host(), &f, &self.this_root(i), data).unwrap();
+        archive::store_archive_local(self.host_of(i), &f, &self.this_root(i), data).unwrap();
     }
 
     fn take_warnings(&self) -> Vec<String> {
@@ -503,9 +533,9 @@ impl Setup {
 
 #[test]
 fn archive_names_use_the_clients_host_name() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("names");
-        let s = setup(&dir, loopback, Mode::Sensitive);
+        let s = setup(&dir, via, Mode::Sensitive);
         let roots_name = s
             .rpc
             .client_host()
@@ -517,7 +547,11 @@ fn archive_names_use_the_clients_host_name() {
             .roots
             .in_canonical_order()
             .iter()
-            .map(|r| format!("//{HOST_NAME}/{}", r.fspath))
+            .map(|r| match &r.host {
+                // A remote root is named after its host.
+                gemel_rpc::root::Host::Remote(h) => format!("//{h}/{}", r.fspath),
+                gemel_rpc::root::Host::Local => format!("//{HOST_NAME}/{}", r.fspath),
+            })
             .collect();
         assert_eq!(roots_name, expected.join(", "));
         assert_eq!(
@@ -550,9 +584,9 @@ fn archive_names_use_the_clients_host_name() {
 
 #[test]
 fn archives_load_and_recover() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("load");
-        let s = setup(&dir, loopback, Mode::Sensitive);
+        let s = setup(&dir, via, Mode::Sensitive);
         let (rpc, roots) = (&s.rpc, &s.roots);
         block_on(async {
             // No archives yet: the optimistic load fails, recovery finds
@@ -579,10 +613,10 @@ fn archives_load_and_recover() {
             assert_eq!(sums, vec![Some((data.hash, data.magic.clone())); 2]);
             assert!(s.take_warnings().is_empty());
             assert_eq!(
-                archive::with_archive(s.host(), &s.this_root(1), Clone::clone),
+                archive::with_archive(s.host_of(1), &s.this_root(1), Clone::clone),
                 Some(data.archive.clone())
             );
-            let props = archive::archive_props(s.host(), &s.this_root(1)).unwrap();
+            let props = archive::archive_props(s.host_of(1), &s.this_root(1)).unwrap();
             assert_eq!(props.paths.len(), 1);
             // Unchanged on disk, so nothing is loaded again.
             let (ok, sums) = archive::load_archives(rpc, roots, true).await.unwrap();
@@ -613,7 +647,7 @@ fn archives_load_and_recover() {
             newer.magic = b"case sensitive\x002.0".to_vec();
             for i in 0..2 {
                 let f = system::name_bytes(s.file(i, ArchiveVersion::NewArch).as_os_str());
-                archive::store_archive_local(s.host(), &f, &s.this_root(i), &newer).unwrap();
+                archive::store_archive_local(s.host_of(i), &f, &s.this_root(i), &newer).unwrap();
             }
             let sums = archive::load_archives_safely(rpc, roots).await.unwrap();
             assert_eq!(sums, vec![Some((newer.hash, newer.magic.clone())); 2]);
@@ -650,9 +684,9 @@ fn archives_load_and_recover() {
 
 #[test]
 fn archives_lock_on_both_roots() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("lock");
-        let s = setup(&dir, loopback, Mode::Sensitive);
+        let s = setup(&dir, via, Mode::Sensitive);
         let (rpc, roots) = (&s.rpc, &s.roots);
         block_on(async {
             archive::lock_archives(rpc, roots).await.unwrap();
@@ -662,7 +696,13 @@ fn archives_lock_on_both_roots() {
             archive::unlock_archives(rpc, roots).await.unwrap();
             assert!(!s.file(1, ArchiveVersion::Lock).exists());
 
-            // Someone else holds root b's lock.
+            // Someone else holds root b's lock, which its host reports.
+            let b_host = s.roots.list()[1].hostname();
+            let b_host = if via == Via::Remote {
+                b_host
+            } else {
+                HOST_NAME
+            };
             let held = s.file(1, ArchiveVersion::Lock);
             std::fs::write(&held, "").unwrap();
             let e = archive::lock_archives(rpc, roots)
@@ -673,7 +713,7 @@ fn archives_lock_on_both_roots() {
                 e,
                 format!(
                     "Warning: the archives are locked.  \nIf no other instance of unison is \
-                     running, the locks should be removed.\nThe file {} on host {HOST_NAME} \
+                     running, the locks should be removed.\nThe file {} on host {b_host} \
                      should be deleted\nPlease delete lock files as appropriate and try again.",
                     held.display()
                 )
@@ -710,9 +750,9 @@ fn archives_lock_on_both_roots() {
 
 #[test]
 fn archives_are_converted_to_the_case_mode() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("case");
-        let s = setup(&dir, loopback, Mode::UnicodeInsensitive);
+        let s = setup(&dir, via, Mode::UnicodeInsensitive);
         let (rpc, roots) = (&s.rpc, &s.roots);
         // Archives made in case-sensitive mode (as the magic says) are
         // converted: re-sorted, and every directory to be rescanned.
@@ -725,13 +765,13 @@ fn archives_are_converted_to_the_case_mode() {
             archive::load_archives_safely(rpc, roots).await.unwrap();
         });
         for i in 0..2 {
-            let props = archive::archive_props(s.host(), &s.this_root(i)).unwrap();
+            let props = archive::archive_props(s.host_of(i), &s.this_root(i)).unwrap();
             assert_eq!(
                 props.props.find(&archive::CASE_KEY).unwrap(),
                 b"Unicode case insensitive"
             );
             assert!(props.props.mem(&archive::DIR_STAMP_KEY));
-            let mode = archive::with_archive(s.host(), &s.this_root(i), |a| match a {
+            let mode = archive::with_archive(s.host_of(i), &s.this_root(i), |a| match a {
                 Archive::Dir(_, c) => c.mode(),
                 _ => panic!(),
             });
@@ -773,7 +813,7 @@ fn archives_are_converted_to_the_case_mode() {
 #[test]
 fn ignorearchives_starts_from_scratch() {
     let dir = TempDir::new("ignore");
-    let s = setup(&dir, true, Mode::Sensitive);
+    let s = setup(&dir, Via::Loopback, Mode::Sensitive);
     let data = sample_data(Mode::Sensitive);
     s.store(0, &data);
     s.store(1, &data);
@@ -809,7 +849,7 @@ fn ignorearchives_starts_from_scratch() {
 #[test]
 fn commits_move_scratch_to_main() {
     let dir = TempDir::new("commit");
-    let s = setup(&dir, true, Mode::Sensitive);
+    let s = setup(&dir, Via::Loopback, Mode::Sensitive);
     let data = sample_data(Mode::Sensitive);
     let scratch = s.file(0, ArchiveVersion::ScratchArch);
     let f = system::name_bytes(scratch.as_os_str());

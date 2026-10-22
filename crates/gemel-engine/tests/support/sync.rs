@@ -26,13 +26,16 @@ pub fn global(s: &str) -> Path<Global> {
 
 pub const T0: f64 = 1_600_000_000.0;
 
-/// A client with two local roots `a` and `b` in `dir`, archives in `dir/u`.
+/// A client with roots `a` and `b` in `dir`, archives in `dir/u`; `b` on
+/// another host with [`Via::Remote`], which keeps its archives there too.
 pub struct Setup {
     pub rpc: Rpc,
     pub roots: Roots,
     pub base: PathBuf,
     /// What the client's trace printed (log entries and messages).
     pub output: Output,
+    /// Root `b`'s host, with [`Via::Remote`].
+    pub server: Option<Rc<Host>>,
 }
 
 /// Captured output.
@@ -57,19 +60,22 @@ impl Output {
     }
 }
 
-pub fn setup(dir: &TempDir, loopback: bool) -> Setup {
-    setup_in(dir, loopback, Mode::Sensitive)
+pub fn setup(dir: &TempDir, via: Via) -> Setup {
+    setup_in(dir, via, Mode::Sensitive)
 }
 
 /// [`setup`] in a case mode. (Roots are canonized when installed, so the
 /// directory needn't be.)
-pub fn setup_in(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
+pub fn setup_in(dir: &TempDir, via: Via, mode: Mode) -> Setup {
     let base = dir.0.clone();
-    let raw = ["a", "b"].map(|n| {
+    let mut raw = ["a", "b"].map(|n| {
         let p = base.join(n);
         std::fs::create_dir_all(&p).unwrap();
         p.to_str().unwrap().to_owned()
     });
+    if via == Via::Remote {
+        raw[1] = format!("ssh://{SERVER}/{}", raw[1]);
+    }
     let unison_dir = base.join("u");
     std::fs::create_dir_all(&unison_dir).unwrap();
     let mut prefs = new_prefs();
@@ -88,7 +94,7 @@ pub fn setup_in(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
     let mut trace = Trace::with_sinks(Box::new(output.clone()), Box::new(output.clone()));
     trace.set_unison_dir(&unison_dir);
     *client.state::<Trace>().borrow_mut() = trace;
-    let dispatch = if loopback {
+    let dispatch = if via == Via::Loopback {
         let server = Host::loopback_server(
             &client.prefs().borrow(),
             &client.features().borrow(),
@@ -106,8 +112,25 @@ pub fn setup_in(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
     };
     let mut rpc = Rpc::new(dispatch);
     gemel_engine::register_commands(&mut rpc).unwrap();
+    let server = (via == Via::Remote).then(|| {
+        let server = Rc::new(Host::server(new_prefs(), new_features()));
+        server.set_host_name(SERVER);
+        server.set_unison_dir(&unison_dir);
+        server.set_warn_printer(None);
+        server
+    });
     let roots = block_on(async {
         let raw = globals::raw_roots(&rpc.client_host().prefs().borrow());
+        if let Some(server) = &server {
+            // The connection a server would have, before the root is
+            // canonized over it.
+            let clroot = gemel_base::clroot::parse_root(&raw[1]).unwrap();
+            let provisional = gemel_rpc::root::Root {
+                host: gemel_rpc::root::Host::Remote(SERVER.into()),
+                fspath: gemel_fs::fspath::Fspath::from_canonical(b"/".to_vec()),
+            };
+            rpc.connect_in_memory(clroot, provisional, server.clone());
+        }
         let roots = Roots::install(&rpc, &raw).await.unwrap();
         archive::store_roots_name(&rpc, &roots).unwrap();
         globals::propagate_prefs(&rpc, &roots).await.unwrap();
@@ -118,12 +141,23 @@ pub fn setup_in(dir: &TempDir, loopback: bool, mode: Mode) -> Setup {
         roots,
         base,
         output,
+        server,
     }
 }
 
 impl Setup {
+    /// The host local roots' commands run on (the client's, or the
+    /// loopback host).
     pub fn host(&self) -> &Host {
         self.rpc.local_host()
+    }
+
+    /// The host of root `i` (in the user's order).
+    pub fn host_of(&self, i: usize) -> &Host {
+        match (&self.roots.list()[i].host, &self.server) {
+            (gemel_rpc::root::Host::Remote(_), Some(server)) => server,
+            _ => self.host(),
+        }
     }
 
     pub fn root(&self, side: &str) -> PathBuf {
@@ -139,7 +173,7 @@ impl Setup {
     }
 
     pub fn this_root(&self, i: usize) -> String {
-        archive::this_roots_global_name(self.host(), &self.roots.list()[i].fspath).unwrap()
+        archive::this_roots_global_name(self.host_of(i), &self.roots.list()[i].fspath).unwrap()
     }
 
     pub fn find(&self) -> Vec<PathUpdates> {
@@ -182,7 +216,7 @@ impl Setup {
 
     /// The archive at `path` in root `i`, as cached on the host.
     pub fn archived(&self, i: usize, path: &str) -> Archive {
-        archive::with_archive(self.host(), &self.this_root(i), |a| {
+        archive::with_archive(self.host_of(i), &self.this_root(i), |a| {
             update::get_path_in_archive(a, &global(path)).1.clone()
         })
         .unwrap()

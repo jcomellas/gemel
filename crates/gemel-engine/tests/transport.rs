@@ -90,9 +90,16 @@ impl Setup {
     }
 
     /// The root names in log entries, and what to show instead.
-    fn root_names(&self) -> [(String, &'static str); 2] {
+    /// How the roots appear in messages, and what to show instead: as
+    /// roots (`//server//...` when remote), then as paths.
+    fn root_names(&self) -> [(String, &'static str); 4] {
         let r = self.roots.list();
-        [(r[0].to_string(), "A"), (r[1].to_string(), "B")]
+        [
+            (r[0].to_string(), "A"),
+            (r[1].to_string(), "B"),
+            (r[0].fspath.to_string(), "A"),
+            (r[1].fspath.to_string(), "B"),
+        ]
     }
 }
 
@@ -182,10 +189,31 @@ type Change = fn(&StdPath, &StdPath);
 /// Unison, a twin is synced by it, and the replicas and the transport log
 /// must be the same; then each runs OCaml once more, to the same effect.
 fn sync_like_ocaml(what: &str, prefs: &[&str], build: fn(&StdPath), change: Change) -> Outcome {
+    sync_like_ocaml_via(&Via::ALL, what, prefs, build, change)
+}
+
+/// The transport log without the order of its `[END]` lines, which OCaml
+/// interleaves with the next items' when a root is remote, where it runs
+/// items concurrently; gemel runs them one at a time until phase 5 of
+/// milestone 3.
+fn ends_unordered(log: &[String]) -> (Vec<&String>, Vec<&String>) {
+    let (mut ends, rest): (Vec<_>, Vec<_>) = log.iter().partition(|l| l.starts_with("[END] "));
+    ends.sort();
+    (rest, ends)
+}
+
+/// [`sync_like_ocaml`], with only some of the ways.
+fn sync_like_ocaml_via(
+    ways: &[Via],
+    what: &str,
+    prefs: &[&str],
+    build: fn(&StdPath),
+    change: Change,
+) -> Outcome {
     let mut outcome = None;
-    for loopback in [false, true] {
+    for &via in ways {
         let dir = TempDir::new("transport");
-        let s = synced(&dir, loopback, prefs, build);
+        let s = synced(&dir, via, prefs, build);
         change(&s.a(), &s.b());
         let ours_log = s.base.join("u/unison.log");
         let _ = std::fs::remove_file(&ours_log);
@@ -193,7 +221,7 @@ fn sync_like_ocaml(what: &str, prefs: &[&str], build: fn(&StdPath), change: Chan
         let ours = transport_log(&read_log(&ours_log), &s);
         if let Some(unison) = std::env::var_os("GEMEL_REFERENCE_UNISON") {
             let twin_dir = TempDir::new("transport-ocaml");
-            let twin = synced(&twin_dir, false, prefs, build);
+            let twin = synced(&twin_dir, via, prefs, build);
             change(&twin.a(), &twin.b());
             settle(&[&twin.a(), &twin.b()]);
             let theirs_log = twin.base.join("ocaml.log");
@@ -205,7 +233,15 @@ fn sync_like_ocaml(what: &str, prefs: &[&str], build: fn(&StdPath), change: Chan
             let all = ocaml_run(&unison, &twin, &flags);
             let theirs = transport_log(&read_log(&theirs_log), &twin);
             assert_eq!(listings(&s), listings(&twin), "{what}: {r:?}\n{all}");
-            assert_eq!(ours, theirs, "{what}: {r:?}\n{all}");
+            if via == Via::Remote {
+                assert_eq!(
+                    ends_unordered(&ours),
+                    ends_unordered(&theirs),
+                    "{what}: {r:?}\n{all}"
+                );
+            } else {
+                assert_eq!(ours, theirs, "{what}: {r:?}\n{all}");
+            }
             // OCaml then finds nothing to do on both (so the archives agree
             // with the replicas), or the same to do, to the same effect.
             let theirs_next = ocaml_sync(&unison, &twin, &flags_of(prefs));
@@ -224,6 +260,11 @@ fn sync_like_ocaml(what: &str, prefs: &[&str], build: fn(&StdPath), change: Chan
                     "{what}:\n{ours_next}\n{theirs_next}"
                 );
             }
+        }
+        // A remote root's errors are worded as a transfer's, not a local
+        // copy's, as in OCaml: it is held to OCaml's own run above.
+        if via == Via::Remote {
+            continue;
         }
         if let Some(o) = &outcome {
             assert_eq!(o, &r, "{what}: the dispatch modes differ");
@@ -314,12 +355,14 @@ fn moves_propagate_like_ocaml() {
     }
 }
 
-/// A merge runs the merge program.
+/// A merge runs the merge program. (Not yet with a remote root: phase 5
+/// of milestone 3.)
 #[cfg(unix)]
 #[test]
 fn merges_propagate_like_ocaml() {
     let prefs = ["merge = Name README -> cat CURRENT1 CURRENT2 > NEW"];
-    let failed = sync_like_ocaml("both changed", &prefs, build_tree, |a, b| {
+    let local = [Via::Direct, Via::Loopback];
+    let failed = sync_like_ocaml_via(&local, "both changed", &prefs, build_tree, |a, b| {
         write(a, "README", "a's version\n", T0 + 20.0);
         write(b, "README", "b's version\n", T0 + 30.0);
         write(a, "new-a", "new in a", T0 + 20.0);
@@ -328,7 +371,7 @@ fn merges_propagate_like_ocaml() {
     assert_eq!(failed, Vec::<String>::new());
     // Reconciliation proposes no merge when a side is deleted (it is a
     // conflict, skipped), but the user may ask for one.
-    sync_like_ocaml("one deleted", &prefs, build_tree, |a, b| {
+    sync_like_ocaml_via(&local, "one deleted", &prefs, build_tree, |a, b| {
         write(a, "README", "a's version\n", T0 + 20.0);
         std::fs::remove_file(b.join("README")).unwrap();
     })
@@ -338,9 +381,9 @@ fn merges_propagate_like_ocaml() {
 /// Merging a file with nothing fails.
 #[test]
 fn only_files_are_merged() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("transport-merge");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         write(&s.a(), "README", "a's version", T0 + 20.0);
         std::fs::remove_file(s.b().join("README")).unwrap();
         settle(&[&s.a(), &s.b()]);
@@ -409,9 +452,9 @@ fn a_failed_item_is_logged_like_ocaml() {
 /// aborted, and nothing is committed.
 #[test]
 fn a_fatal_error_stops_the_run() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("transport-fatal");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         write(&s.a(), "README", "a's version", T0 + 20.0);
         std::fs::remove_dir_all(s.a().join("src")).unwrap();
         write(&s.a(), "src", "a file", T0 + 20.0);
@@ -466,7 +509,7 @@ fn archives(s: &Setup) -> Vec<(String, Vec<u8>)> {
 #[test]
 fn aborting_everything_stops_dispensing() {
     let dir = TempDir::new("transport-abort");
-    let s = setup(&dir, false);
+    let s = setup(&dir, Via::Direct);
     let items = [0, 1, 2, 3];
     let ran = RefCell::new(Vec::new());
     block_on(transport::transport_items(
@@ -526,9 +569,9 @@ fn record_progress(s: &Setup) -> Reports {
 /// (`riLength`): a copy as it goes, a move all at once.
 #[test]
 fn progress_adds_up_to_what_each_item_transfers() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("transport-progress");
-        let s = synced(&dir, loopback, &["moves-experimental = true"], build_tree);
+        let s = synced(&dir, via, &["moves-experimental = true"], build_tree);
         write(&s.a(), "big", &"x".repeat(300_000), T0 + 20.0);
         write(&s.a(), "new/f1", "one", T0 + 20.0);
         write(&s.a(), "new/f2", "two two", T0 + 20.0);
@@ -537,7 +580,7 @@ fn progress_adds_up_to_what_each_item_transfers() {
         std::fs::remove_file(s.b().join("src/deep/x")).unwrap();
         let seen = record_progress(&s);
         let (items, outcome) = s.sync_items();
-        assert_eq!(outcome.unwrap(), Vec::<String>::new(), "{loopback}");
+        assert_eq!(outcome.unwrap(), Vec::<String>::new(), "{via}");
         let mut by_item: BTreeMap<i64, (i64, Vec<&str>)> = BTreeMap::new();
         for (id, n, tag) in seen.lock().unwrap().iter() {
             let e = by_item.entry(id.0).or_default();
@@ -556,12 +599,14 @@ fn progress_adds_up_to_what_each_item_transfers() {
             })
             .collect();
         for (p, n, len, _) in &shown {
-            assert_eq!(n, len, "{p} ({loopback}): {shown:?}");
+            assert_eq!(n, len, "{p} ({via}): {shown:?}");
         }
         let tags = |p: &str| &shown.iter().find(|s| s.0 == p).expect(p).3;
-        assert_eq!(tags("big"), &["l"]);
-        assert_eq!(tags("new"), &["l"]);
-        assert_eq!(tags("README"), &["l"]);
+        // Copied here, or transferred between hosts.
+        let copied = if via == Via::Remote { "r" } else { "l" };
+        assert_eq!(tags("big"), &[copied]);
+        assert_eq!(tags("new"), &[copied]);
+        assert_eq!(tags("README"), &[copied]);
         // A move is shown at its original path.
         assert_eq!(tags("src/main.c"), &["mov"]);
         // A deletion transfers nothing, and reports nothing.
@@ -575,9 +620,9 @@ fn progress_adds_up_to_what_each_item_transfers() {
 /// The next run starts afresh.
 #[test]
 fn aborting_from_another_thread_stops_the_run() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("transport-abort-flag");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         for n in ["a1", "a2", "a3"] {
             write(&s.a(), n, n, T0 + 20.0);
         }
@@ -610,7 +655,7 @@ fn a_merge_is_logged_and_explained() {
     for to_stderr in [true, false] {
         let dir = TempDir::new("transport-merge-log");
         let prefs = ["merge = Name README -> cat CURRENT1 CURRENT2 > NEW"];
-        let s = synced(&dir, false, &prefs, build_tree);
+        let s = synced(&dir, Via::Direct, &prefs, build_tree);
         write(&s.a(), "README", "a's version\n", T0 + 20.0);
         write(&s.b(), "README", "b's version\n", T0 + 30.0);
         s.output.take();
@@ -635,9 +680,9 @@ fn a_merge_is_logged_and_explained() {
 /// is shown now and then, by the host that scans: a server shows nothing.
 #[test]
 fn the_scan_and_reconciliation_show_their_status() {
-    for loopback in [false, true] {
+    for via in Via::ALL {
         let dir = TempDir::new("transport-status");
-        let s = synced(&dir, loopback, &[], build_tree);
+        let s = synced(&dir, via, &[], build_tree);
         for i in 0..40 {
             write(&s.a(), &format!("many/f{i:02}"), "f", T0 + 20.0);
         }
@@ -680,7 +725,7 @@ fn the_scan_and_reconciliation_show_their_status() {
             "{shown:?}"
         );
         let scanned = scanned.lock().unwrap().clone();
-        if loopback {
+        if via == Via::Loopback {
             assert_eq!(scanned, Vec::<String>::new());
         } else {
             assert!(!scanned.is_empty());
