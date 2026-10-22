@@ -113,6 +113,7 @@ fn load(s: &mut Session, answer: &mut dyn FnMut(&mut Session, Question)) {
 fn updates(s: &mut Session, answer: &mut dyn FnMut(&mut Session, Question)) -> Updates {
     let c = Command::Update {
         allow_partial: true,
+        want_watcher: false,
         paths: None,
     };
     match ok(s, c, answer) {
@@ -254,6 +255,7 @@ fn warnings_are_shown_or_asked_about() {
     load(&mut s, &mut no_questions);
     let c = Command::Update {
         allow_partial: true,
+        want_watcher: false,
         paths: None,
     };
     let (before, _) = call(&mut s, c, &mut no_questions);
@@ -272,6 +274,7 @@ fn warnings_are_shown_or_asked_about() {
     load(&mut s, &mut no_questions);
     let c = Command::Update {
         allow_partial: true,
+        want_watcher: false,
         paths: None,
     };
     let mut asked = Vec::new();
@@ -586,6 +589,7 @@ fn status_comes_as_events() {
     );
     let c = Command::Update {
         allow_partial: true,
+        want_watcher: false,
         paths: None,
     };
     let (before, _) = call(&mut s, c, &mut no_questions);
@@ -623,6 +627,7 @@ fn quitting_answers_what_is_left_unanswered() {
     // left unread.
     assert!(s.send(Command::Update {
         allow_partial: true,
+        want_watcher: false,
         paths: None,
     }));
     let (tx, rx) = std::sync::mpsc::channel();
@@ -775,6 +780,7 @@ fn an_interrupt_stops_a_question_unanswered() {
     let mut held = None;
     let c = Command::Update {
         allow_partial: true,
+        want_watcher: false,
         paths: None,
     };
     let (_, e) = call(&mut s, c, &mut |s, q| match q {

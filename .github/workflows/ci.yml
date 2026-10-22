@@ -72,9 +72,14 @@ jobs:
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
       # The gemel program, in batch and interactive mode, against `unison -ui text`.
-      - run: cargo test --locked -p gemel --test batch --test interactive --test terminal --test repeat
+      # (Watch mode: gemel finds its watcher next to it, which `-p gemel`
+      # doesn't build; OCaml its own on PATH, where the tests put it.)
+      - run: |
+          cargo build --locked -p gemel-fsmonitor
+          cargo test --locked -p gemel --test batch --test interactive --test terminal --test repeat --test watch
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
+          GEMEL_REFERENCE_FSMONITOR: ${{ github.workspace }}/unison-src/fsmonitor-ocaml
       # The file watcher, against OCaml's (inotify), and as OCaml's watcher.
       - run: cargo test --locked -p gemel-fsmonitor
         env:

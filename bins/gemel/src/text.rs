@@ -25,16 +25,38 @@
 //! being scanned, finishes first), and the session's end releases the
 //! locks held.
 //!
-//! `-repeat` syncs again after an interval, until the user asks to stop
-//! between syncs (`SIGUSR2`); with the file watcher (`watch`) is phase 9.
+//! `-repeat` syncs again after an interval, or (`watch`) whenever the file
+//! watcher reports changes, until the user asks to stop between syncs
+//! (`SIGUSR2`).
 //! The profile manager (`-i`) lists the profiles to choose one.
 
 mod interact;
 
-use std::collections::VecDeque;
+/// `watchinterval`: the least time between two syncs in watch mode, in
+/// seconds.
+const WATCH_INTERVAL: f64 = 1.;
+/// `retrydelay`: the least delay before a path that failed is retried
+/// again.
+const RETRY_DELAY: f64 = 5.;
+/// `maxdelay`: the most it is delayed, and the longest wait with a
+/// timeout.
+const MAX_DELAY: f64 = 30. * 60.;
+
+/// The paths left unsynchronised, and those whose retry is delayed
+/// (`Update.findUpdates`'s `subpaths`).
+type Subpaths = Option<(Vec<Path<Global>>, Vec<Path<Global>>)>;
+
+/// The time, in seconds since the epoch (`Unix.gettimeofday`).
+fn now() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0., |d| d.as_secs_f64())
+}
+
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gemel_base::path::{Global, Path};
 use gemel_base::prefs::BoolWithDefault;
@@ -552,8 +574,8 @@ impl Text {
 
     /// `interruptibleSleep`: waits `secs` seconds, or until the user asks
     /// to stop between syncs.
-    fn interruptible_sleep(&mut self, secs: i64) -> Result<(), Stop> {
-        let end = Instant::now() + std::time::Duration::from_secs(secs.max(0) as u64);
+    fn interruptible_sleep(&mut self, secs: f64) -> Result<(), Stop> {
+        let end = Instant::now() + Duration::from_secs_f64(secs.max(0.));
         while !self.safe_stop {
             let Some(left) = end.checked_duration_since(Instant::now()) else {
                 return Ok(());
@@ -571,10 +593,72 @@ impl Text {
         Ok(())
     }
 
+    /// `waitForChanges`: waits until the file watcher reports a change to
+    /// a replica, until `t` (unless that is more than [`MAX_DELAY`] away),
+    /// or until the user asks to stop between syncs.
+    fn wait_for_changes(&mut self, t: f64) -> Result<(), Stop> {
+        let dt = t - now();
+        if dt <= 0. {
+            return Ok(());
+        }
+        let end = (dt <= MAX_DELAY).then(|| Instant::now() + Duration::from_secs_f64(dt));
+        self.send(Command::WaitForChanges);
+        loop {
+            let left = end.map(|e| e.saturating_duration_since(Instant::now()));
+            if self.safe_stop || left == Some(Duration::ZERO) {
+                break;
+            }
+            let input = match self.deferred.pop_front() {
+                Some(e) => Ok(Input::Event(Box::new(e))),
+                None => match left {
+                    Some(left) => self.inputs.recv_timeout(left),
+                    None => self
+                        .inputs
+                        .recv()
+                        .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+                },
+            };
+            match input {
+                Ok(Input::Event(e)) => match *e {
+                    Event::Changed => return Ok(()),
+                    Event::Error(e) => return Err(Stop::Error(e)),
+                    Event::Exit(code) => return Err(Stop::Exit(code as i32)),
+                    Event::Warning(w) => self.warn(&w),
+                    _ => {}
+                },
+                Ok(Input::Signal(s)) => self.on_signal(s)?,
+                Ok(Input::Key(k)) => self.ready = self.reading.take().map(|raw| (raw, k)),
+                Ok(Input::Ended) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Stop::Error("The session stopped unexpectedly".to_owned()));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        // Time is up, or the user asked to stop: the wait ends, with
+        // `Interrupted` (or `Changed` first, if it came meanwhile).
+        match self.call(Command::Interrupt)? {
+            Event::Changed => match self.call_reply()? {
+                Event::Interrupted => Ok(()),
+                e => Err(Stop::Error(format!("unexpected {e:?}"))),
+            },
+            Event::Interrupted => Ok(()),
+            e => Err(Stop::Error(format!("unexpected {e:?}"))),
+        }
+    }
+
     /// Sends `c` and handles the events up to its reply.
     fn call(&mut self, c: Command) -> Result<Event, Stop> {
         let sync = matches!(c, Command::Synchronize);
         self.send(c);
+        self.reply(sync)
+    }
+
+    /// Handles the events up to the next reply.
+    fn call_reply(&mut self) -> Result<Event, Stop> {
+        self.reply(false)
+    }
+
+    fn reply(&mut self, sync: bool) -> Result<Event, Stop> {
         loop {
             let e = match self.deferred.pop_front() {
                 Some(e) => e,
@@ -1052,8 +1136,9 @@ impl Text {
         let interval = match self.settings().repeat.clone() {
             Repeat::NoRepeat => return self.synchronize_until_no_failures(false),
             Repeat::Interval(i) => i,
-            Repeat::Watch | Repeat::WatchAndInterval(_) => {
-                return Err(self.unsupported("-repeat watch"));
+            Repeat::Watch => return self.synchronize_paths_from_filesystem_watcher(None),
+            Repeat::WatchAndInterval(i) => {
+                return self.synchronize_paths_from_filesystem_watcher(Some(i));
             }
             Repeat::Invalid(_, e) => return Err(Stop::Error(e)),
         };
@@ -1063,7 +1148,7 @@ impl Text {
                 return Ok(code);
             }
             self.status(&format!("\nSleeping for {interval} seconds...\n"));
-            self.interruptible_sleep(interval)?;
+            self.interruptible_sleep(interval as f64)?;
             if self.safe_stop {
                 return Ok(code);
             }
@@ -1077,22 +1162,82 @@ impl Text {
         let mut tries_left = self.settings().retry;
         let mut paths = None;
         loop {
-            let (code, failed) = self.synchronize_once(paths)?;
+            let (code, failed) = self.synchronize_once(repeat, paths)?;
             if failed.is_empty() || tries_left == 0 || (repeat && self.safe_stop) {
                 return Ok(code);
             }
             tries_left -= 1;
-            paths = Some(failed);
+            paths = Some((failed, Vec::new()));
+        }
+    }
+
+    /// `synchronizePathsFromFilesystemWatcher`: syncs, then again whenever
+    /// the watcher reports changes, and whole every `full_interval`
+    /// seconds if given. A path that fails is retried at once, then after
+    /// [`RETRY_DELAY`] seconds, doubling up to [`MAX_DELAY`].
+    fn synchronize_paths_from_filesystem_watcher(
+        &mut self,
+        full_interval: Option<i64>,
+    ) -> Result<i32, Stop> {
+        let full_interval = full_interval.map_or(1e20, |i| i as f64);
+        let mut last_full = 0.;
+        // For each path to retry: when, and the delay that led there.
+        let mut delay_info: BTreeMap<Vec<u8>, (Path<Global>, f64, f64)> = BTreeMap::new();
+        loop {
+            let t = now();
+            let is_full = t - last_full > full_interval;
+            if is_full {
+                last_full = t;
+            }
+            let next_full = last_full + full_interval;
+            // In OCaml's order: a fold over the map, building lists.
+            let (mut delayed, mut ready) = (Vec::new(), Vec::new());
+            for (p, t2, _) in delay_info.values().rev() {
+                if *t2 <= t {
+                    ready.push(p.clone());
+                } else {
+                    delayed.push(p.clone());
+                }
+            }
+            let paths = (!is_full).then(|| (ready, delayed.clone()));
+            let (code, failed) = self.synchronize_once(true, paths)?;
+            // After a failure, retried at once, then with a growing delay.
+            let mut next = BTreeMap::new();
+            for p in delayed.into_iter().chain(failed) {
+                let key = p.as_bytes().to_vec();
+                let (t2, d) = match delay_info.get(&key) {
+                    Some((_, t2, d)) if *t2 > t => (*t2, *d),
+                    Some((_, _, d)) => {
+                        let d = RETRY_DELAY.max(MAX_DELAY.min(2. * d));
+                        (t + d, d)
+                    }
+                    None => (t, 0.),
+                };
+                next.insert(key, (p, t2, d));
+            }
+            delay_info = next;
+            self.interruptible_sleep(WATCH_INTERVAL)?;
+            let next_time = delay_info
+                .values()
+                .fold(next_full, |m, (_, t2, _)| m.min(*t2));
+            if !self.safe_stop {
+                self.wait_for_changes(next_time)?;
+            }
+            if self.safe_stop {
+                return Ok(code);
+            }
         }
     }
 
     /// `synchronizeOnce`: the exit code, and the paths that failed.
     fn synchronize_once(
         &mut self,
-        paths: Option<Vec<Path<Global>>>,
+        want_watcher: bool,
+        paths: Subpaths,
     ) -> Result<(i32, Vec<Path<Global>>), Stop> {
         let u = match self.call(Command::Update {
             allow_partial: true,
+            want_watcher,
             paths,
         })? {
             Event::Updates(u) => u,

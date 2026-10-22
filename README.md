@@ -37,13 +37,13 @@ handles them. `-repeat` with an interval and the profile manager (`-i`) work as
 OCaml's do, and `-help` lists the options as OCaml's does, except
 `-acl` and `-xattrs`. On generated scenarios gemel ends as OCaml Unison
 does, and OCaml accepts the archives gemel writes. CI checks this on
-Linux, and Windows replays outcomes recorded from OCaml. Watch mode is
-under way: `gemel-fsmonitor`, the file watcher, runs on Linux, macOS
-(FSEvents, which OCaml has no watcher for) and Windows, and OCaml Unison
-uses it as its `unison-fsmonitor` on Linux and macOS. gemel's engine
-uses it to scan only what changed; the text interface's `-repeat watch`
-is still to come. Synchronising
-xattrs and ACLs, the GUI and remote connections are still to come.
+Linux, and Windows replays outcomes recorded from OCaml. Watch mode
+works too: `-repeat watch` syncs whenever `gemel-fsmonitor`, the file
+watcher, reports changes, and scans only what changed. The watcher runs on
+Linux, macOS (FSEvents, which OCaml has no watcher for) and Windows, and
+OCaml Unison uses it as its `unison-fsmonitor` on Linux and macOS.
+Synchronising xattrs and ACLs, the GUI and remote connections are still
+to come.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 
