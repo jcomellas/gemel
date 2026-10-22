@@ -1,15 +1,15 @@
-//! Message framing, flow control and the RPC version handshake.
+//! Message framing and the RPC version handshake.
 //!
 //! Ports Unison `src/remote.ml`.
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 //!
-//! What is here so far are the pieces a message is built from, byte for
-//! byte as in OCaml: the 5-byte integers ([`encode_int`]), the tagged
-//! sections that carry each marshalled value ([`encode_section`]), and the
-//! header that says what a message is ([`Header`]). Packets, message ids,
-//! flow control and the version handshake come with remote roots
-//! (milestone 3).
+//! What is here are the pieces a message is built from, byte for byte as
+//! in OCaml: the 5-byte integers ([`encode_int`]), the tagged sections that
+//! carry each marshalled value ([`encode_section`]), which are the packets
+//! a connection sends, and the header that says what a message is
+//! ([`Header`]). [`crate::connection`] puts them together; the version
+//! handshake comes later in milestone 3.
 
 use gemel_base::util::Error;
 use gemel_compat::umarshal::{self, Reader, Writer};

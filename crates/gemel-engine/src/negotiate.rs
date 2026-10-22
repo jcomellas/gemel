@@ -67,7 +67,7 @@ pub async fn features(rpc: &Rpc, roots: &[Root]) -> Result<(), Error> {
     };
     let mut supported_by_all = true;
     for r in roots {
-        supported_by_all &= rpc.command_available(r, NEGOTIATE_FEATURES.name())?;
+        supported_by_all &= rpc.command_available(r, NEGOTIATE_FEATURES.name()).await?;
     }
     let common = if supported_by_all {
         let mut common = supported;

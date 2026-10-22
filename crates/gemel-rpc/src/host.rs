@@ -13,7 +13,9 @@
 //! negotiated features, as a server would have them. It still runs the
 //! client's local roots, which OCaml serves in the client's own process, so
 //! it names itself as the client does (`clientHostName`) and its warnings
-//! go to the client.
+//! go to the client. A host standing for a server on another host
+//! ([`crate::registry::Rpc::connect_in_memory`]) names itself after that
+//! host ([`Host::set_host_name`]).
 
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
@@ -28,6 +30,9 @@ use gemel_fs::{os, system};
 /// Shows a warning (`Util.warnPrinter`).
 pub type WarnPrinter = Rc<dyn Fn(&str)>;
 
+/// Runs when a connection closes (`Remote.at_conn_close`).
+pub type CloseHandler = Rc<dyn Fn()>;
+
 /// A host's state (one per process).
 pub struct Host {
     prefs: Rc<RefCell<Prefs>>,
@@ -35,7 +40,9 @@ pub struct Host {
     is_server: bool,
     runs_client_roots: bool,
     unison_dir: RefCell<Option<PathBuf>>,
+    host_name: RefCell<Option<String>>,
     warn_printer: RefCell<Option<WarnPrinter>>,
+    close_handlers: RefCell<Vec<(bool, CloseHandler)>>,
     slots: RefCell<HashMap<TypeId, Rc<dyn Any>>>,
 }
 
@@ -77,7 +84,9 @@ impl Host {
             is_server,
             runs_client_roots,
             unison_dir: RefCell::default(),
+            host_name: RefCell::default(),
             warn_printer: RefCell::new(Some(default_printer)),
+            close_handlers: RefCell::default(),
             slots: RefCell::default(),
         }
     }
@@ -116,13 +125,43 @@ impl Host {
     }
 
     /// `Os.myCanonicalHostName`: on a server, its own name; on the client
-    /// (and the loopback host), `clientHostName` (which defaults to it).
+    /// (and the loopback host), `clientHostName` (which defaults to it). A
+    /// name set with [`Host::set_host_name`] replaces the system's.
     pub fn canonical_host_name(&self) -> String {
+        if let Some(name) = &*self.host_name.borrow() {
+            return name.clone();
+        }
         let prefs = self.prefs.borrow();
         if self.runs_client_roots && prefs.kind(os::CLIENT_HOST_NAME.name()).is_some() {
             prefs.read(&os::CLIENT_HOST_NAME).clone()
         } else {
             os::local_canonical_host_name()
+        }
+    }
+
+    /// Names the host `name` rather than after the system's host, for a
+    /// host standing for another machine.
+    pub fn set_host_name(&self, name: impl Into<String>) {
+        *self.host_name.borrow_mut() = Some(name.into());
+    }
+
+    /// `Remote.at_conn_close`: runs `f` whenever a connection closes, or,
+    /// with `only_server`, only on a server (see
+    /// [`Host::run_conn_close_handlers`]).
+    pub fn at_conn_close(&self, only_server: bool, f: CloseHandler) {
+        self.close_handlers.borrow_mut().push((only_server, f));
+    }
+
+    /// `runConnCloseHandlers`, newest first: on the client (`is_server`
+    /// false) when it
+    /// closes a connection, the handlers not only for servers; on a socket
+    /// server when its client goes, all of them.
+    pub fn run_conn_close_handlers(&self, is_server: bool) {
+        let handlers = self.close_handlers.borrow().clone();
+        for (only_server, f) in handlers.into_iter().rev() {
+            if !only_server || is_server {
+                f();
+            }
         }
     }
 

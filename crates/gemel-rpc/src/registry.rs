@@ -7,34 +7,43 @@
 //! Engine modules declare their remote commands as statics: a
 //! [`HostCmd`] runs on a host (`Remote.registerHostCmd`), a [`RootCmd`] on
 //! the host of a root, with the root's path as an extra first argument
-//! (`Remote.registerRootCmd`). Each has codecs for its argument and result
-//! and an async function that runs on the host. The codecs get the features
-//! in effect on their side, since some encodings depend on them (`Props`
-//! and `prevState`, for example). Commands are registered with an [`Rpc`],
-//! which dispatches calls:
+//! (`Remote.registerRootCmd`), and a [`ServerCmd`] with the connection it
+//! came on (`Remote.registerServerCmd`, and
+//! `registerRootCmdWithConnection`, which sends the same). Each has codecs
+//! for its argument and result and an async function that runs on the
+//! host. The codecs get the features in effect on their side, since some
+//! encodings depend on them (`Props` and `prevState`, for example).
+//! Commands are registered with an [`Rpc`], which dispatches calls:
 //!
-//! - [`Dispatch::Direct`]: a local root's command is called directly, as
-//!   `registerHostCmd` does in OCaml;
-//! - [`Dispatch::Loopback`]: for tests, every call goes through what a
-//!   server would receive and send (the request header, the argument
-//!   section, the command looked up by name, the result or error header
-//!   and section), against a separate [`Host`] whose preferences come from
-//!   the client's dump. The sections are byte-exact; packets, message ids
-//!   and connections come with remote roots (milestone 3), as do streams
-//!   and `registerRootCmdWithConnection`.
+//! - a remote root's go over the connection to its host, which
+//!   [`ClientConns`] keeps (one per server, shared by the roots there);
+//! - a local root's are called directly ([`Dispatch::Direct`]), as
+//!   `registerHostCmd` does in OCaml, or, for tests, over an in-memory
+//!   connection to a separate [`Host`] whose preferences come from the
+//!   client's dump ([`Dispatch::Loopback`]): packets, message ids, flow
+//!   control and the server's command loop, everything a server would
+//!   receive and send but the handshake and the transport. A fatal error
+//!   comes back without the `Server: ` a remote root's gets, as for the
+//!   local roots it stands for.
+//!
+//! An in-memory connection can also stand for a server on another host
+//! ([`Rpc::connect_in_memory`]), whose roots are then remote.
 
+use std::cell::{OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
+use gemel_base::clroot::Clroot;
 use gemel_base::features::Features;
 use gemel_base::util::Error;
 use gemel_compat::umarshal::{self, Reader, Writer};
 use gemel_fs::fspath::Fspath;
 
+use crate::connection::{self, Connection, Endpoint, HALF_DUPLEX, NEGOCIATE_FLOW_CONTROL};
 use crate::host::Host;
-use crate::protocol::{self, HEADER_TAG, Header};
+use crate::protocol::{self, HEADER_TAG};
 use crate::root::{Host as RootHost, Root};
 
 /// A future on the engine thread.
@@ -48,6 +57,9 @@ pub type Read<T> = fn(&mut Reader<'_>, &Features) -> umarshal::Result<T>;
 pub type HostFn<A, R> = fn(Rc<Host>, A) -> LocalBoxFuture<Result<R, Error>>;
 /// Runs a root command, given the root's path.
 pub type RootFn<A, R> = fn(Rc<Host>, Fspath, A) -> LocalBoxFuture<Result<R, Error>>;
+/// Runs a server command, given the connection it came on (whose host is
+/// the one it runs on).
+pub type ServerFn<A, R> = fn(Connection, A) -> LocalBoxFuture<Result<R, Error>>;
 
 /// A command that runs on a host (`Remote.registerHostCmd`).
 pub struct HostCmd<A, R> {
@@ -122,15 +134,72 @@ impl<A, R> RootCmd<A, R> {
     }
 }
 
-/// A command's server side, erased: the argument section's body in, the
-/// result section out.
-type ServerCmd = Box<dyn Fn(Rc<Host>, Vec<u8>) -> LocalBoxFuture<Result<Vec<u8>, Error>>>;
+/// A command that runs with the connection it came on
+/// (`Remote.registerServerCmd`). `registerRootCmdWithConnection` sends the
+/// same; [`Rpc::call_root_with_connection`] is its client side.
+pub struct ServerCmd<A, R> {
+    name: &'static str,
+    write_arg: Write<A>,
+    read_arg: Read<A>,
+    write_res: Write<R>,
+    read_res: Read<R>,
+    run: ServerFn<A, R>,
+}
+
+impl<A, R> ServerCmd<A, R> {
+    /// A command named `name` (its wire name).
+    pub const fn new(
+        name: &'static str,
+        write_arg: Write<A>,
+        read_arg: Read<A>,
+        write_res: Write<R>,
+        read_res: Read<R>,
+        run: ServerFn<A, R>,
+    ) -> Self {
+        ServerCmd {
+            name,
+            write_arg,
+            read_arg,
+            write_res,
+            read_res,
+            run,
+        }
+    }
+
+    /// The command's name.
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// `commandAvailable`: whether the host of a root has a command. (A root
+/// command on the wire; it runs with the connection, to see its
+/// commands.)
+pub static COMMAND_AVAILABLE: ServerCmd<(Fspath, String), bool> = ServerCmd::new(
+    "commandAvailable",
+    |(f, s), w, _| {
+        f.marshal(w);
+        w.string(s.as_bytes());
+    },
+    |r, _| {
+        Ok((
+            Fspath::unmarshal(r)?,
+            String::from_utf8_lossy(&r.string()?).into_owned(),
+        ))
+    },
+    |b, w, _| w.bool(*b),
+    |r, _| r.bool(),
+    |conn, (_, name)| Box::pin(async move { Ok(conn.endpoint().registry().contains(&name)) }),
+);
+
+/// A command's server side, erased: the connection the request came on and
+/// the argument section's body in, the result section out.
+pub type ErasedFn = Box<dyn Fn(Connection, Vec<u8>) -> LocalBoxFuture<Result<Vec<u8>, Error>>>;
 
 /// The registered commands (`serverCmds`) and section tags
 /// (`registeredSet`).
-#[derive(Default)]
 pub struct Registry {
-    commands: HashMap<&'static str, ServerCmd>,
+    commands: HashMap<&'static str, ErasedFn>,
     tags: HashSet<String>,
 }
 
@@ -142,11 +211,27 @@ fn res_tag(name: &str) -> String {
     format!("{name}-res")
 }
 
+impl Default for Registry {
+    fn default() -> Self {
+        Registry::new()
+    }
+}
+
 impl Registry {
-    /// A registry with the header tag (`"rsp"`) taken.
+    /// A registry with the header tag (`"rsp"`) taken, and `remote.ml`'s
+    /// own commands: `commandAvailable` and `negociateFlowControl`.
     pub fn new() -> Registry {
-        let mut r = Registry::default();
-        r.tags.insert(HEADER_TAG.to_owned());
+        let mut r = Registry {
+            commands: HashMap::new(),
+            tags: HashSet::from([HEADER_TAG.to_owned()]),
+        };
+        for cmd in [
+            &COMMAND_AVAILABLE as &dyn Registrable,
+            &NEGOCIATE_FLOW_CONTROL,
+        ] {
+            cmd.register(&mut r)
+                .unwrap_or_else(|e| unreachable!("a fresh registry: {e}"));
+        }
         r
     }
 
@@ -157,7 +242,7 @@ impl Registry {
         Ok(())
     }
 
-    fn insert(&mut self, name: &'static str, server: ServerCmd) -> Result<(), Error> {
+    fn insert(&mut self, name: &'static str, server: ErasedFn) -> Result<(), Error> {
         if self.commands.contains_key(name) {
             return Err(Error::Fatal(format!("{name} already registered!")));
         }
@@ -174,17 +259,12 @@ impl Registry {
     ) -> Result<(), Error> {
         self.insert(
             cmd.name,
-            Box::new(move |host, body| {
+            Box::new(move |conn, body| {
                 Box::pin(async move {
-                    let arg = {
-                        let f = host.features().borrow();
-                        protocol::decode_section_body(&args_tag(cmd.name), &body, |r| {
-                            (cmd.read_arg)(r, &f)
-                        })?
-                    };
+                    let host = conn.host().clone();
+                    let arg = decode_args(&host, cmd.name, &body, |r, f| (cmd.read_arg)(r, f))?;
                     let res = (cmd.run)(host.clone(), arg).await?;
-                    let f = host.features().borrow();
-                    protocol::encode_section(&res_tag(cmd.name), |w| (cmd.write_res)(&res, w, &f))
+                    encode_res(&host, cmd.name, |w, f| (cmd.write_res)(&res, w, f))
                 })
             }),
         )
@@ -197,17 +277,32 @@ impl Registry {
     ) -> Result<(), Error> {
         self.insert(
             cmd.name,
-            Box::new(move |host, body| {
+            Box::new(move |conn, body| {
                 Box::pin(async move {
-                    let (fspath, arg) = {
-                        let f = host.features().borrow();
-                        protocol::decode_section_body(&args_tag(cmd.name), &body, |r| {
-                            Ok((Fspath::unmarshal(r)?, (cmd.read_arg)(r, &f)?))
-                        })?
-                    };
+                    let host = conn.host().clone();
+                    let (fspath, arg) = decode_args(&host, cmd.name, &body, |r, f| {
+                        Ok((Fspath::unmarshal(r)?, (cmd.read_arg)(r, f)?))
+                    })?;
                     let res = (cmd.run)(host.clone(), fspath, arg).await?;
-                    let f = host.features().borrow();
-                    protocol::encode_section(&res_tag(cmd.name), |w| (cmd.write_res)(&res, w, &f))
+                    encode_res(&host, cmd.name, |w, f| (cmd.write_res)(&res, w, f))
+                })
+            }),
+        )
+    }
+
+    /// Registers a server command.
+    pub fn register_server<A: 'static, R: 'static>(
+        &mut self,
+        cmd: &'static ServerCmd<A, R>,
+    ) -> Result<(), Error> {
+        self.insert(
+            cmd.name,
+            Box::new(move |conn, body| {
+                Box::pin(async move {
+                    let host = conn.host().clone();
+                    let arg = decode_args(&host, cmd.name, &body, |r, f| (cmd.read_arg)(r, f))?;
+                    let res = (cmd.run)(conn, arg).await?;
+                    encode_res(&host, cmd.name, |w, f| (cmd.write_res)(&res, w, f))
                 })
             }),
         )
@@ -218,27 +313,166 @@ impl Registry {
         self.commands.contains_key(name)
     }
 
-    /// `processRequest`: runs the request in `msg` (header section, then
-    /// argument section) on `host`, and returns the reply (header section,
-    /// then result section if it succeeded).
-    pub async fn process_request(&self, host: Rc<Host>, msg: &[u8]) -> Result<Vec<u8>, Error> {
-        let (header, rest) = protocol::split_section(msg)?;
-        let Header::Request(name) =
-            protocol::decode_section_body(HEADER_TAG, header, Header::unmarshal)?
-        else {
-            return Err(Error::Fatal("Protocol error: expected a request".into()));
-        };
-        let cmd = self
-            .commands
-            .get(name.as_str())
-            .ok_or_else(|| Error::Fatal(format!("{name} not registered!")))?;
-        let (args, _) = protocol::split_section(rest)?;
-        let result = cmd(host, args.to_vec()).await;
-        let mut reply = Header::of_result(&result).encode()?;
-        if let Ok(res) = result {
-            reply.extend(res);
-        }
-        Ok(reply)
+    /// The server side of the command `name`.
+    pub fn server_fn(&self, name: &str) -> Option<&ErasedFn> {
+        self.commands.get(name)
+    }
+}
+
+/// A command a registry can register (for `remote.ml`'s own).
+trait Registrable {
+    fn register(&'static self, r: &mut Registry) -> Result<(), Error>;
+}
+
+impl<A: 'static, R: 'static> Registrable for ServerCmd<A, R> {
+    fn register(&'static self, r: &mut Registry) -> Result<(), Error> {
+        r.register_server(self)
+    }
+}
+
+/// Decodes an argument section's body with `host`'s features.
+fn decode_args<T>(
+    host: &Host,
+    name: &str,
+    body: &[u8],
+    read: impl FnOnce(&mut Reader<'_>, &Features) -> umarshal::Result<T>,
+) -> Result<T, Error> {
+    let f = host.features().borrow();
+    protocol::decode_section_body(&args_tag(name), body, |r| read(r, &f))
+}
+
+/// Encodes a result section with `host`'s features.
+fn encode_res(
+    host: &Host,
+    name: &str,
+    write: impl FnOnce(&mut Writer, &Features),
+) -> Result<Vec<u8>, Error> {
+    let f = host.features().borrow();
+    protocol::encode_section(&res_tag(name), |w| write(w, &f))
+}
+
+/// Encodes an argument section with `host`'s features.
+fn encode_args(
+    host: &Host,
+    name: &str,
+    write: impl FnOnce(&mut Writer, &Features),
+) -> Result<Vec<u8>, Error> {
+    let f = host.features().borrow();
+    protocol::encode_section(&args_tag(name), |w| write(w, &f))
+}
+
+impl Connection {
+    /// Sends a request with its argument section, and decodes the result
+    /// with this side's features.
+    async fn call_encoded<R>(
+        &self,
+        name: &str,
+        args: Vec<u8>,
+        read_res: Read<R>,
+    ) -> Result<R, Error> {
+        let body = self.request(name, args).await?;
+        let f = self.host().features().borrow();
+        protocol::decode_section_body(&res_tag(name), &body, |r| read_res(r, &f))
+    }
+
+    /// Runs a server command on the other side (`registerServerCmd`'s
+    /// client side).
+    pub async fn call<A, R>(&self, cmd: &'static ServerCmd<A, R>, arg: A) -> Result<R, Error> {
+        let args = encode_args(self.host(), cmd.name, |w, f| (cmd.write_arg)(&arg, w, f))?;
+        self.call_encoded(cmd.name, args, cmd.read_res).await
+    }
+}
+
+/// `ClientConn.clrootEq`: whether two root specifications reach the same
+/// server, whatever their paths.
+fn same_server(a: &Clroot, b: &Clroot) -> bool {
+    match (a, b) {
+        (
+            Clroot::ConnectByShell {
+                shell,
+                host,
+                user,
+                port,
+                ..
+            },
+            Clroot::ConnectByShell {
+                shell: shell2,
+                host: host2,
+                user: user2,
+                port: port2,
+                ..
+            },
+        ) => shell == shell2 && host == host2 && user == user2 && port == port2,
+        (
+            Clroot::ConnectBySocket { host, port, .. },
+            Clroot::ConnectBySocket {
+                host: host2,
+                port: port2,
+                ..
+            },
+        ) => host == host2 && port == port2,
+        _ => false,
+    }
+}
+
+struct ClientConn {
+    clroot: Clroot,
+    root: Root,
+    conn: Connection,
+}
+
+/// The client's connections (`ClientConn`): one per server, found by the
+/// root specification that reached it or by its canonical root.
+#[derive(Default)]
+pub struct ClientConns(Vec<ClientConn>);
+
+impl ClientConns {
+    /// `register`: replaces the connection to the same server.
+    pub fn register(&mut self, clroot: Clroot, root: Root, conn: Connection) {
+        self.0.retain(|c| !same_server(&c.clroot, &clroot));
+        self.0.insert(0, ClientConn { clroot, root, conn });
+    }
+
+    /// `unregister`.
+    pub fn unregister(&mut self, conn: &Connection) {
+        self.0.retain(|c| c.conn != *conn);
+    }
+
+    /// `ofRootOpt`.
+    pub fn of_root(&self, root: &Root) -> Option<Connection> {
+        self.0
+            .iter()
+            .find(|c| c.root == *root)
+            .map(|c| c.conn.clone())
+    }
+
+    /// The connection to a host, for host commands.
+    pub fn of_host(&self, host: &str) -> Option<Connection> {
+        self.0
+            .iter()
+            .find(|c| matches!(&c.root.host, RootHost::Remote(h) if h == host))
+            .map(|c| c.conn.clone())
+    }
+
+    /// `canonRootOfClroot`: the canonical root of the server a root
+    /// specification reaches, if connected.
+    pub fn canon_root_of_clroot(&self, clroot: &Clroot) -> Option<Root> {
+        self.0
+            .iter()
+            .find(|c| same_server(&c.clroot, clroot))
+            .map(|c| c.root.clone())
+    }
+
+    /// `ofClrootConncheck`'s lookup.
+    fn of_clroot(&self, clroot: &Clroot) -> Option<Connection> {
+        self.0
+            .iter()
+            .find(|c| same_server(&c.clroot, clroot))
+            .map(|c| c.conn.clone())
+    }
+
+    fn all(&self) -> Vec<Connection> {
+        self.0.iter().map(|c| c.conn.clone()).collect()
     }
 }
 
@@ -246,8 +480,8 @@ impl Registry {
 pub enum Dispatch {
     /// Call the command directly on the client's own host.
     Direct(Rc<Host>),
-    /// Encode every call with the client's features and run it on a
-    /// separate host (see the module documentation).
+    /// Send every call over an in-memory connection to a separate host
+    /// (see the module documentation).
     Loopback {
         /// The client, whose features encode arguments and decode results.
         client: Rc<Host>,
@@ -256,105 +490,224 @@ pub enum Dispatch {
     },
 }
 
+/// The loopback host and its connection, made on first use.
+struct Loopback {
+    server: Rc<Host>,
+    conn: OnceCell<Connection>,
+}
+
 /// Runs commands on roots.
 pub struct Rpc {
-    registry: Registry,
-    dispatch: Dispatch,
+    registry: Rc<Registry>,
+    client: Rc<Host>,
+    loopback: Option<Loopback>,
+    endpoint: OnceCell<Rc<Endpoint>>,
+    conns: Rc<RefCell<ClientConns>>,
+}
+
+impl Drop for Rpc {
+    fn drop(&mut self) {
+        if let Some(c) = self.loopback.as_ref().and_then(|l| l.conn.get()) {
+            c.close();
+        }
+        let conns = self.conns.borrow().all();
+        for c in conns {
+            c.close();
+        }
+    }
 }
 
 impl Rpc {
-    /// An RPC with no commands registered. In loopback mode the server
-    /// host's warnings are shown on the client, as a server sends them
-    /// (`showWarningOnClient`).
+    /// An RPC with `remote.ml`'s commands registered. In loopback mode the
+    /// server host's warnings are shown on the client, as a server sends
+    /// them (`showWarningOnClient`).
     pub fn new(dispatch: Dispatch) -> Rpc {
-        if let Dispatch::Loopback { client, server } = &dispatch {
-            let client = Rc::downgrade(client);
-            server.set_warn_printer(Some(Rc::new(move |s| {
-                if let Some(c) = client.upgrade() {
-                    c.warn(s);
-                }
-            })));
-        }
+        let (client, loopback) = match dispatch {
+            Dispatch::Direct(client) => (client, None),
+            Dispatch::Loopback { client, server } => {
+                let c = Rc::downgrade(&client);
+                server.set_warn_printer(Some(Rc::new(move |s| {
+                    if let Some(c) = c.upgrade() {
+                        c.warn(s);
+                    }
+                })));
+                let conn = OnceCell::new();
+                (client, Some(Loopback { server, conn }))
+            }
+        };
         Rpc {
-            registry: Registry::new(),
-            dispatch,
+            registry: Rc::new(Registry::new()),
+            client,
+            loopback,
+            endpoint: OnceCell::new(),
+            conns: Rc::default(),
         }
     }
 
     /// The registry, to register commands with.
+    ///
+    /// # Panics
+    ///
+    /// Once a connection has been made: commands are registered first.
     pub fn registry_mut(&mut self) -> &mut Registry {
-        &mut self.registry
+        Rc::get_mut(&mut self.registry).expect("commands are registered before any connection")
+    }
+
+    /// The registered commands.
+    pub fn registry(&self) -> &Rc<Registry> {
+        &self.registry
     }
 
     /// The host that local roots' commands run on.
     pub fn local_host(&self) -> &Rc<Host> {
-        match &self.dispatch {
-            Dispatch::Direct(h) | Dispatch::Loopback { server: h, .. } => h,
-        }
+        self.loopback.as_ref().map_or(&self.client, |l| &l.server)
     }
 
     /// The client's host: the same as [`Rpc::local_host`] in direct mode.
     pub fn client_host(&self) -> &Rc<Host> {
-        match &self.dispatch {
-            Dispatch::Direct(h) | Dispatch::Loopback { client: h, .. } => h,
+        &self.client
+    }
+
+    /// Whether local roots' commands go over a connection
+    /// ([`Dispatch::Loopback`]). Code that skips a root command for local
+    /// roots, as OCaml does, calls it anyway in this mode, so that it is
+    /// exercised.
+    pub fn is_loopback(&self) -> bool {
+        self.loopback.is_some()
+    }
+
+    /// The client's side of its connections.
+    pub fn endpoint(&self) -> &Rc<Endpoint> {
+        self.endpoint
+            .get_or_init(|| Endpoint::new(self.registry.clone(), self.client.clone()))
+    }
+
+    /// Whether the client asks for half-duplex connections (`halfduplex`).
+    fn half_duplex(&self) -> bool {
+        let prefs = self.client.prefs().borrow();
+        prefs.kind(HALF_DUPLEX.name()).is_some() && *prefs.read(&HALF_DUPLEX)
+    }
+
+    /// The connection a host's commands go over: none for a local root in
+    /// direct mode, the loopback connection in loopback mode (made on first
+    /// use), and a remote host's from [`ClientConns`].
+    pub fn connection(&self, host: &RootHost) -> Result<Option<Connection>, Error> {
+        match host {
+            RootHost::Local => Ok(None),
+            RootHost::Remote(h) => self
+                .conns
+                .borrow()
+                .of_host(h)
+                .map(Some)
+                .ok_or_else(no_connection),
         }
     }
 
-    /// Whether calls are encoded as for a server ([`Dispatch::Loopback`]).
-    /// Code that skips a root command for local roots, as OCaml does, calls
-    /// it anyway in this mode, so that it is exercised.
-    pub fn is_loopback(&self) -> bool {
-        matches!(self.dispatch, Dispatch::Loopback { .. })
+    /// `Remote.connectionOfRoot`: the connection to a remote root's host.
+    pub fn connection_of_root(&self, root: &Root) -> Result<Connection, Error> {
+        self.conns.borrow().of_root(root).ok_or_else(no_connection)
+    }
+
+    /// `ClientConn.register` and `registerConnCleanup`: `conn` reaches the
+    /// server `clroot` names, whose canonical root is `root`. Once it
+    /// fails or closes, it is forgotten, and the client's close handlers
+    /// run (`clientConnClose`).
+    pub fn register_connection(&self, clroot: Clroot, root: Root, conn: Connection) {
+        let conns: Weak<RefCell<ClientConns>> = Rc::downgrade(&self.conns);
+        let client = Rc::downgrade(&self.client);
+        let c = conn.clone();
+        conn.at_close(move || {
+            if let Some(conns) = conns.upgrade() {
+                conns.borrow_mut().unregister(&c);
+            }
+            if let Some(client) = client.upgrade() {
+                client.run_conn_close_handlers(false);
+            }
+        });
+        self.conns.borrow_mut().register(clroot, root, conn);
+    }
+
+    /// The client's connections.
+    pub fn connections(&self) -> std::cell::Ref<'_, ClientConns> {
+        self.conns.borrow()
+    }
+
+    /// `ClientConn.ofClrootConncheck`: the connection to the server
+    /// `clroot` names, if it is still up. (The receiving task sees a lost
+    /// connection; yielding a bit lets it.)
+    pub async fn connection_checked(&self, clroot: &Clroot) -> Option<Connection> {
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let conn = self.conns.borrow().of_clroot(clroot)?;
+        if conn.failure().is_some() {
+            self.conns.borrow_mut().unregister(&conn);
+            return None;
+        }
+        Some(conn)
+    }
+
+    /// `clientCloseRootConnection`: closes the connection to a remote
+    /// root's host; for a local root, runs the client's close handlers.
+    pub fn close_root_connection(&self, root: &Root) {
+        match &root.host {
+            RootHost::Local => self.client.run_conn_close_handlers(false),
+            RootHost::Remote(_) => {
+                let conn = self.conns.borrow().of_root(root);
+                if let Some(c) = conn {
+                    c.close();
+                }
+            }
+        }
+    }
+
+    /// An in-memory connection to `server`, standing for a server on
+    /// another host that `clroot` reaches with canonical root `root`
+    /// (whose host is then remote), registered as such.
+    pub fn connect_in_memory(&self, clroot: Clroot, root: Root, server: Rc<Host>) -> Connection {
+        let server = Endpoint::new(self.registry.clone(), server);
+        let conn = connection::pipe(self.endpoint().clone(), server, self.half_duplex());
+        self.register_connection(clroot, root, conn.clone());
+        conn
     }
 
     /// `Remote.commandAvailable`: whether `root`'s host has the command.
-    /// (OCaml asks with a root command of its own; for a local root it
-    /// looks in the same table as here.)
-    pub fn command_available(&self, root: &Root, name: &str) -> Result<bool, Error> {
-        if let RootHost::Remote(h) = &root.host {
-            return Err(Error::Fatal(format!(
-                "Remote roots are not supported yet (command commandAvailable for host {h})"
-            )));
+    /// (For a local root, OCaml looks in its own table, as here in direct
+    /// mode.)
+    pub async fn command_available(&self, root: &Root, name: &str) -> Result<bool, Error> {
+        if root.is_local() {
+            return Ok(self.registry.contains(name));
         }
-        Ok(self.registry.contains(name))
+        match self.connection(&root.host)? {
+            None => Ok(self.registry.contains(name)),
+            Some(conn) => {
+                let arg = (root.fspath.clone(), name.to_owned());
+                self.over(&root.host, conn.call(&COMMAND_AVAILABLE, arg))
+                    .await
+            }
+        }
     }
 
-    fn check_local(&self, host: &RootHost, name: &str) -> Result<(), Error> {
-        if let RootHost::Remote(h) = host {
-            return Err(Error::Fatal(format!(
-                "Remote roots are not supported yet (command {name} for host {h})"
-            )));
-        }
+    fn check_registered(&self, name: &str) -> Result<(), Error> {
         if !self.registry.contains(name) {
             return Err(Error::Fatal(format!("{name} not registered!")));
         }
         Ok(())
     }
 
-    /// Sends a request through the registry as a server would receive it,
-    /// and decodes the reply.
-    async fn loopback<R>(
+    /// Awaits a call that went over the connection to `host`: in loopback
+    /// mode, a fatal error loses the `Server: ` that marks a server's, as
+    /// for a local root.
+    async fn over<R>(
         &self,
-        client: &Host,
-        server: &Rc<Host>,
-        name: &str,
-        args: Vec<u8>,
-        read_res: Read<R>,
+        host: &RootHost,
+        call: impl Future<Output = Result<R, Error>>,
     ) -> Result<R, Error> {
-        let mut msg = Header::Request(name.to_owned()).encode()?;
-        msg.extend(args);
-        let reply = self.registry.process_request(server.clone(), &msg).await?;
-        let (header, rest) = protocol::split_section(&reply)?;
-        match protocol::decode_section_body(HEADER_TAG, header, Header::unmarshal)? {
-            Header::NormalResult => {
-                let f = client.features().borrow();
-                protocol::decode_section(&res_tag(name), rest, |r| read_res(r, &f))
-            }
-            Header::TransientExn(m) => Err(Error::Transient(m)),
-            Header::FatalExn(m) => Err(Error::Fatal(m)),
-            other => Err(Error::Fatal(format!(
-                "Protocol error: unexpected reply {other:?}"
-            ))),
+        match call.await {
+            Err(Error::Fatal(m)) if *host == RootHost::Local => Err(Error::Fatal(
+                m.strip_prefix("Server: ").map_or(m.clone(), str::to_owned),
+            )),
+            r => r,
         }
     }
 
@@ -365,15 +718,26 @@ impl Rpc {
         host: &RootHost,
         arg: A,
     ) -> Result<R, Error> {
-        self.check_local(host, cmd.name)?;
-        match &self.dispatch {
-            Dispatch::Direct(h) => (cmd.run)(h.clone(), arg).await,
-            Dispatch::Loopback { client, server } => {
-                let args = {
-                    let f = client.features().borrow();
-                    protocol::encode_section(&args_tag(cmd.name), |w| (cmd.write_arg)(&arg, w, &f))?
-                };
-                self.loopback(client, server, cmd.name, args, cmd.read_res)
+        self.check_registered(cmd.name)?;
+        if let (RootHost::Local, Some(l)) = (host, &self.loopback) {
+            let server = l.server.clone();
+            return self
+                .round_trip(
+                    cmd.name,
+                    &l.server,
+                    |w, f| (cmd.write_arg)(&arg, w, f),
+                    cmd.read_arg,
+                    |a| (cmd.run)(server, a),
+                    cmd.write_res,
+                    cmd.read_res,
+                )
+                .await;
+        }
+        match self.connection(host)? {
+            None => (cmd.run)(self.client.clone(), arg).await,
+            Some(conn) => {
+                let args = encode_args(&self.client, cmd.name, |w, f| (cmd.write_arg)(&arg, w, f))?;
+                self.over(host, conn.call_encoded(cmd.name, args, cmd.read_res))
                     .await
             }
         }
@@ -387,20 +751,83 @@ impl Rpc {
         root: &Root,
         arg: A,
     ) -> Result<R, Error> {
-        self.check_local(&root.host, cmd.name)?;
-        match &self.dispatch {
-            Dispatch::Direct(h) => (cmd.run)(h.clone(), root.fspath.clone(), arg).await,
-            Dispatch::Loopback { client, server } => {
-                let args = {
-                    let f = client.features().borrow();
-                    protocol::encode_section(&args_tag(cmd.name), |w| {
+        self.check_registered(cmd.name)?;
+        if let (RootHost::Local, Some(l)) = (&root.host, &self.loopback) {
+            let server = l.server.clone();
+            return self
+                .round_trip(
+                    cmd.name,
+                    &l.server,
+                    |w, f| {
                         root.fspath.marshal(w);
-                        (cmd.write_arg)(&arg, w, &f);
-                    })?
-                };
-                self.loopback(client, server, cmd.name, args, cmd.read_res)
+                        (cmd.write_arg)(&arg, w, f);
+                    },
+                    |r, f| Ok((Fspath::unmarshal(r)?, (cmd.read_arg)(r, f)?)),
+                    |(p, a)| (cmd.run)(server, p, a),
+                    cmd.write_res,
+                    cmd.read_res,
+                )
+                .await;
+        }
+        match self.connection(&root.host)? {
+            None => (cmd.run)(self.client.clone(), root.fspath.clone(), arg).await,
+            Some(conn) => {
+                let args = encode_args(&self.client, cmd.name, |w, f| {
+                    root.fspath.marshal(w);
+                    (cmd.write_arg)(&arg, w, f);
+                })?;
+                self.over(&root.host, conn.call_encoded(cmd.name, args, cmd.read_res))
                     .await
             }
         }
     }
+
+    /// `registerRootCmdWithConnection`'s client side: runs `cmd` on
+    /// `local_root`'s host with the connection to `remote_root`'s. If
+    /// `local_root` is local, it runs here, with the connection to the
+    /// other root's host; otherwise it is sent over the connection to
+    /// `local_root`'s host, which runs it with that connection.
+    pub async fn call_root_with_connection<A, R>(
+        &self,
+        cmd: &'static ServerCmd<A, R>,
+        local_root: &Root,
+        remote_root: &Root,
+        arg: A,
+    ) -> Result<R, Error> {
+        self.check_registered(cmd.name)?;
+        if local_root.is_local() {
+            (cmd.run)(self.connection_of_root(remote_root)?, arg).await
+        } else {
+            self.connection_of_root(local_root)?.call(cmd, arg).await
+        }
+    }
+}
+
+impl Rpc {
+    /// Loopback mode for now: encodes the argument as the client would
+    /// send it, decodes it on the loopback host, runs the command there,
+    /// and brings the result back the same way.
+    #[allow(clippy::too_many_arguments)]
+    async fn round_trip<A, R>(
+        &self,
+        name: &str,
+        server: &Rc<Host>,
+        write_arg: impl FnOnce(&mut Writer, &Features),
+        read_arg: impl FnOnce(&mut Reader<'_>, &Features) -> umarshal::Result<A>,
+        run: impl FnOnce(A) -> LocalBoxFuture<Result<R, Error>>,
+        write_res: Write<R>,
+        read_res: Read<R>,
+    ) -> Result<R, Error> {
+        let args = encode_args(&self.client, name, write_arg)?;
+        let (body, _) = protocol::split_section(&args)?;
+        let arg = decode_args(server, name, body, read_arg)?;
+        let res = run(arg).await?;
+        let res = encode_res(server, name, |w, f| write_res(&res, w, f))?;
+        let f = self.client.features().borrow();
+        protocol::decode_section(&res_tag(name), &res, |r| read_res(r, &f))
+    }
+}
+
+fn no_connection() -> Error {
+    Error::Fatal("No connection with the server".into())
 }
