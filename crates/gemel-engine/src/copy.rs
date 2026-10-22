@@ -731,20 +731,27 @@ impl FileKind {
     }
 }
 
-/// `openFileIn'`: the source, from where the transfer starts.
+/// `openFileIn'`: a file to read, from where the transfer starts; errors
+/// are worded for `what` OCaml was doing (`convertUnixErrorsToTransient`).
 fn open_file_in(
     fspath: &Fspath,
     path: &Path<Local>,
     kind: FileKind,
+    what: &str,
 ) -> Result<std::fs::File, Error> {
-    const WHAT: &str = "transferring file contents";
-    let mut f = open_in(fspath, path, kind.fork(), WHAT)?;
+    let mut f = open_in(fspath, path, kind.fork(), what)?;
     if let FileKind::DataAppend(len) = kind {
         f.seek(SeekFrom::Start(len as u64))
-            .map_err(|e| io_error(WHAT, &e))?;
+            .map_err(|e| io_error(what, &e))?;
     }
     Ok(f)
 }
+
+/// What OCaml is doing when the source reads its file (`compress`).
+const COMPRESSING: &str = "transferring file contents";
+/// What OCaml is doing when the destination decodes a chunk, opening its
+/// files on the first.
+const DECODING: &str = "processing a transfer instruction";
 
 /// `openFileOut'`: the destination; a resumed one keeps what it has.
 fn open_file_out(
@@ -753,7 +760,7 @@ fn open_file_out(
     path: &Path<Local>,
     kind: FileKind,
 ) -> Result<std::fs::File, Error> {
-    const WHAT: &str = "transferring file contents";
+    const WHAT: &str = DECODING;
     match kind {
         FileKind::DataAppend(len) => {
             let full = fspath.concat(path);
@@ -883,7 +890,7 @@ async fn compress(conn: Connection, a: CompressArgs) -> Result<(), Error> {
             // Read off the engine thread, the chunks coming back as they are
             // made; if sending fails, reading stops at the next chunk.
             let reading = tokio::task::spawn_blocking(move || -> Result<(), Error> {
-                let mut f = open_file_in(&a.fspath_from, &a.path_from, a.kind)?;
+                let mut f = open_file_in(&a.fspath_from, &a.path_from, a.kind, COMPRESSING)?;
                 // `showPrefixProgress`: a resumed transfer's prefix counts.
                 if let FileKind::DataAppend(len) = a.kind {
                     progress(len as usize)?;
@@ -948,6 +955,7 @@ impl Receiving {
                         &self.fspath_to,
                         &self.real_path_to,
                         self.kind,
+                        DECODING,
                     )?);
                 }
                 let reference = self.reference.as_mut().expect("opened");
@@ -1023,7 +1031,7 @@ async fn transfer_file_contents(
         let (fspath, path) = (a.fspath_to.clone(), a.real_path_to.clone());
         Some(
             exclusive::blocking(&host, move || {
-                let mut f = open_file_in(&fspath, &path, kind)?;
+                let mut f = open_file_in(&fspath, &path, kind, "preprocessing file")?;
                 rsync::preprocess(&mut f, size_from, dest_size)
             })
             .await?,
