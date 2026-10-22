@@ -69,7 +69,8 @@ jobs:
       # work with, built with the same OCaml and cached by tag. Each pairing
       # is checked against itself. Then a gemel server, over ssh, with each
       # client: checked against the same client with the pinned source as
-      # its server.
+      # its server, with items one at a time, then concurrently, as clients
+      # run them by default.
       - id: ocaml
         run: echo "version=$(ocamlopt -version)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
@@ -106,10 +107,12 @@ jobs:
               oracle --remote $remote --reference releases/unison-$v --reference-server unison-src/src/unison --count 10
             done
           done
-          oracle --remote ssh --reference unison-src/src/unison --candidate-server target/debug/gemel --count 50
-          for v in 2.52.1 2.53.8; do
-            oracle --remote ssh --reference releases/unison-$v --reference-server unison-src/src/unison \
-              --candidate releases/unison-$v --candidate-server target/debug/gemel --count 20
+          for c in "" --concurrent; do
+            oracle --remote ssh $c --reference unison-src/src/unison --candidate-server target/debug/gemel --count 50
+            for v in 2.52.1 2.53.8; do
+              oracle --remote ssh $c --reference releases/unison-$v --reference-server unison-src/src/unison \
+                --candidate releases/unison-$v --candidate-server target/debug/gemel --count 20
+            done
           done
         shell: bash
       # Outcomes on a socket for Windows, still the reference's.
