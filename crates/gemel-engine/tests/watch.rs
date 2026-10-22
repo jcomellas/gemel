@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use gemel_base::path::Path;
-use gemel_engine::common::{UpdateContent, UpdateItem};
+use gemel_engine::common::{PrevState, UpdateContent, UpdateItem};
 use gemel_engine::fswatch;
 use gemel_engine::update::{self, PathUpdates, Subpaths};
 use support::sync::*;
@@ -167,22 +167,30 @@ fn the_watcher_finds_what_a_full_scan_finds() {
     }
 }
 
-/// An update, with each directory's own props left out. Through a
-/// directory, OCaml's `buildUpdatePathTree` gives the archive's props
-/// (`archDesc`), where a whole scan gives those it reads: the same with
-/// Unix's fast directory check, but Windows has none, so the times differ.
+/// An update, with directories' own props left out. Through a directory,
+/// OCaml's `buildUpdatePathTree` gives the archive's props (`archDesc`),
+/// where a whole scan gives those it reads; and each scan brings the
+/// cached archive's directories up to date, which the next scan sees as
+/// their previous state. Unix's fast directory check keeps these the same,
+/// but Windows has none, so there the times differ.
 fn shape(ui: &UpdateItem) -> String {
+    let prev = |p: &PrevState| match p {
+        PrevState::Dir(_) => "Dir".to_owned(),
+        other => format!("{other:?}"),
+    };
     match ui {
-        UpdateItem::Updates(UpdateContent::Dir(_, children, perm, emptied), prev) => {
+        UpdateItem::Updates(UpdateContent::Dir(_, children, perm, emptied), p) => {
             let children: Vec<String> = children
                 .iter()
                 .map(|(n, ui)| format!("{}: {}", String::from_utf8_lossy(n.as_bytes()), shape(ui)))
                 .collect();
             format!(
-                "Dir({perm:?}, {emptied}, [{}]) from {prev:?}",
-                children.join(", ")
+                "Dir({perm:?}, {emptied}, [{}]) from {}",
+                children.join(", "),
+                prev(p)
             )
         }
+        UpdateItem::Updates(content, p) => format!("{content:?} from {}", prev(p)),
         other => format!("{other:?}"),
     }
 }
