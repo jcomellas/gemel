@@ -693,11 +693,17 @@ fn archives_lock_on_both_roots() {
             archive::lock_archives(rpc, roots).await.unwrap();
             archive::unlock_archives(rpc, roots).await.unwrap();
         });
-        // The host releases its locks when it goes away.
+        // The host releases its locks when it goes away: a loopback host
+        // once its connection's tasks have seen the connection closed.
         let a_lock = s.file(0, ArchiveVersion::Lock);
         archive::lock_archive_local(s.host(), &s.roots.list()[0].fspath).unwrap();
         assert!(a_lock.exists());
         drop(s);
+        block_on(async {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+        });
         assert!(!a_lock.exists());
     }
 }

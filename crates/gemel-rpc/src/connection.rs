@@ -485,8 +485,10 @@ impl Connection {
     /// reply, with the request's id. A command this side doesn't have
     /// fails the request (OCaml's server stops).
     async fn process_request(self, id: [u8; INT_SIZE], name: String, args: Vec<u8>) {
-        // As OCaml, yield first, so that the receiver keeps going.
-        tokio::task::yield_now().await;
+        // OCaml yields first, so that the receiver keeps going; a spawned
+        // task already waits for it. (Yielding here would start requests
+        // that arrive together in reverse: tokio wakes tasks that yielded
+        // in the same tick last first.)
         let run = self
             .0
             .endpoint
