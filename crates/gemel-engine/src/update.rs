@@ -162,7 +162,8 @@ fn xattr_ignore_initial() -> Vec<String> {
 
 /// `xattrignore` (`Props.xattrIgnorePred`): extended attributes not to
 /// synchronise. gemel doesn't synchronise them yet, but archives record
-/// the patterns.
+/// the patterns. Sent only with the xattr feature, as `xattrs` is, so
+/// servers without it (2.52) don't refuse an unknown preference.
 pub static XATTR_IGNORE: Pred = Pred::with_initial(
     "xattrignore",
     Category::Advanced(Topic::Sync),
@@ -187,7 +188,8 @@ pub static XATTR_IGNORE: Pred = Pred::with_initial(
      on Linux only). All names not prefixed with a \"!\" are taken \
      as strictly belonging to the user namespace and therefore the \
      \"!user.\" prefix is never used.",
-);
+)
+.send(props::xattr_enabled);
 
 /// `xattrignorenot` (`Props.xattrIgnorenotPred`): overrides `xattrignore`.
 pub static XATTR_IGNORE_NOT: Pred = Pred::new(
@@ -215,16 +217,24 @@ pub static XATTR_IGNORE_NOT: Pred = Pred::new(
      on Linux only). All names not prefixed with a \"!\" are taken \
      as strictly belonging to the user namespace and therefore the \
      \"!user.\" prefix is never used.",
-);
+)
+.send(props::xattr_enabled);
+
+/// Registers `props.ml`'s preferences, in OCaml's order: gemel-fs's up to
+/// `xattrs`, the xattr predicates, then `acl`.
+pub fn register_props_prefs(prefs: &mut Prefs) -> Result<(), Error> {
+    props::register_prefs(prefs)?;
+    XATTR_IGNORE.register(prefs)?;
+    XATTR_IGNORE_NOT.register(prefs)?;
+    props::register_acl_prefs(prefs)
+}
 
 /// Registers this module's preferences.
 pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     prefs.register(&FAST_CHECK)?;
     prefs.register(&MOUNTPOINTS)?;
     IMMUTABLE.register(prefs)?;
-    IMMUTABLE_NOT.register(prefs)?;
-    XATTR_IGNORE.register(prefs)?;
-    XATTR_IGNORE_NOT.register(prefs)
+    IMMUTABLE_NOT.register(prefs)
 }
 
 // ---- Parts of the archive ----

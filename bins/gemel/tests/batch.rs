@@ -155,9 +155,6 @@ fn version() {
     );
 }
 
-/// What gemel doesn't register yet, and OCaml lists (xattrs and ACLs).
-const NOT_YET: [&str; 2] = ["   -acl ", "   -xattrs "];
-
 /// The usage and every option, from `-help` and after a usage error; the
 /// options for the manual page (`-prefsman short`).
 #[test]
@@ -179,11 +176,6 @@ fn the_list_of_options() {
         assert_eq!(r.code, theirs.code, "{args:?}");
         let usage = |ls: &[String]| -> Vec<String> {
             ls.iter()
-                .filter(|l| {
-                    !NOT_YET
-                        .iter()
-                        .any(|n| l.starts_with(n) || l.contains(&format!("\"{}\"", n.trim())))
-                })
                 // The usage and some docs name the program.
                 .map(|l| l.replace("unison", "gemel"))
                 .collect()

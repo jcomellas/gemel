@@ -25,11 +25,13 @@
 //! features whenever both sides support them, even with the `xattrs` and
 //! `acl` preferences off, so its archives carry the change time, xattr and
 //! ACL fields ([`PropsConfig::xattr_enabled`], [`PropsConfig::acl_enabled`]),
-//! and gemel must read and write them. Not ported yet: reading and setting
-//! xattrs and ACLs, the `xattrs` and `acl` preferences (so
-//! [`PropsConfig::sync_xattrs`] and [`PropsConfig::sync_acl`] stay off),
-//! ACL comparison under `numericids`, and the "props data" store that ACL
-//! strings refer to.
+//! and gemel must read and write them. The `xattrs` and `acl` preferences
+//! are registered, since an OCaml client sends them whenever the features
+//! are negotiated, but setting either to true is refused, as OCaml refuses
+//! it when the other side lacks the feature (so [`PropsConfig::sync_xattrs`]
+//! and [`PropsConfig::sync_acl`] stay off). Not ported yet: reading and
+//! setting xattrs and ACLs, ACL comparison under `numericids`, and the
+//! "props data" store that ACL strings refer to.
 
 use gemel_base::features::Features;
 use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
@@ -129,7 +131,47 @@ pub static TIMES: PrefDef<bool> = PrefDef::new(
      file modification times (but not directory modtimes) are propagated.",
 );
 
-/// Registers this module's preferences.
+/// Whether the `Sync: xattr` feature is enabled (`xattrEnabled`): the
+/// `xattrs` preference and the xattr predicates are sent only then.
+pub fn xattr_enabled(_: &Prefs, features: &Features) -> bool {
+    features.enabled_by_name(FEATURE_XATTR)
+}
+
+/// Whether the `Sync: ACL` feature is enabled (`aclEnabled`).
+pub fn acl_enabled(_: &Prefs, features: &Features) -> bool {
+    features.enabled_by_name(FEATURE_ACL)
+}
+
+/// `xattrs` (`syncXattrs`): synchronise extended attributes. Refused when
+/// true (see the module documentation).
+pub static SYNC_XATTRS: PrefDef<bool> = PrefDef::new(
+    "xattrs",
+    Category::Advanced(Topic::Sync),
+    || false,
+    "synchronize extended attributes (xattrs)",
+    "When this flag is set to \\verb|true|, the extended attributes of \
+     files and directories are synchronized. System extended attributes \
+     are not synchronized.",
+)
+.send(xattr_enabled);
+
+/// `acl` (`syncACL`): synchronise ACLs. Refused when true (see the module
+/// documentation).
+pub static SYNC_ACL: PrefDef<bool> = PrefDef::new(
+    "acl",
+    Category::Advanced(Topic::Sync),
+    || false,
+    "synchronize ACLs",
+    "When this flag is set to \\verb|true|, the ACLs of files and \
+     directories are synchronized. The type of ACLs depends on the \
+     platform and filesystem support. On Unix-like platforms it \
+     can be NFSv4 ACLs, for example.",
+)
+.send(acl_enabled);
+
+/// Registers this module's preferences up to `xattrs`. OCaml registers
+/// `xattrignore` and `xattrignorenot` next, which gemel-engine keeps (they
+/// are predicates), then [`register_acl_prefs`].
 pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     prefs.register(&PERMS)?;
     prefs.register(&DONT_CHMOD)?;
@@ -137,7 +179,13 @@ pub fn register_prefs(prefs: &mut Prefs) -> Result<(), Error> {
     prefs.alias(&NUMERIC_IDS, "numericIds")?;
     prefs.register(&OWNER)?;
     prefs.register(&GROUP)?;
-    prefs.register(&TIMES)
+    prefs.register(&TIMES)?;
+    prefs.register(&SYNC_XATTRS)
+}
+
+/// Registers `acl`, after the xattr predicates (see [`register_prefs`]).
+pub fn register_acl_prefs(prefs: &mut Prefs) -> Result<(), Error> {
+    prefs.register(&SYNC_ACL)
 }
 
 /// `Props.init`: once it is known whether a host runs Windows, keeps only
@@ -164,12 +212,38 @@ pub const FEATURE_XATTR: &str = "Sync: xattr";
 pub const FEATURE_ACL: &str = "Sync: ACL";
 
 /// Registers this module's features, in OCaml's order. Both change the
-/// archive format. (OCaml's validators check the `xattrs` and `acl`
-/// preferences, which aren't ported, so there are none.)
+/// archive format. Their validators refuse the `xattrs` and `acl`
+/// preferences with OCaml's message for a server without the feature,
+/// whether or not it is enabled, until gemel synchronises them.
 pub fn register_features(features: &mut Features) -> Result<(), Error> {
-    features.register(FEATURE_XATTR, true, None)?;
-    features.register(FEATURE_ACL, true, None)?;
+    features.register(
+        FEATURE_XATTR,
+        true,
+        Some(Box::new(|_, _, prefs| {
+            set(prefs, &SYNC_XATTRS).then(|| {
+                "You have requested synchronization of extended attributes (the \
+                 \"xattrs\" preference) but the server does not support this."
+                    .to_owned()
+            })
+        })),
+    )?;
+    features.register(
+        FEATURE_ACL,
+        true,
+        Some(Box::new(|_, _, prefs| {
+            set(prefs, &SYNC_ACL).then(|| {
+                "You have requested synchronization of ACLs (the \
+                 \"acl\" preference) but the server does not support this."
+                    .to_owned()
+            })
+        })),
+    )?;
     Ok(())
+}
+
+/// Whether a boolean preference is registered and true.
+fn set(prefs: &Prefs, pref: &PrefDef<bool>) -> bool {
+    prefs.kind(pref.name()).is_some() && *prefs.read(pref)
 }
 
 /// The preferences and negotiated features the props operations depend on.

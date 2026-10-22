@@ -426,3 +426,50 @@ fn diffs_are_of_where_the_files_are() {
         );
     });
 }
+
+/// `xattrs`, `xattrignore`, `xattrignorenot` and `acl` are sent only with
+/// their features, in OCaml's order, so a server without them (2.52) isn't
+/// sent preferences it doesn't know; and setting `xattrs` or `acl` is
+/// refused until gemel synchronises them.
+#[test]
+fn xattr_and_acl_preferences_follow_their_features() {
+    use gemel_fs::props::{FEATURE_ACL, FEATURE_XATTR, SYNC_ACL, SYNC_XATTRS};
+    const NAMES: [&str; 4] = ["acl", "xattrignorenot", "xattrignore", "xattrs"];
+    let mut prefs = gemel_ui_api::new_prefs().unwrap();
+    let mut features = gemel_ui_api::new_features().unwrap();
+    let sent = |prefs: &gemel_base::prefs::Prefs, f: &gemel_base::features::Features| {
+        let dump = prefs.dump(1, f).unwrap();
+        NAMES.map(|n| dump.iter().position(|(m, ..)| m == n))
+    };
+    assert_eq!(sent(&prefs, &features), [None; 4]);
+    features.set_enabled(&[FEATURE_XATTR.into()]);
+    let [acl, not, ignore, xattrs] = sent(&prefs, &features);
+    assert_eq!(acl, None);
+    // The dump lists the most recently registered first.
+    assert!(
+        not < ignore && ignore < xattrs,
+        "{not:?} {ignore:?} {xattrs:?}"
+    );
+    features.set_enabled(&[FEATURE_XATTR.into(), FEATURE_ACL.into()]);
+    let [acl, not, ..] = sent(&prefs, &features);
+    assert!(acl.is_some() && acl < not, "{acl:?} {not:?}");
+
+    assert_eq!(features.validate_enabled(&prefs), Ok(()));
+    for (pref, what) in [
+        (
+            &SYNC_XATTRS,
+            "extended attributes (the \"xattrs\" preference)",
+        ),
+        (&SYNC_ACL, "ACLs (the \"acl\" preference)"),
+    ] {
+        prefs.set(pref, true);
+        let e = features.validate_enabled(&prefs).unwrap_err().to_string();
+        let message = format!("You have requested synchronization of {what} but the server");
+        assert!(e.contains(&message), "{e}");
+        prefs.set(pref, false);
+    }
+    // Whether or not the feature is enabled.
+    features.reset_enabled();
+    prefs.set(&SYNC_XATTRS, true);
+    assert!(features.validate_enabled(&prefs).is_err());
+}
