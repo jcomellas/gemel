@@ -375,6 +375,23 @@ impl Connection {
         protocol::decode_section_body(&res_tag(name), &body, |r| read_res(r, &f))
     }
 
+    /// [`Connection::call`], with the request sent at once and the reply
+    /// waited for by the future.
+    pub fn start_call<A, R: 'static>(
+        &self,
+        cmd: &'static ServerCmd<A, R>,
+        arg: A,
+    ) -> Result<impl Future<Output = Result<R, Error>> + 'static, Error> {
+        let args = encode_args(self.host(), cmd.name, |w, f| (cmd.write_arg)(&arg, w, f))?;
+        let reply = self.start_request(cmd.name, args)?;
+        let host = self.host().clone();
+        Ok(async move {
+            let body = reply.await?;
+            let f = host.features().borrow();
+            protocol::decode_section_body(&res_tag(cmd.name), &body, |r| (cmd.read_res)(r, &f))
+        })
+    }
+
     /// Runs a server command on the other side (`registerServerCmd`'s
     /// client side).
     pub async fn call<A, R>(&self, cmd: &'static ServerCmd<A, R>, arg: A) -> Result<R, Error> {

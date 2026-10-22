@@ -384,6 +384,17 @@ impl Connection {
     /// reply: the body of the result section, or the error the command
     /// failed with (a fatal one prefixed with `Server: `).
     pub async fn request(&self, name: &str, args: Vec<u8>) -> Result<Vec<u8>, Error> {
+        self.start_request(name, args)?.await
+    }
+
+    /// [`Connection::request`]'s first half, done at once: the request
+    /// takes its id and its place in the queue now; the future waits for
+    /// the reply.
+    pub fn start_request(
+        &self,
+        name: &str,
+        args: Vec<u8>,
+    ) -> Result<impl std::future::Future<Output = Result<Vec<u8>, Error>> + 'static, Error> {
         if let Some(e) = self.failure() {
             return Err(e);
         }
@@ -395,8 +406,11 @@ impl Connection {
             Kind::Normal,
             [&protocol::encode_int(id)[..], &header, &args].concat(),
         );
-        rx.await
-            .unwrap_or_else(|_| Err(self.failure().unwrap_or_else(lost)))
+        let conn = self.clone();
+        Ok(async move {
+            rx.await
+                .unwrap_or_else(|_| Err(conn.failure().unwrap_or_else(lost)))
+        })
     }
 
     /// `receive`: reads messages until the connection fails, then fails
@@ -588,12 +602,16 @@ pub fn start_client(
         c.receive().await;
     });
     if !half_duplex {
-        let c = conn.clone();
-        runtime::spawn_local(async move {
-            if let Ok(false) = c.call(&NEGOCIATE_FLOW_CONTROL, ()).await {
-                c.disable_flow_control();
-            }
-        });
+        // Queued now, as OCaml does, so that it is the first request (id
+        // 2); only the reply is waited for apart.
+        if let Ok(reply) = conn.start_call(&NEGOCIATE_FLOW_CONTROL, ()) {
+            let c = conn.clone();
+            runtime::spawn_local(async move {
+                if let Ok(false) = reply.await {
+                    c.disable_flow_control();
+                }
+            });
+        }
     }
     conn
 }

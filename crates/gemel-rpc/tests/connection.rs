@@ -533,8 +533,9 @@ fn a_half_duplex_server_writes_only_with_the_token() {
 }
 
 /// What an OCaml server sees of a gemel client: after its token, the
-/// client's negotiation request and the token back; with flow control off,
-/// requests without tokens.
+/// client's negotiation request (id 2, before a request made at once), the
+/// other request and the token back; with flow control off, requests
+/// without tokens.
 #[test]
 fn a_client_negotiates_then_writes_freely() {
     block_on(async {
@@ -543,31 +544,38 @@ fn a_client_negotiates_then_writes_freely() {
         let (r, w) = tokio::io::split(ours);
         let endpoint = Endpoint::new(Rc::new(registry()), host("client", false));
         let conn = connection::start_client(endpoint, Box::new(r), Box::new(w), false);
+        let first = conn.start_call(&PEER_NAME, ()).unwrap();
         peer.write_all(&token()).await.unwrap();
         let (id, header, _) = read_message(&mut peer).await;
         assert_eq!(header, Header::Request("negociateFlowControl".into()));
         assert_eq!(id, 2, "OCaml's first message id");
+        let (id3, header, _) = read_message(&mut peer).await;
+        assert_eq!((id3, header), (3, Header::Request("peerName".into())));
         assert_eq!(read_int(&mut peer).await, 0, "the token back");
-        let reply = message(
+        let negotiated = message(
             id,
             Header::NormalResult,
             Some(section("negociateFlowControl-res", |w| w.bool(false))),
         );
-        peer.write_all(&reply).await.unwrap();
+        let name = |id, n: &[u8]| {
+            message(
+                id,
+                Header::NormalResult,
+                Some(section("peerName-res", |w| w.string(n))),
+            )
+        };
+        peer.write_all(&[negotiated, name(3, b"ocaml")].concat())
+            .await
+            .unwrap();
+        assert_eq!(first.await.unwrap(), "ocaml");
         let ask = conn.call(&PEER_NAME, ());
         let serve = async {
             let (id, header, _) = read_message(&mut peer).await;
-            assert_eq!(header, Header::Request("peerName".into()));
-            assert_eq!(id, 3);
-            let reply = message(
-                id,
-                Header::NormalResult,
-                Some(section("peerName-res", |w| w.string(b"ocaml"))),
-            );
-            peer.write_all(&reply).await.unwrap();
+            assert_eq!((id, header), (4, Header::Request("peerName".into())));
+            peer.write_all(&name(id, b"again")).await.unwrap();
         };
-        let (name, ()) = join2(ask, serve).await;
-        assert_eq!(name.unwrap(), "ocaml");
+        let (again, ()) = join2(ask, serve).await;
+        assert_eq!(again.unwrap(), "again");
         assert!(!conn.flow_control());
     });
 }
