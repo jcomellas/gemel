@@ -340,16 +340,23 @@ impl Connection {
     /// `maybeFlush`), until the connection is closed or a write fails.
     async fn write(self, output: Output) {
         let mut w = BufWriter::with_capacity(BUFFER_SIZE, output);
+        // Whether anything was written since the last flush. (The buffer
+        // can be empty with something to flush still: a message larger
+        // than the buffer goes past it, into an output that may buffer it,
+        // as standard output does up to a newline.)
+        let mut unflushed = false;
         let result: std::io::Result<()> = async {
             loop {
                 let next = self.0.queues.borrow_mut().pop();
                 if let Some(((message, written), kind)) = next {
                     w.write_all(&message).await?;
+                    unflushed = true;
                     self.0
                         .emitted
                         .set(self.0.emitted.get() + message.len() as u64);
                     if kind == Kind::Urgent {
                         w.flush().await?;
+                        unflushed = false;
                     }
                     if let Some(written) = written {
                         let _ = written.send(());
@@ -364,7 +371,7 @@ impl Connection {
                     w.flush().await?;
                     return w.shutdown().await;
                 }
-                if w.buffer().is_empty() && !token {
+                if !unflushed && !token {
                     self.0.writer.notified().await;
                     // As `allowWrites` does, let the receiver and the
                     // requests it started run first.
@@ -390,6 +397,7 @@ impl Connection {
                     self.0.emitted.set(self.0.emitted.get() + INT_SIZE as u64);
                 }
                 w.flush().await?;
+                unflushed = false;
             }
         }
         .await;
