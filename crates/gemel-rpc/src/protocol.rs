@@ -75,6 +75,28 @@ pub fn encode_section(tag: &str, write: impl FnOnce(&mut Writer)) -> Result<Vec<
     Ok([&encode_int(len)[..], tag.as_bytes(), &frame].concat())
 }
 
+/// A section whose value is raw bytes, not a marshalled value: its length,
+/// the tag, then `payload` (as `processTransferInstruction` sends its
+/// chunks).
+pub fn encode_raw_section(tag: &str, payload: &[u8]) -> Result<Vec<u8>, Error> {
+    let len = u32::try_from(tag.len() + payload.len())
+        .map_err(|_| Error::Fatal("Protocol error: message data too big".into()))?;
+    Ok([&encode_int(len)[..], tag.as_bytes(), payload].concat())
+}
+
+/// A raw section's payload: its body without the tag, which must be `tag`
+/// (`safeUnmarshal`).
+pub fn strip_tag<'a>(tag: &str, body: &'a [u8]) -> Result<&'a [u8], Error> {
+    body.strip_prefix(tag.as_bytes()).ok_or_else(|| {
+        let got = &body[..tag.len().min(body.len())];
+        Error::Fatal(format!(
+            "[safeUnmarshal] expected '{}' but got '{}'",
+            escaped(tag.as_bytes()),
+            escaped(got)
+        ))
+    })
+}
+
 /// Splits a section off the front of `buf`: returns its body (tag and
 /// frame) and the rest.
 pub fn split_section(buf: &[u8]) -> Result<(&[u8], &[u8]), Error> {
@@ -92,14 +114,7 @@ pub fn decode_section_body<T>(
     body: &[u8],
     read: impl FnOnce(&mut Reader<'_>) -> umarshal::Result<T>,
 ) -> Result<T, Error> {
-    let Some(frame) = body.strip_prefix(tag.as_bytes()) else {
-        let got = &body[..tag.len().min(body.len())];
-        return Err(Error::Fatal(format!(
-            "[safeUnmarshal] expected '{}' but got '{}'",
-            escaped(tag.as_bytes()),
-            escaped(got)
-        )));
-    };
+    let frame = strip_tag(tag, body)?;
     umarshal::from_bytes(frame, read)
         .map_err(|e| Error::Fatal(format!("Fatal error during unmarshaling ({e})")))
 }

@@ -14,7 +14,7 @@ use gemel_fs::fspath::Fspath;
 use gemel_rpc::connection::{self, Connection, Endpoint, HALF_DUPLEX, LOST_CONNECTION};
 use gemel_rpc::host::Host;
 use gemel_rpc::protocol::{self, Header};
-use gemel_rpc::registry::{Dispatch, HostCmd, Registry, RootCmd, Rpc, ServerCmd};
+use gemel_rpc::registry::{Dispatch, HostCmd, Registry, RootCmd, Rpc, ServerCmd, StreamCmd};
 use gemel_rpc::root::{self, CANONIZE_ON_SERVER, Root};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
@@ -103,6 +103,47 @@ static OTHER_SIDE: ServerCmd<(), String> = ServerCmd::new(
     },
 );
 
+/// What a host's [`COLLECT`] got.
+#[derive(Default)]
+struct Collected(Vec<Vec<u8>>);
+
+/// Keeps each chunk on the host it runs on; fails on a chunk that starts
+/// with `!`.
+static COLLECT: StreamCmd<Vec<u8>> = StreamCmd::new(
+    "collect",
+    "collectPing",
+    |v, out| out.extend_from_slice(v),
+    |b| Ok(b.to_vec()),
+    |conn, chunk| {
+        Box::pin(async move {
+            if chunk.first() == Some(&b'!') {
+                return Err(Error::Transient(format!(
+                    "bad chunk {}",
+                    String::from_utf8_lossy(&chunk)
+                )));
+            }
+            conn.host().state::<Collected>().borrow_mut().0.push(chunk);
+            Ok(())
+        })
+    },
+);
+
+/// The chunks [`COLLECT`] kept on the host, which it forgets.
+static COLLECTED: HostCmd<(), Vec<Vec<u8>>> = HostCmd::new(
+    "collected",
+    |(), _, _| {},
+    |_, _| Ok(()),
+    |v, w, _| w.list(v, |w, c| w.string(c)),
+    |r, _| r.list(|r| r.string()),
+    |host, ()| {
+        Box::pin(async move {
+            Ok(std::mem::take(
+                &mut host.state::<Collected>().borrow_mut().0,
+            ))
+        })
+    },
+);
+
 fn registry() -> Registry {
     let mut r = Registry::new();
     r.register_host(&NAME).unwrap();
@@ -111,6 +152,8 @@ fn registry() -> Registry {
     r.register_server(&PEER_NAME).unwrap();
     r.register_server(&OTHER_SIDE).unwrap();
     r.register_root(&PROBE).unwrap();
+    r.register_stream(&COLLECT).unwrap();
+    r.register_host(&COLLECTED).unwrap();
     r
 }
 
@@ -622,5 +665,86 @@ fn connection_close_handlers() {
         let r = runs.clone();
         conn.at_close(move || r.borrow_mut().push("after"));
         assert_eq!(*runs.borrow(), ["before", "after"]);
+    });
+}
+
+/// Chunks go out without replies, after one another, and arrive before the
+/// ping that ends the stream; with streaming off, each is a request.
+#[test]
+fn streams_deliver_chunks_in_order() {
+    for streaming in [true, false] {
+        block_on(async {
+            let (rpc, root, conn) = connected(false);
+            let chunks: Vec<Vec<u8>> = (0..50)
+                .map(|i| vec![b'a' + (i % 26) as u8; 1000 + i])
+                .collect();
+            let n = conn
+                .stream(&COLLECT, streaming, |sender| {
+                    let chunks = &chunks;
+                    async move {
+                        for c in chunks {
+                            sender.send(c).await?;
+                        }
+                        Ok(chunks.len())
+                    }
+                })
+                .await
+                .unwrap();
+            assert_eq!(n, 50);
+            let got = rpc.call_host(&COLLECTED, &root.host, ()).await.unwrap();
+            assert_eq!(got, chunks, "streaming {streaming}");
+        });
+    }
+}
+
+/// A chunk that fails aborts the stream: the sender is told to stop, and
+/// the ping brings back the error.
+#[test]
+fn a_failed_chunk_aborts_the_stream() {
+    block_on(async {
+        let (rpc, root, conn) = connected(false);
+        let sent = Rc::new(Cell::new(0));
+        let s = sent.clone();
+        let r = conn
+            .stream(&COLLECT, true, |sender| async move {
+                sender.send(&b"first".to_vec()).await?;
+                sender.send(&b"!second".to_vec()).await?;
+                // Keep going until the abort arrives.
+                loop {
+                    sender.send(&b"more".to_vec()).await?;
+                    s.set(s.get() + 1);
+                    tokio::task::yield_now().await;
+                }
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .await;
+        assert_eq!(r, Err(Error::Transient("bad chunk !second".into())));
+        // The chunks after the failed one were dropped.
+        let got = rpc.call_host(&COLLECTED, &root.host, ()).await.unwrap();
+        assert_eq!(got, [b"first".to_vec()]);
+        // The next stream goes through.
+        conn.stream(&COLLECT, true, |sender| async move {
+            sender.send(&b"again".to_vec()).await
+        })
+        .await
+        .unwrap();
+        let got = rpc.call_host(&COLLECTED, &root.host, ()).await.unwrap();
+        assert_eq!(got, [b"again".to_vec()]);
+    });
+}
+
+/// With streaming off, a failing chunk fails its own request.
+#[test]
+fn without_streaming_a_failed_chunk_fails_at_once() {
+    block_on(async {
+        let (_rpc, _root, conn) = connected(false);
+        let r: Result<(), Error> = conn
+            .stream(&COLLECT, false, |sender| async move {
+                sender.send(&b"!bad".to_vec()).await?;
+                panic!("not reached");
+            })
+            .await;
+        assert_eq!(r, Err(Error::Transient("bad chunk !bad".into())));
     });
 }

@@ -80,6 +80,7 @@ pub struct Endpoint {
     registry: Rc<Registry>,
     host: Rc<Host>,
     ids: Cell<u32>,
+    streams: tokio::sync::Semaphore,
 }
 
 impl Endpoint {
@@ -89,6 +90,7 @@ impl Endpoint {
             registry,
             host,
             ids: Cell::new(1),
+            streams: tokio::sync::Semaphore::new(1),
         })
     }
 
@@ -105,13 +107,21 @@ impl Endpoint {
     /// `newMsgId`: 2 and up, wrapping before [`HUGE_INT`]. (1 was the id
     /// of the 2.51 compatibility mode's magic packet, 0 is the write
     /// token.)
-    fn new_msg_id(&self) -> u32 {
+    pub fn new_msg_id(&self) -> u32 {
         let mut id = self.ids.get() + 1;
         if id == HUGE_INT {
             id = 2;
         }
         self.ids.set(id);
         id
+    }
+
+    /// A turn to stream (`streamReg`): one stream at a time on this side.
+    pub async fn stream_turn(&self) -> tokio::sync::SemaphorePermit<'_> {
+        self.streams
+            .acquire()
+            .await
+            .unwrap_or_else(|_| unreachable!("the semaphore is never closed"))
     }
 }
 
@@ -131,14 +141,18 @@ struct Queues {
     can_write: bool,
     flow_control: bool,
     closed: bool,
-    urgent: VecDeque<Vec<u8>>,
-    normal: VecDeque<Vec<u8>>,
-    idle: VecDeque<Vec<u8>>,
+    urgent: VecDeque<Queued>,
+    normal: VecDeque<Queued>,
+    idle: VecDeque<Queued>,
 }
+
+/// A message, and who waits for it to be written (`performOutput`'s
+/// result).
+type Queued = (Vec<u8>, Option<oneshot::Sender<()>>);
 
 impl Queues {
     /// `popOutputQueues`'s choice: the next message that may go out.
-    fn pop(&mut self) -> Option<(Vec<u8>, Kind)> {
+    fn pop(&mut self) -> Option<(Queued, Kind)> {
         if let Some(m) = self.urgent.pop_front() {
             return Some((m, Kind::Urgent));
         }
@@ -172,6 +186,7 @@ struct Inner {
     close_handlers: RefCell<Vec<Box<dyn FnOnce()>>>,
     stream_aborted_src: Cell<u32>,
     stream_aborted_dst: Cell<bool>,
+    stream_errors: RefCell<HashMap<u32, Error>>,
 }
 
 /// A connection with the other side (`Remote.connection`). Clones are the
@@ -228,6 +243,7 @@ impl Connection {
             close_handlers: RefCell::default(),
             stream_aborted_src: Cell::new(0),
             stream_aborted_dst: Cell::new(false),
+            stream_errors: RefCell::default(),
         }));
         runtime::spawn_local(conn.clone().write(output));
         conn
@@ -268,14 +284,31 @@ impl Connection {
     /// kind go out in the order they are queued; nothing goes out once the
     /// connection is closed.
     pub fn send(&self, kind: Kind, message: Vec<u8>) {
+        self.queue(kind, (message, None));
+    }
+
+    /// Queues a message and waits until it is written (into the output
+    /// buffer), as OCaml's senders wait for `dump`: so that what is sent
+    /// after it, of whatever kind, goes after it. Fails if the connection
+    /// does first.
+    pub async fn send_and_wait(&self, kind: Kind, message: Vec<u8>) -> Result<(), Error> {
+        if let Some(e) = self.failure() {
+            return Err(e);
+        }
+        let (tx, rx) = oneshot::channel();
+        self.queue(kind, (message, Some(tx)));
+        rx.await.map_err(|_| self.failure().unwrap_or_else(lost))
+    }
+
+    fn queue(&self, kind: Kind, queued: Queued) {
         let mut q = self.0.queues.borrow_mut();
         if q.closed {
             return;
         }
         match kind {
-            Kind::Urgent => q.urgent.push_back(message),
-            Kind::Normal => q.normal.push_back(message),
-            Kind::Idle => q.idle.push_back(message),
+            Kind::Urgent => q.urgent.push_back(queued),
+            Kind::Normal => q.normal.push_back(queued),
+            Kind::Idle => q.idle.push_back(queued),
         }
         drop(q);
         self.0.writer.notify_one();
@@ -288,10 +321,13 @@ impl Connection {
         let result: std::io::Result<()> = async {
             loop {
                 let next = self.0.queues.borrow_mut().pop();
-                if let Some((message, kind)) = next {
+                if let Some(((message, written), kind)) = next {
                     w.write_all(&message).await?;
                     if kind == Kind::Urgent {
                         w.flush().await?;
+                    }
+                    if let Some(written) = written {
+                        let _ = written.send(());
                     }
                     continue;
                 }
@@ -453,11 +489,9 @@ impl Connection {
             }
             Header::TransientExn(s) => self.reply(num_id, Err(Error::Transient(s)))?,
             Header::FatalExn(s) => self.reply(num_id, Err(Error::Fatal(format!("Server: {s}"))))?,
-            Header::Stream(_) => {
-                // No stream command is registered yet (they come with
-                // transfers): OCaml's answer to an unknown one.
-                receive_packet(input).await?;
-                self.abort_stream(num_id)?;
+            Header::Stream(name) => {
+                let chunk = receive_packet(input).await?;
+                self.process_stream(num_id, &name, chunk).await?;
             }
             Header::StreamAbort => self.0.stream_aborted_src.set(num_id),
         }
@@ -487,6 +521,46 @@ impl Connection {
             );
         }
         Ok(())
+    }
+
+    /// `processStream`: runs a stream chunk, in order with the messages
+    /// around it. Once a chunk of a stream fails, the stream is aborted,
+    /// and its later chunks are dropped; its ping gets the error.
+    async fn process_stream(&self, id: u32, name: &str, chunk: Vec<u8>) -> Result<(), Error> {
+        if self.0.stream_errors.borrow().contains_key(&id) {
+            return self.abort_stream(id);
+        }
+        let run = self
+            .0
+            .endpoint
+            .registry
+            .stream_fn(name)
+            .map(|f| f(self.clone(), chunk));
+        let result = match run {
+            Some(run) => run.await,
+            None => Err(Error::Fatal(format!("{name} not registered!"))),
+        };
+        if let Err(e) = result {
+            self.0.stream_errors.borrow_mut().insert(id, e);
+            self.abort_stream(id)?;
+        }
+        Ok(())
+    }
+
+    /// A stream's ping (`<name>Ping`'s server side): the error its chunks
+    /// met, if any, which is then forgotten, and streams may be aborted
+    /// again.
+    pub fn stream_ping(&self, id: i64) -> Result<(), Error> {
+        let e = u32::try_from(id)
+            .ok()
+            .and_then(|id| self.0.stream_errors.borrow_mut().remove(&id));
+        match e {
+            Some(e) => {
+                self.0.stream_aborted_dst.set(false);
+                Err(e)
+            }
+            None => Ok(()),
+        }
     }
 
     /// The id of the last stream the other side aborted
