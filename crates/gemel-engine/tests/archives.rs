@@ -857,3 +857,70 @@ fn commits_move_scratch_to_main() {
         info.as_ref()
     ));
 }
+
+/// With root b on a server on another host (an in-memory connection), each
+/// host names its root's archives after itself: the server's lock is in its
+/// own Unison directory, under the name only a host called "server" gives.
+#[test]
+fn a_server_names_its_archives_after_itself() {
+    let dir = TempDir::new("two-hosts");
+    let [a, b, u, v] = ["a", "b", "u", "v"].map(|n| {
+        let p = dir.0.join(n);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    });
+    let fspath = |p: &StdPath| {
+        let bytes = system::name_bytes(p.as_os_str());
+        Fspath::canonize(Some(&bytes)).unwrap()
+    };
+    let mut prefs = new_prefs();
+    prefs.set(&os::CLIENT_HOST_NAME, HOST_NAME.to_owned());
+    let client = Rc::new(Host::client(
+        Rc::new(RefCell::new(prefs)),
+        Rc::new(RefCell::new(new_features())),
+    ));
+    client.set_unison_dir(&u);
+    let mut rpc = Rpc::new(Dispatch::Direct(client));
+    gemel_engine::register_commands(&mut rpc).unwrap();
+    let server = Rc::new(Host::server(new_prefs(), new_features()));
+    server.set_host_name("server");
+    server.set_unison_dir(&v);
+    let remote = gemel_rpc::root::Root {
+        host: gemel_rpc::root::Host::Remote("server".into()),
+        fspath: fspath(&b),
+    };
+    let clroot = gemel_base::clroot::Clroot::ConnectByShell {
+        shell: "ssh".into(),
+        host: "server".into(),
+        user: None,
+        port: None,
+        path: Some(b.to_str().unwrap().into()),
+    };
+    let roots = Roots::from_roots(vec![gemel_rpc::root::Root::local(fspath(&a)), remote]);
+    block_on(async {
+        rpc.connect_in_memory(clroot, roots.list()[1].clone(), server.clone());
+        archive::store_roots_name(&rpc, &roots).unwrap();
+        globals::propagate_prefs(&rpc, &roots).await.unwrap();
+        archive::lock_archives(&rpc, &roots).await.unwrap();
+    });
+    let lock = |host: &Host, root: &gemel_rpc::root::Root| {
+        archive::archive_name(host, &root.fspath, ArchiveVersion::Lock)
+            .unwrap()
+            .0
+    };
+    let (ours, theirs) = (
+        lock(rpc.client_host(), &roots.list()[0]),
+        lock(&server, &roots.list()[1]),
+    );
+    assert!(u.join(&ours).exists(), "{ours}");
+    assert!(v.join(&theirs).exists(), "{theirs}");
+    // The server got the client's roots name, and named its root after
+    // itself: the client would name the same path otherwise.
+    assert_eq!(
+        archive::this_roots_global_name(&server, &roots.list()[1].fspath).unwrap(),
+        format!("//server/{}", roots.list()[1].fspath)
+    );
+    assert_ne!(theirs, lock(rpc.client_host(), &roots.list()[1]));
+    block_on(archive::unlock_archives(&rpc, &roots)).unwrap();
+    assert!(!v.join(&theirs).exists());
+}
