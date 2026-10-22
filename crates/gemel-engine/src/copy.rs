@@ -16,7 +16,8 @@
 //! (`processTransferInstruction`).
 //!
 //! A destination that already has a file with the same contents copies it
-//! instead (`tryCopyMovedFile`).
+//! instead (`tryCopyMovedFile`), and a transfer of contents another is
+//! bringing waits for it, so as to copy them (`registerFileTransfer`).
 //!
 //! Not ported yet: resuming a partial transfer (`validFilePrefix`), in
 //! phase 5 of milestone 3; external copy programs (`copyprog`), which are
@@ -25,6 +26,8 @@
 //! ([`crate::uutil`]), and stops when everything is aborted
 //! ([`crate::abort::AllFlag`]), as it runs.
 
+use std::collections::{HashMap, VecDeque};
+use std::future::Future;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
@@ -983,7 +986,7 @@ impl Receiving {
 
 /// The transfers a host is receiving, by their ids.
 #[derive(Default)]
-struct Transfers(std::collections::HashMap<u32, Arc<std::sync::Mutex<Receiving>>>);
+struct Transfers(HashMap<u32, Arc<std::sync::Mutex<Receiving>>>);
 
 /// `processTransferInstruction`, on the destination's host.
 async fn process_transfer_instruction(
@@ -1265,16 +1268,21 @@ async fn try_copy_moved_file(
     };
     let printer = uutil::progress_printer(host);
     let abort = host.state::<Abort>().borrow().all_flag();
+    // An error reading or copying the candidate is the outer one, and the
+    // transfer goes on without it; one setting the copy's props or
+    // checking it fails the transfer, as in OCaml, where those come after
+    // a bind that its `try` doesn't reach.
+    type Copied = Result<Result<Option<(Info, String)>, Error>, Error>;
     let copied = {
         let (ctx, a) = (ctx.clone(), a.clone());
-        exclusive::blocking(host, move || -> Result<Option<(Info, String)>, Error> {
+        exclusive::blocking(host, move || -> Copied {
             // If the candidate is the replica's root, `from_root` is
             // right; otherwise it isn't expected to be a link, and it is
             // right still.
             let info = fileinfo::get_basic(true, &cand_fspath, &cand_path, &|_| false, &ctx.fs)?;
             if info.typ == Typ::Absent || info.desc.length() != a.desc.length() {
                 // The candidate has gone.
-                return Ok(None);
+                return Ok(Ok(None));
             }
             let mut progress = |n| {
                 if let Some(p) = &printer {
@@ -1295,37 +1303,39 @@ async fn try_copy_moved_file(
             )?;
             // (OCaml reads the props' extended data here; gemel doesn't
             // synchronise xattrs and ACLs yet.)
-            set_fileinfo(
-                &ctx,
-                &a.fspath_to,
-                &a.path_to,
-                &a.real_path_to,
-                a.replacing,
-                &a.desc,
-            )?;
-            let (info, transferred) = file_is_transferred(&ctx, &a)?;
-            if !transferred {
-                // The candidate has changed.
-                return Ok(None);
-            }
-            let msg = format!(
-                "Shortcut: copied {}/{} from local file {}/{}\n",
-                String::from_utf8_lossy(a.fspath_to.as_bytes()),
-                String::from_utf8_lossy(a.real_path_to.as_bytes()),
-                String::from_utf8_lossy(cand_fspath.as_bytes()),
-                String::from_utf8_lossy(cand_path.as_bytes()),
-            );
-            Ok(Some((info, msg)))
+            Ok((|| {
+                set_fileinfo(
+                    &ctx,
+                    &a.fspath_to,
+                    &a.path_to,
+                    &a.real_path_to,
+                    a.replacing,
+                    &a.desc,
+                )?;
+                let (info, transferred) = file_is_transferred(&ctx, &a)?;
+                if !transferred {
+                    // The candidate has changed.
+                    return Ok(None);
+                }
+                let msg = format!(
+                    "Shortcut: copied {}/{} from local file {}/{}\n",
+                    String::from_utf8_lossy(a.fspath_to.as_bytes()),
+                    String::from_utf8_lossy(a.real_path_to.as_bytes()),
+                    String::from_utf8_lossy(cand_fspath.as_bytes()),
+                    String::from_utf8_lossy(cand_path.as_bytes()),
+                );
+                Ok(Some((info, msg)))
+            })())
         })
         .await
     };
     match copied {
-        Ok(Some(done)) => Ok(Some(done)),
-        Ok(None) | Err(Error::Transient(_)) => {
+        Ok(Ok(Some(done))) => Ok(Some(done)),
+        Ok(Ok(None)) | Err(Error::Transient(_)) => {
             xferhint::delete_entry(host, &a.fp);
             Ok(None)
         }
-        Err(e) => Err(e),
+        Ok(Err(e)) | Err(e) => Err(e),
     }
 }
 
@@ -1369,27 +1379,77 @@ async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<T
             Some(msg),
         ));
     }
-    // Not ported yet (phase 5): `registerFileTransfer`, which has
-    // concurrent transfers of the same contents wait for the first.
-    if let Some((info, msg)) = try_copy_moved_file(&host, &ctx, &a).await? {
+    let fp = a.fp.clone();
+    register_file_transfer(&host, &fp, async {
+        if let Some((info, msg)) = try_copy_moved_file(&host, &ctx, &a).await? {
+            xferhint::insert_entry(&host, hint);
+            return Ok(Transferred::Done(
+                Box::new(TransferStatus::Succeeded(info)),
+                Some(msg),
+            ));
+        }
+        if should_use_external_copyprog(&host.prefs().borrow(), &a) {
+            let warned = host.state::<WarnedCopyprog>();
+            if !std::mem::replace(&mut warned.borrow_mut().0, true) {
+                host.warn(
+                    "External copy programs (copyprog, copythreshold) are not supported; \
+                     transferring files with the built-in protocol instead.\n",
+                );
+            }
+        }
+        let status = really_transfer_file(&conn_from, &ctx, &a, &temp_info).await?;
         xferhint::insert_entry(&host, hint);
-        return Ok(Transferred::Done(
-            Box::new(TransferStatus::Succeeded(info)),
-            Some(msg),
-        ));
+        Ok(Transferred::Done(Box::new(status), None))
+    })
+    .await
+}
+
+/// `filesBeingTransferred`: for the contents being transferred to a host,
+/// the transfers of the same contents waiting for theirs to end.
+#[derive(Default)]
+struct BeingTransferred(HashMap<FullFingerprint, VecDeque<tokio::sync::oneshot::Sender<()>>>);
+
+/// `registerFileTransfer`: runs `transfer`, after any transfer of the same
+/// contents under way on this host, so that it can copy what that one
+/// made instead (see [`try_copy_moved_file`]).
+async fn register_file_transfer<T>(
+    host: &Host,
+    fp: &FullFingerprint,
+    transfer: impl Future<Output = Result<T, Error>>,
+) -> Result<T, Error> {
+    if !*host.prefs().borrow().read(&xferhint::XFER_BY_COPYING) {
+        return transfer.await;
     }
-    if should_use_external_copyprog(&host.prefs().borrow(), &a) {
-        let warned = host.state::<WarnedCopyprog>();
-        if !std::mem::replace(&mut warned.borrow_mut().0, true) {
-            host.warn(
-                "External copy programs (copyprog, copythreshold) are not supported; \
-                 transferring files with the built-in protocol instead.\n",
-            );
+    let table = host.state::<BeingTransferred>();
+    let turn = {
+        let mut t = table.borrow_mut();
+        match t.0.get_mut(fp) {
+            None => {
+                t.0.insert(fp.clone(), VecDeque::new());
+                None
+            }
+            Some(waiting) => {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                waiting.push_back(tx);
+                Some(rx)
+            }
+        }
+    };
+    if let Some(turn) = turn {
+        let _ = turn.await;
+    }
+    let result = transfer.await;
+    // `wakeupNextTransfer`.
+    let mut t = table.borrow_mut();
+    match t.0.get_mut(fp).and_then(VecDeque::pop_front) {
+        Some(next) => {
+            let _ = next.send(());
+        }
+        None => {
+            t.0.remove(fp);
         }
     }
-    let status = really_transfer_file(&conn_from, &ctx, &a, &temp_info).await?;
-    xferhint::insert_entry(&host, hint);
-    Ok(Transferred::Done(Box::new(status), None))
+    result
 }
 
 /// `reallyTransferFile`: the data fork, then the resource fork and the

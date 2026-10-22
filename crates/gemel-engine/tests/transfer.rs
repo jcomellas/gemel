@@ -721,6 +721,92 @@ fn a_file_the_destination_has_is_copied_not_sent() {
     }
 }
 
+/// Both futures' outputs, running them together.
+async fn join<A: std::future::Future, B: std::future::Future>(
+    a: A,
+    b: B,
+) -> (A::Output, B::Output) {
+    let (mut a, mut b) = (std::pin::pin!(a), std::pin::pin!(b));
+    let (mut x, mut y) = (None, None);
+    std::future::poll_fn(|cx| {
+        if x.is_none()
+            && let std::task::Poll::Ready(v) = a.as_mut().poll(cx)
+        {
+            x = Some(v);
+        }
+        if y.is_none()
+            && let std::task::Poll::Ready(v) = b.as_mut().poll(cx)
+        {
+            y = Some(v);
+        }
+        if x.is_some() && y.is_some() {
+            std::task::Poll::Ready((x.take().unwrap(), y.take().unwrap()))
+        } else {
+            std::task::Poll::Pending
+        }
+    })
+    .await
+}
+
+/// Two transfers of the same contents at once: the second waits for the
+/// first (`registerFileTransfer`), then copies what it made rather than
+/// being sent.
+#[test]
+fn a_transfer_of_contents_under_way_is_waited_for_then_copied() {
+    let h = hosts("two-hosts-same", &[]);
+    let contents = random(80, 200_000);
+    write_file(&h.path("a", "f"), &contents);
+    write_file(&h.path("a", "g"), &contents);
+    let (ra, rb) = (h.root("a"), h.root("b"));
+    let (sf, sg) = (h.source("a", "f"), h.source("a", "g"));
+    let (f, tf, g, tg) = (local("f"), local(".tmp-f"), local("g"), local(".tmp-g"));
+    let wire = h.wire();
+    let (f, g) = block_on(join(
+        copy::file(
+            &h.rpc,
+            ra,
+            &f,
+            rb,
+            &rb.fspath,
+            &tf,
+            &f,
+            Replacing::Copy,
+            &sf,
+            FileId(7),
+        ),
+        copy::file(
+            &h.rpc,
+            ra,
+            &g,
+            rb,
+            &rb.fspath,
+            &tg,
+            &g,
+            Replacing::Copy,
+            &sg,
+            FileId(8),
+        ),
+    ));
+    f.unwrap();
+    g.unwrap();
+    let wire = h.wire() - wire;
+    assert!(wire < contents.len() as u64 * 3 / 2, "{wire} bytes");
+    for name in [".tmp-f", ".tmp-g"] {
+        assert!(
+            std::fs::read(h.path("b", name)).unwrap() == contents,
+            "{name}"
+        );
+    }
+    let log = std::fs::read_to_string(h.dir.0.join("u").join("unison.log")).unwrap();
+    let b = String::from_utf8_lossy(rb.fspath.as_bytes()).into_owned();
+    assert!(
+        log.contains(&format!(
+            "Shortcut: copied {b}/g from local file {b}/.tmp-f\n"
+        )),
+        "{log}"
+    );
+}
+
 // ---- Against OCaml's own sessions ----
 
 const CAPTURED: &str = include_str!("captured/transfers.txt");
