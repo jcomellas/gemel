@@ -8,6 +8,7 @@
 //! gemel-oracle --reference PATH [--candidate PATH] [--seed N] [--count K]
 //!              [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]
 //!              [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH]
+//!              [--concurrent]
 //! gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] [--work DIR] [--keep]
 //! ```
 //!
@@ -15,7 +16,8 @@
 //! (every scenario must then agree). With `--remote`, replica `b` is on a
 //! server, which is each side's client unless `--*-server` says otherwise. Each implementation runs in the same
 //! work directory in turn, because archive names depend on the roots'
-//! absolute paths. `--record` saves the reference's outcomes, and
+//! absolute paths. `--concurrent` lets items run concurrently, and then
+//! what the syncs print is compared without its order. `--record` saves the reference's outcomes, and
 //! `--replay` compares a candidate with them where there is no reference
 //! (Windows). See `tools/oracle/README.md`.
 
@@ -43,6 +45,7 @@ struct Args {
     remote: Option<Remote>,
     reference_server: Option<PathBuf>,
     candidate_server: Option<PathBuf>,
+    concurrent: bool,
 }
 
 impl Args {
@@ -76,7 +79,8 @@ impl Args {
 
 const USAGE: &str = "usage: gemel-oracle --reference PATH [--candidate PATH] [--seed N] \
                      [--count K] [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]\n                    \
-                     [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH]\n   \
+                     [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH] \
+                     [--concurrent]\n   \
                      or: gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] \
                      [--work DIR] [--keep]";
 
@@ -94,6 +98,7 @@ fn parse_args() -> Result<Args, String> {
         remote: None,
         reference_server: None,
         candidate_server: None,
+        concurrent: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -122,6 +127,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--reference-server" => args.reference_server = Some(value()?.into()),
             "--candidate-server" => args.candidate_server = Some(value()?.into()),
+            "--concurrent" => args.concurrent = true,
             "--help" | "-h" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
@@ -133,8 +139,9 @@ fn parse_args() -> Result<Args, String> {
             && args.record.is_none()
             && args.remote.is_none()
             && args.reference_server.is_none()
+            && !args.concurrent
     } else {
-        !args.reference.as_os_str().is_empty()
+        !args.reference.as_os_str().is_empty() && !(args.concurrent && args.record.is_some())
     };
     if !ok {
         return Err(USAGE.into());
@@ -178,7 +185,16 @@ fn first_difference(expected: &str, actual: &str) -> String {
     )
 }
 
-fn compare_step(name: &str, r: &Step, c: &Step, out: &mut Vec<String>) {
+/// The lines of `s`, sorted.
+fn sorted_lines(s: &str) -> Vec<&str> {
+    let mut v: Vec<&str> = s.lines().collect();
+    v.sort_unstable();
+    v
+}
+
+/// Compares two runs of a sync; with `unordered`, what they print is
+/// compared without its order (items ran concurrently).
+fn compare_step(name: &str, r: &Step, c: &Step, unordered: bool, out: &mut Vec<String>) {
     if r.exit != c.exit {
         out.push(format!("{name}: exit code {:?} vs {:?}", r.exit, c.exit));
     }
@@ -187,7 +203,12 @@ fn compare_step(name: &str, r: &Step, c: &Step, out: &mut Vec<String>) {
         ("stderr", &r.stderr, &c.stderr),
         ("server's stderr", &r.server, &c.server),
     ] {
-        if x != y {
+        let differ = if unordered {
+            sorted_lines(x) != sorted_lines(y)
+        } else {
+            x != y
+        };
+        if differ {
             out.push(format!(
                 "{name} {stream} differs at {}",
                 first_difference(x, y)
@@ -196,10 +217,10 @@ fn compare_step(name: &str, r: &Step, c: &Step, out: &mut Vec<String>) {
     }
 }
 
-fn compare(r: &Outcome, c: &Outcome) -> Vec<String> {
+fn compare(r: &Outcome, c: &Outcome, unordered: bool) -> Vec<String> {
     let mut out = Vec::new();
-    compare_step("first sync", &r.first, &c.first, &mut out);
-    compare_step("second sync", &r.second, &c.second, &mut out);
+    compare_step("first sync", &r.first, &c.first, unordered, &mut out);
+    compare_step("second sync", &r.second, &c.second, unordered, &mut out);
     for (name, x, y) in [("replica a", &r.a, &c.a), ("replica b", &r.b, &c.b)] {
         for path in x
             .keys()
@@ -220,7 +241,13 @@ fn compare(r: &Outcome, c: &Outcome) -> Vec<String> {
             out.push(format!("{name}: {x:?} vs {y:?}"));
         }
     }
-    compare_step("recheck by the reference", &r.recheck, &c.recheck, &mut out);
+    compare_step(
+        "recheck by the reference",
+        &r.recheck,
+        &c.recheck,
+        unordered,
+        &mut out,
+    );
     out
 }
 
@@ -283,20 +310,29 @@ fn run_scenario(
         Some(o) => (o.clone(), candidate.clone()),
         None => {
             let r = args.reference();
-            let o = run::outcome(&r, &r, remote, &scenario, &work).map_err(io)?;
+            let o = run::outcome(&r, &r, remote, args.concurrent, &scenario, &work).map_err(io)?;
             std::fs::rename(&work, base.join(format!("{seed}-reference"))).map_err(io)?;
             (o, r)
         }
     };
-    let candidate = run::outcome(&candidate, &rechecker, remote, &scenario, &work).map_err(io)?;
+    let candidate = run::outcome(
+        &candidate,
+        &rechecker,
+        remote,
+        args.concurrent,
+        &scenario,
+        &work,
+    )
+    .map_err(io)?;
     std::fs::rename(&work, base.join(format!("{seed}-candidate"))).map_err(io)?;
     let mut problems = if recorded.is_some() {
         compare(
             &record::portable(&reference, flavour),
             &record::portable(&candidate, flavour),
+            false,
         )
     } else {
-        compare(&reference, &candidate)
+        compare(&reference, &candidate, args.concurrent)
     };
     // A disagreement inside the reference itself is a harness problem; one
     // in the candidate's recheck is a real failure.

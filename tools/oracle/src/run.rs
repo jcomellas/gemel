@@ -23,8 +23,8 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 use crate::scenario::{self, Scenario};
 
 /// Preferences for every run: batch mode, no colours, log or big-delete
-/// prompts, one transfer at a time (so the output order is deterministic),
-/// and modification times synchronised (so they can be compared).
+/// prompts, and modification times synchronised (so they can be
+/// compared).
 pub const FLAGS: &[&str] = &[
     "-batch",
     "-ui",
@@ -35,9 +35,11 @@ pub const FLAGS: &[&str] = &[
     "-confirmbigdel=false",
     "-contactquietly",
     "-times",
-    "-maxthreads",
-    "1",
 ];
+
+/// Unless items run concurrently: one transfer at a time, so the output
+/// order is deterministic.
+const ONE_AT_A_TIME: &[&str] = &["-maxthreads", "1"];
 
 const TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -270,7 +272,7 @@ fn shim_runs(work: &Path) -> u64 {
     fs::metadata(work.join("remote").join("argv")).map_or(0, |m| m.len())
 }
 
-fn run(p: &Pairing, remote: Option<Remote>, work: &Path) -> io::Result<Step> {
+fn run(p: &Pairing, remote: Option<Remote>, concurrent: bool, work: &Path) -> io::Result<Step> {
     let mut cmd = Command::new(&p.client);
     cmd.arg(work.join("a"));
     let mut server = None;
@@ -306,6 +308,7 @@ fn run(p: &Pairing, remote: Option<Remote>, work: &Path) -> io::Result<Step> {
     }
     let mut child = cmd
         .args(FLAGS)
+        .args(if concurrent { &[][..] } else { ONE_AT_A_TIME })
         .env("UNISON", work.join("unison"))
         .env("HOME", work)
         .stdin(Stdio::null())
@@ -365,6 +368,7 @@ pub fn outcome(
     p: &Pairing,
     reference: &Pairing,
     remote: Option<Remote>,
+    concurrent: bool,
     scenario: &Scenario,
     work: &Path,
 ) -> io::Result<Outcome> {
@@ -379,17 +383,17 @@ pub fn outcome(
     let (a, b) = (work.join("a"), work.join("b"));
     scenario::apply(&a, &scenario.initial_a)?;
     scenario::apply(&b, &scenario.initial_b)?;
-    let first = run(p, remote, work)?;
+    let first = run(p, remote, concurrent, work)?;
     scenario::apply(&a, &scenario.changes_a)?;
     scenario::apply(&b, &scenario.changes_b)?;
-    let second = run(p, remote, work)?;
+    let second = run(p, remote, concurrent, work)?;
     let (snap_a, snap_b) = (snapshot(&a)?, snapshot(&b)?);
     let unison_dir = listing(&work.join("unison"))?;
     let server_dir = match remote {
         Some(_) => listing(&work.join("unison-server"))?,
         None => Vec::new(),
     };
-    let recheck = run(reference, remote, work)?;
+    let recheck = run(reference, remote, concurrent, work)?;
     Ok(Outcome {
         first,
         second,

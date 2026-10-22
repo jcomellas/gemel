@@ -288,10 +288,16 @@ It is split in two, since gemel's server can be tested against OCaml clients bef
   - A client that sends nothing gets nothing from OCaml's server, whose header is still buffered when it sees the end of its input. Gemel's flushes its header first. No client hangs up before it has read the header, so that's left as it is.
 - **Warnings and messages** go to the client (`showWarningOnClient`, `forwardMsgToClient`), each queued as a request as it is made, so that it goes out before the reply to the request that caused it. OCaml waits for each one's reply; gemel doesn't, which only changes timing.
   - A trace crosses threads, so its forwarder holds a key to its connection in a table on the engine thread, not the connection itself (OCaml's forwarder is a global).
-- **`tryCopyMovedFile`** came forward from phase 5. OCaml clients see it: with a gemel server, a file moved on the server's side was sent again rather than copied there, and the log lacked OCaml's `Shortcut: copied ...`.
+- **`tryCopyMovedFile` and `registerFileTransfer`** came forward from phase 5. OCaml clients see them:
+  - with a gemel server, a file moved on the server's side was sent again rather than copied there, and the log lacked OCaml's `Shortcut: copied ...`;
+  - with items running concurrently, a transfer of contents another transfer is bringing waits for it, then copies its temporary file.
+  - OCaml's `try` around the copy is synchronous, so it catches errors reading and copying the candidate, which then fall back to a transfer, and not errors setting the copy's props or checking it, which come after a bind and fail the transfer. Gemel's does the same.
+- **Concurrency:** an OCaml client runs items concurrently by default, which a server can't stop (the gemel client runs them one at a time until phase 5). The oracle's `--concurrent` lets them, and compares what the syncs print without its order. OCaml's order is deterministic (it agrees with itself), and gemel's server answers in another, since its file work runs on blocking threads. The order is left for phase 5, with the gemel client's concurrency.
+- **A reply larger than the output buffer could stay unflushed:** the writer took an empty buffer to mean nothing was left to flush, but a large message goes past the buffer into the output. Standard output holds what follows its last newline, so a 23 KB reply to `find` waited there until something else was written, sometimes for minutes. An in-memory pipe holds nothing, so no test saw it. The writer now remembers what it wrote since it last flushed; `connection.rs`'s tests check it on an output that holds everything until it is flushed.
 - **Against OCaml:**
   - the server's output for each kind of first line, and its failures, byte for byte (`bins/gemel/tests/server.rs`, against literals recorded from 2.54, and against OCaml's server when there is one);
-  - whole syncs from the oracle harness, an OCaml client with a gemel server against the same client with `8772d26` as its server: on Linux, 50 of 50 scenarios with an `8772d26` client, and 30 of 30 with each of 2.53.8 and 2.52.1; on macOS, 40 of 40 with Homebrew's 2.54.0. CI runs 50, then 20 for each release.
+  - whole syncs from the oracle harness, an OCaml client with a gemel server against the same client with `8772d26` as its server: on Linux, 50 of 50 scenarios with an `8772d26` client, and 30 of 30 with each of 2.53.8 and 2.52.1; on macOS, 40 of 40 with Homebrew's 2.54.0, and 60 of 60 with `--concurrent`. CI runs 50, then 20 for each release, each way;
+  - a larger sync by hand, concurrently, with an OCaml client: 700 files, 3 to 5.5 MB files edited in the middle (rsync), moves, and contents in several places. Gemel's server and OCaml's leave the same trees, times and permissions, copy the same 20 files rather than send them, and OCaml's recheck of each result agrees.
 - **Left for phase 4:** `-socket`, and with it `-killserver`, which only socket servers read.
 
 ### Phase 4: sockets, prompts and the session (`remote.ml`'s sockets, `terminal.ml`, `pty.c`, `uicommon`'s `openConnection*`, ~0.9k)
@@ -314,7 +320,7 @@ It is split in two, since gemel's server can be tested against OCaml clients bef
 ### Phase 5: the rest of transfers, and concurrency (`copy.ml`, `transport.ml`, ~0.5k)
 
 - Resuming a partial transfer: `fingerprintSubfile`, `validFilePrefix` and the append threshold.
-- Copying a moved file instead (`tryCopyMovedFile`, with `xferhint`): done in phase 3a, since OCaml clients see it; `registerFileTransfer`, which has concurrent transfers of the same contents wait for the first, is left for here.
+- Copying a moved file instead (`tryCopyMovedFile`, with `xferhint`, and `registerFileTransfer`): done in phase 3a, since OCaml clients see it.
 - `checkForChangesToSource` across hosts.
 - Diff and merge with a remote root, copying the other side's file to a local temporary file.
 - **Concurrency:**
@@ -323,7 +329,7 @@ It is split in two, since gemel's server can be tested against OCaml clients bef
 - **Tests:**
   - an interrupted transfer resumed;
   - remote diff and merge;
-  - concurrent items, with the log order checked against OCaml's.
+  - concurrent items, with the log order checked against OCaml's, for a gemel server too (phase 3a's notes).
 
 ### Phase 6: Windows and the rest
 

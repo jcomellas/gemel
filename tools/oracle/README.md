@@ -43,7 +43,9 @@ directory has to be the same. The harness compares:
 
 Every sync runs with `-batch -ui text -color false -log=false
 -confirmbigdel=false -contactquietly -times -maxthreads 1`
-(`src/run.rs`).
+(`src/run.rs`). With `--concurrent`, `-maxthreads 1` is left out, so that
+items run concurrently as clients run them by default, and what each
+sync prints is compared without its order.
 
 ## Running it
 
@@ -66,6 +68,7 @@ scripts/oracle.sh /path/to/unison --count 30
 | `--keep` | Keep the work directories of scenarios that agree |
 | `--remote ssh\|socket` | Reach replica `b` through a server (see below) |
 | `--reference-server PATH`, `--candidate-server PATH` | Each side's server (default: its client) |
+| `--concurrent` | Let items run concurrently, and compare the output without its order |
 
 A scenario that differs prints its operations and the first difference in
 each compared item, and its `<seed>-reference` and `<seed>-candidate`
