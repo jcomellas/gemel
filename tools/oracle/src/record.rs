@@ -5,11 +5,14 @@
 //!
 //! ```text
 //! flavour windows
+//! remote socket            (with a remote root only)
 //! scenario 0
 //! first exit 0
 //! stdout 3
 //! <three lines>
 //! stderr 1
+//! <one line>
+//! server 1                 (with a remote root only: the server's stderr)
 //! <one line>
 //! second exit 0
 //! ...
@@ -21,6 +24,8 @@
 //! ...
 //! unison 5
 //! <file name>
+//! server 3                 (with a remote root only)
+//! <file name>
 //! ```
 //!
 //! A stream's text is split on `\n`, so a count of one with an empty line
@@ -28,11 +33,12 @@
 
 use std::fmt::Write as _;
 
-use crate::run::{Outcome, Snapshot, Step};
+use crate::run::{Outcome, Remote, Snapshot, Step};
 use crate::scenario::Flavour;
 
 pub struct Recording {
     pub flavour: Flavour,
+    pub remote: Option<Remote>,
     pub outcomes: Vec<(u64, Outcome)>,
 }
 
@@ -44,7 +50,7 @@ fn write_text(out: &mut String, name: &str, text: &str) {
     }
 }
 
-fn write_step(out: &mut String, name: &str, s: &Step) {
+fn write_step(out: &mut String, name: &str, s: &Step, remote: bool) {
     match s.exit {
         Some(c) => {
             let _ = writeln!(out, "{name} exit {c}");
@@ -55,25 +61,39 @@ fn write_step(out: &mut String, name: &str, s: &Step) {
     }
     write_text(out, "stdout", &s.stdout);
     write_text(out, "stderr", &s.stderr);
+    if remote {
+        write_text(out, "server", &s.server);
+    }
+}
+
+fn write_names(out: &mut String, name: &str, names: &[String]) {
+    let _ = writeln!(out, "{name} {}", names.len());
+    for f in names {
+        let _ = writeln!(out, "{f}");
+    }
 }
 
 pub fn write(r: &Recording) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "flavour {}", r.flavour.name());
+    if let Some(m) = r.remote {
+        let _ = writeln!(out, "remote {}", m.name());
+    }
+    let remote = r.remote.is_some();
     for (seed, o) in &r.outcomes {
         let _ = writeln!(out, "scenario {seed}");
-        write_step(&mut out, "first", &o.first);
-        write_step(&mut out, "second", &o.second);
-        write_step(&mut out, "recheck", &o.recheck);
+        write_step(&mut out, "first", &o.first, remote);
+        write_step(&mut out, "second", &o.second, remote);
+        write_step(&mut out, "recheck", &o.recheck, remote);
         for (name, snap) in [("a", &o.a), ("b", &o.b)] {
             let _ = writeln!(out, "replica {name} {}", snap.len());
             for (path, desc) in snap {
                 let _ = writeln!(out, "{path}\t{desc}");
             }
         }
-        let _ = writeln!(out, "unison {}", o.unison_dir.len());
-        for f in &o.unison_dir {
-            let _ = writeln!(out, "{f}");
+        write_names(&mut out, "unison", &o.unison_dir);
+        if remote {
+            write_names(&mut out, "server", &o.server_dir);
         }
     }
     out
@@ -113,7 +133,7 @@ impl<'a> Lines<'a> {
         Ok(lines.join("\n"))
     }
 
-    fn step(&mut self, name: &str) -> Result<Step, String> {
+    fn step(&mut self, name: &str, remote: bool) -> Result<Step, String> {
         let exit = match self.field(name)?.strip_prefix("exit ") {
             Some("none") => None,
             Some(c) => Some(c.parse().map_err(|e| format!("{name} exit {c:?}: {e}"))?),
@@ -123,7 +143,21 @@ impl<'a> Lines<'a> {
             exit,
             stdout: self.text("stdout")?,
             stderr: self.text("stderr")?,
+            server: if remote {
+                self.text("server")?
+            } else {
+                String::new()
+            },
         })
+    }
+
+    fn names(&mut self, keyword: &str) -> Result<Vec<String>, String> {
+        let k = self.count(keyword)?;
+        let mut v = Vec::with_capacity(k);
+        for _ in 0..k {
+            v.push(self.next()?.1.to_owned());
+        }
+        Ok(v)
     }
 
     fn snapshot(&mut self, name: &str) -> Result<Snapshot, String> {
@@ -146,9 +180,18 @@ pub fn parse(text: &str) -> Result<Recording, String> {
     };
     let f = lines.field("flavour")?;
     let flavour = Flavour::parse(f).ok_or_else(|| format!("unknown flavour {f:?}"))?;
+    let mut remote = None;
     let mut outcomes = Vec::new();
     loop {
         let (n, l) = lines.next()?;
+        if let Some(m) = l.strip_prefix("remote ")
+            && outcomes.is_empty()
+            && remote.is_none()
+        {
+            remote =
+                Some(Remote::parse(m).ok_or_else(|| format!("line {n}: unknown remote {m:?}"))?);
+            continue;
+        }
         if l.is_empty() {
             // The final newline.
             break;
@@ -157,16 +200,18 @@ pub fn parse(text: &str) -> Result<Recording, String> {
             .strip_prefix("scenario ")
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| format!("line {n}: expected a scenario, found {l:?}"))?;
-        let first = lines.step("first")?;
-        let second = lines.step("second")?;
-        let recheck = lines.step("recheck")?;
+        let r = remote.is_some();
+        let first = lines.step("first", r)?;
+        let second = lines.step("second", r)?;
+        let recheck = lines.step("recheck", r)?;
         let a = lines.snapshot("a")?;
         let b = lines.snapshot("b")?;
-        let k = lines.count("unison")?;
-        let mut unison_dir = Vec::with_capacity(k);
-        for _ in 0..k {
-            unison_dir.push(lines.next()?.1.to_owned());
-        }
+        let unison_dir = lines.names("unison")?;
+        let server_dir = if r {
+            lines.names("server")?
+        } else {
+            Vec::new()
+        };
         outcomes.push((
             seed,
             Outcome {
@@ -175,11 +220,16 @@ pub fn parse(text: &str) -> Result<Recording, String> {
                 a,
                 b,
                 unison_dir,
+                server_dir,
                 recheck,
             },
         ));
     }
-    Ok(Recording { flavour, outcomes })
+    Ok(Recording {
+        flavour,
+        remote,
+        outcomes,
+    })
 }
 
 /// Replaces each run of hexadecimal digits after `prefix` at the start of
@@ -251,6 +301,7 @@ pub fn portable(o: &Outcome, flavour: Flavour) -> Outcome {
         exit: s.exit,
         stdout: text(&s.stdout),
         stderr: text(&s.stderr),
+        server: text(&s.server),
     };
     let snap = |s: &Snapshot| -> Snapshot {
         s.iter()
@@ -274,14 +325,18 @@ pub fn portable(o: &Outcome, flavour: Flavour) -> Outcome {
             })
             .collect()
     };
-    let mut unison_dir: Vec<String> = o.unison_dir.iter().map(|n| hide_hash(n)).collect();
-    unison_dir.sort();
+    let names = |v: &[String]| {
+        let mut v: Vec<String> = v.iter().map(|n| hide_hash(n)).collect();
+        v.sort();
+        v
+    };
     Outcome {
         first: step(&o.first),
         second: step(&o.second),
         a: snap(&o.a),
         b: snap(&o.b),
-        unison_dir,
+        unison_dir: names(&o.unison_dir),
+        server_dir: names(&o.server_dir),
         recheck: step(&o.recheck),
     }
 }
@@ -295,6 +350,7 @@ mod tests {
             exit,
             stdout: stdout.to_owned(),
             stderr: String::new(),
+            server: String::new(),
         };
         let mut a = Snapshot::new();
         a.insert("d".into(), "dir 755".into());
@@ -305,6 +361,7 @@ mod tests {
             a,
             b: Snapshot::new(),
             unison_dir: vec!["ar0123abcd".into(), "default.prf".into()],
+            server_dir: Vec::new(),
             recheck: step(Some(1), "skipped: f"),
         }
     }
@@ -313,10 +370,47 @@ mod tests {
     fn a_recording_reads_back() {
         let r = Recording {
             flavour: Flavour::Windows,
+            remote: None,
             outcomes: vec![(3, outcome()), (7, outcome())],
         };
         let back = parse(&write(&r)).unwrap();
         assert_eq!(back.flavour, Flavour::Windows);
+        assert_eq!(back.remote, None);
+        assert_eq!(back.outcomes, r.outcomes);
+    }
+
+    /// The recordings in the repository read back and write out byte for
+    /// byte, so the format still reads the older one.
+    #[test]
+    fn the_recordings_read_back() {
+        for (text, remote) in [
+            (include_str!("../recorded/windows.txt"), None),
+            (
+                include_str!("../recorded/windows-socket.txt"),
+                Some(Remote::Socket),
+            ),
+        ] {
+            let r = parse(text).unwrap();
+            assert_eq!(r.remote, remote);
+            assert_eq!(r.outcomes.len(), 100);
+            assert!(write(&r) == text);
+        }
+    }
+
+    #[test]
+    fn a_remote_recording_reads_back() {
+        let mut o = outcome();
+        o.first.server = "server started\n".into();
+        o.server_dir = vec!["ar4567".into()];
+        let r = Recording {
+            flavour: Flavour::Unix,
+            remote: Some(Remote::Socket),
+            outcomes: vec![(1, o)],
+        };
+        let text = write(&r);
+        assert!(text.starts_with("flavour unix\nremote socket\nscenario 1\n"));
+        let back = parse(&text).unwrap();
+        assert_eq!(back.remote, Some(Remote::Socket));
         assert_eq!(back.outcomes, r.outcomes);
     }
 

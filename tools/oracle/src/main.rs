@@ -7,11 +7,13 @@
 //! ```text
 //! gemel-oracle --reference PATH [--candidate PATH] [--seed N] [--count K]
 //!              [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]
-//! gemel-oracle --replay FILE --candidate PATH [--work DIR] [--keep]
+//!              [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH]
+//! gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] [--work DIR] [--keep]
 //! ```
 //!
 //! The candidate defaults to the reference, which tests the harness itself
-//! (every scenario must then agree). Each implementation runs in the same
+//! (every scenario must then agree). With `--remote`, replica `b` is on a
+//! server, which is each side's client unless `--*-server` says otherwise. Each implementation runs in the same
 //! work directory in turn, because archive names depend on the roots'
 //! absolute paths. `--record` saves the reference's outcomes, and
 //! `--replay` compares a candidate with them where there is no reference
@@ -25,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use record::Recording;
-use run::{Outcome, Step};
+use run::{Outcome, Pairing, Remote, Step};
 use scenario::{Flavour, Scenario};
 
 struct Args {
@@ -38,11 +40,45 @@ struct Args {
     replay: Option<PathBuf>,
     work: Option<PathBuf>,
     keep: bool,
+    remote: Option<Remote>,
+    reference_server: Option<PathBuf>,
+    candidate_server: Option<PathBuf>,
+}
+
+impl Args {
+    fn reference(&self) -> Pairing {
+        Pairing {
+            client: self.reference.clone(),
+            server: self
+                .reference_server
+                .clone()
+                .unwrap_or_else(|| self.reference.clone()),
+        }
+    }
+
+    /// The candidate, which defaults to the reference.
+    fn candidate(&self) -> Pairing {
+        match &self.candidate {
+            None => Pairing {
+                client: self.reference.clone(),
+                server: self
+                    .candidate_server
+                    .clone()
+                    .unwrap_or_else(|| self.reference().server),
+            },
+            Some(c) => Pairing {
+                client: c.clone(),
+                server: self.candidate_server.clone().unwrap_or_else(|| c.clone()),
+            },
+        }
+    }
 }
 
 const USAGE: &str = "usage: gemel-oracle --reference PATH [--candidate PATH] [--seed N] \
-                     [--count K] [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]\n   \
-                     or: gemel-oracle --replay FILE --candidate PATH [--work DIR] [--keep]";
+                     [--count K] [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]\n                    \
+                     [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH]\n   \
+                     or: gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] \
+                     [--work DIR] [--keep]";
 
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
@@ -55,6 +91,9 @@ fn parse_args() -> Result<Args, String> {
         replay: None,
         work: None,
         keep: false,
+        remote: None,
+        reference_server: None,
+        candidate_server: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -76,17 +115,48 @@ fn parse_args() -> Result<Args, String> {
             "--replay" => args.replay = Some(value()?.into()),
             "--work" => args.work = Some(value()?.into()),
             "--keep" => args.keep = true,
+            "--remote" => {
+                let v = value()?;
+                args.remote =
+                    Some(Remote::parse(&v).ok_or_else(|| format!("--remote: unknown {v:?}"))?);
+            }
+            "--reference-server" => args.reference_server = Some(value()?.into()),
+            "--candidate-server" => args.candidate_server = Some(value()?.into()),
             "--help" | "-h" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
     }
+    // A replay's recording says whether the root is remote.
     let ok = if args.replay.is_some() {
-        args.candidate.is_some() && args.reference.as_os_str().is_empty() && args.record.is_none()
+        args.candidate.is_some()
+            && args.reference.as_os_str().is_empty()
+            && args.record.is_none()
+            && args.remote.is_none()
+            && args.reference_server.is_none()
     } else {
         !args.reference.as_os_str().is_empty()
     };
     if !ok {
         return Err(USAGE.into());
+    }
+    // A socket server runs in the work directory, where a relative path
+    // to a program no longer leads to it.
+    let absolute = |p: &mut PathBuf| -> Result<(), String> {
+        if !p.as_os_str().is_empty() {
+            *p = std::path::absolute(&*p).map_err(|e| format!("{}: {e}", p.display()))?;
+        }
+        Ok(())
+    };
+    absolute(&mut args.reference)?;
+    for p in [
+        &mut args.candidate,
+        &mut args.reference_server,
+        &mut args.candidate_server,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        absolute(p)?;
     }
     Ok(args)
 }
@@ -115,6 +185,7 @@ fn compare_step(name: &str, r: &Step, c: &Step, out: &mut Vec<String>) {
     for (stream, x, y) in [
         ("stdout", &r.stdout, &c.stdout),
         ("stderr", &r.stderr, &c.stderr),
+        ("server's stderr", &r.server, &c.server),
     ] {
         if x != y {
             out.push(format!(
@@ -141,11 +212,13 @@ fn compare(r: &Outcome, c: &Outcome) -> Vec<String> {
             }
         }
     }
-    if r.unison_dir != c.unison_dir {
-        out.push(format!(
-            "Unison directory: {:?} vs {:?}",
-            r.unison_dir, c.unison_dir
-        ));
+    for (name, x, y) in [
+        ("Unison directory", &r.unison_dir, &c.unison_dir),
+        ("server's Unison directory", &r.server_dir, &c.server_dir),
+    ] {
+        if x != y {
+            out.push(format!("{name}: {x:?} vs {y:?}"));
+        }
     }
     compare_step("recheck by the reference", &r.recheck, &c.recheck, &mut out);
     out
@@ -199,22 +272,23 @@ fn run_scenario(
     args: &Args,
     base: &Path,
     seed: u64,
-    flavour: Flavour,
+    (flavour, remote): (Flavour, Option<Remote>),
     recorded: Option<&Outcome>,
 ) -> Result<Ran, String> {
     let scenario = Scenario::generate(seed, flavour);
     let work = base.join("work");
-    let candidate = args.candidate.as_deref().unwrap_or(&args.reference);
+    let candidate = args.candidate();
     let io = |e: std::io::Error| format!("scenario {seed}: {e}");
     let (reference, rechecker) = match recorded {
-        Some(o) => (o.clone(), candidate),
+        Some(o) => (o.clone(), candidate.clone()),
         None => {
-            let o = run::outcome(&args.reference, &args.reference, &scenario, &work).map_err(io)?;
+            let r = args.reference();
+            let o = run::outcome(&r, &r, remote, &scenario, &work).map_err(io)?;
             std::fs::rename(&work, base.join(format!("{seed}-reference"))).map_err(io)?;
-            (o, args.reference.as_path())
+            (o, r)
         }
     };
-    let candidate = run::outcome(candidate, rechecker, &scenario, &work).map_err(io)?;
+    let candidate = run::outcome(&candidate, &rechecker, remote, &scenario, &work).map_err(io)?;
     std::fs::rename(&work, base.join(format!("{seed}-candidate"))).map_err(io)?;
     let mut problems = if recorded.is_some() {
         compare(
@@ -251,18 +325,21 @@ fn run_scenario(
 /// Scenarios to run: each seed, with its recorded outcome when replaying.
 type Seeds = Vec<(u64, Option<Outcome>)>;
 
-/// The scenarios to run, and their flavour.
-fn plan(args: &Args) -> Result<(Flavour, Seeds), String> {
+/// How scenarios are generated, and how replica `b` is reached.
+type Kind = (Flavour, Option<Remote>);
+
+/// The scenarios to run, and their kind.
+fn plan(args: &Args) -> Result<(Kind, Seeds), String> {
     match &args.replay {
         Some(file) => {
             let text = std::fs::read_to_string(file)
                 .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
             let r = record::parse(&text).map_err(|e| format!("{}: {e}", file.display()))?;
             let seeds = r.outcomes.into_iter().map(|(s, o)| (s, Some(o))).collect();
-            Ok((r.flavour, seeds))
+            Ok(((r.flavour, r.remote), seeds))
         }
         None => Ok((
-            args.flavour,
+            (args.flavour, args.remote),
             (args.seed..args.seed + args.count)
                 .map(|s| (s, None))
                 .collect(),
@@ -300,7 +377,7 @@ fn main() -> ExitCode {
     }
     // Unison prints canonical root paths; use them everywhere.
     let base = plain(std::fs::canonicalize(&base).unwrap_or(base));
-    let (flavour, seeds) = match plan(&args) {
+    let (kind, seeds) = match plan(&args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{e}");
@@ -310,11 +387,12 @@ fn main() -> ExitCode {
     let total = seeds.len();
     let mut failed = 0;
     let mut recording = Recording {
-        flavour,
+        flavour: kind.0,
+        remote: kind.1,
         outcomes: Vec::new(),
     };
     for (seed, recorded) in seeds {
-        match run_scenario(&args, &base, seed, flavour, recorded.as_ref()) {
+        match run_scenario(&args, &base, seed, kind, recorded.as_ref()) {
             Ok(ran) => {
                 if ran.problems.is_empty() {
                     println!("scenario {seed}: ok");
