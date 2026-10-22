@@ -16,7 +16,8 @@
 //! yield, so between local roots [`transport_items`] runs one item at a
 //! time: that keeps OCaml's order (of the log and of archive updates), and
 //! keeps each operation atomic on its host (see [`crate::exclusive`]).
-//! Items run concurrently only with a remote root (milestone 3).
+//! OCaml runs items concurrently with a remote root; here they run one at
+//! a time with one too, until phase 5 of milestone 3.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -122,7 +123,8 @@ pub async fn run<'a>(limit: usize, mut dispense: impl FnMut() -> Option<Task<'a,
 /// others a few chances to run; they stop at their abort checks.)
 pub async fn transport_items<'a, T>(
     rpc: &Rpc,
-    roots: &Roots,
+    // Phase 5 runs items concurrently when one of them is remote.
+    _roots: &Roots,
     items: &'a [T],
     this_round: impl Fn(&T) -> bool,
     make_action: impl Fn(usize, &'a T) -> Task<'a, Result<(), Error>>,
@@ -131,11 +133,10 @@ pub async fn transport_items<'a, T>(
     if abort.borrow().is_all() {
         return Ok(());
     }
-    let limit = if roots.list().iter().all(Root::is_local) {
-        1
-    } else {
-        max_threads(&rpc.client_host().prefs().borrow())
-    };
+    // One at a time with a remote root too, until items can run
+    // concurrently (phase 5 of milestone 3): `exclusive` keeps each piece
+    // atomic, not each item, which is only safe one at a time.
+    let limit = 1;
     let failure = RefCell::new(None);
     let mut next = 0;
     run(limit, || {
