@@ -33,9 +33,9 @@
 //! turn flow control off (`negociateFlowControl`), unless `halfduplex` is
 //! set, and turns it off itself once the server has.
 //!
-//! The version handshake and the transports (ssh and sockets) come later
-//! in milestone 3: a connection here starts once a transport is open and
-//! the handshake done, and the in-memory one ([`pipe`]) needs neither.
+//! A connection starts once a transport is open and the version handshake
+//! ([`crate::handshake`]) is done; the in-memory one ([`pipe`]) needs
+//! neither. The transports (ssh and sockets) come later in milestone 3.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
@@ -56,7 +56,7 @@ use crate::runtime;
 pub const LOST_CONNECTION: &str = "Lost connection with the server";
 
 /// The size of the output buffer (`bufferSize`).
-const BUFFER_SIZE: usize = 16384;
+pub(crate) const BUFFER_SIZE: usize = 16384;
 
 /// Message ids wrap around before this (`hugeint`).
 const HUGE_INT: u32 = 1_000_000_000;
@@ -69,7 +69,14 @@ pub type Input = Box<dyn AsyncRead + Unpin>;
 /// What a connection writes to.
 pub type Output = Box<dyn AsyncWrite + Unpin>;
 
-fn lost() -> Error {
+/// The process's standard input and output, for a server that ssh
+/// started.
+pub fn stdio() -> (Input, Output) {
+    (Box::new(tokio::io::stdin()), Box::new(tokio::io::stdout()))
+}
+
+/// A lost connection's error.
+pub(crate) fn lost() -> Error {
     Error::Fatal(LOST_CONNECTION.to_owned())
 }
 
@@ -716,11 +723,28 @@ pub fn start_client(
     conn
 }
 
-/// `commandLoop`, after the handshake: serves the client until the
+/// `commandLoop`, without the handshake: serves the client until the
 /// connection is lost, which ends it quietly; another failure is returned.
+/// (With the handshake, it is [`crate::server::command_loop`].)
 pub async fn serve(endpoint: Rc<Endpoint>, input: Input, output: Output) -> Result<(), Error> {
-    let conn = Connection::new(endpoint, true, input, output);
+    serve_connection(Connection::new(endpoint, true, input, output)).await
+}
+
+/// [`serve`] on a server's connection.
+pub(crate) async fn serve_connection(conn: Connection) -> Result<(), Error> {
     conn.enable_flow_control();
+    // OCaml's server yields as it turns flow control on, which lets the
+    // write token go out before anything is received.
+    for _ in 0..10 {
+        let holding = {
+            let q = conn.0.queues.borrow();
+            q.can_write && !q.closed
+        };
+        if !holding {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     let e = conn.receive().await;
     // Let the writes under way end (OCaml yields a bit too).
     for _ in 0..10 {

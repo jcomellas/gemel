@@ -1,4 +1,4 @@
-//! Message framing and the RPC version handshake.
+//! Message framing.
 //!
 //! Ports Unison `src/remote.ml`.
 //!
@@ -9,7 +9,7 @@
 //! carry each marshalled value ([`encode_section`]), which are the packets
 //! a connection sends, and the header that says what a message is
 //! ([`Header`]). [`crate::connection`] puts them together; the version
-//! handshake comes later in milestone 3.
+//! handshake that comes before them is in [`crate::handshake`].
 
 use gemel_base::util::{Error, escaped};
 use gemel_compat::umarshal::{self, Reader, Writer};
