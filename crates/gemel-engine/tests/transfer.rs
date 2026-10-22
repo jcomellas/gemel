@@ -400,6 +400,11 @@ fn hosts(tag: &str, prefs: &[&str]) -> Hosts {
         Rc::new(RefCell::new(new_features())),
     ));
     client.set_unison_dir(dir.0.join("u"));
+    // The log is `dir/u/unison.log`.
+    let mut trace =
+        gemel_base::trace::Trace::with_sinks(Box::new(std::io::sink()), Box::new(std::io::sink()));
+    trace.set_unison_dir(dir.0.join("u"));
+    *client.state::<gemel_base::trace::Trace>().borrow_mut() = trace;
     let progress = Arc::new(Mutex::new(Vec::new()));
     let seen = progress.clone();
     uutil::set_progress_printer(
