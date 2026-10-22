@@ -524,6 +524,13 @@ impl Connection {
         })
     }
 
+    /// Runs a host command on the other side's host, over this connection
+    /// (as OCaml calls `canonizeOnServer` on the connection it just made).
+    pub async fn call_host<A, R>(&self, cmd: &'static HostCmd<A, R>, arg: A) -> Result<R, Error> {
+        let args = encode_args(self.host(), cmd.name, |w, f| (cmd.write_arg)(&arg, w, f))?;
+        self.call_encoded(cmd.name, args, cmd.read_res).await
+    }
+
     /// Runs a server command on the other side (`registerServerCmd`'s
     /// client side).
     pub async fn call<A, R>(&self, cmd: &'static ServerCmd<A, R>, arg: A) -> Result<R, Error> {
@@ -874,6 +881,13 @@ impl Rpc {
                 client.run_conn_close_handlers(false);
             }
         });
+        self.conns.borrow_mut().register(clroot, root, conn);
+    }
+
+    /// `ClientConn.register` alone, for a connection already registered
+    /// (with [`Rpc::register_connection`]): `conn` reaches the server
+    /// `clroot` names, whose canonical root is `root`.
+    pub fn name_connection(&self, clroot: Clroot, root: Root, conn: Connection) {
         self.conns.borrow_mut().register(clroot, root, conn);
     }
 

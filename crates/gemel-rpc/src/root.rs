@@ -128,19 +128,35 @@ fn read_text(r: &mut Reader<'_>) -> umarshal::Result<String> {
 /// A local root is canonicalised through `canonizeOnServer`, so that in
 /// loopback mode the command and its codecs are exercised as they will be
 /// with a server; directly, it is `Fspath.canonize`, as in OCaml.
+///
+/// A remote root's server canonicalises its path and names itself
+/// (`canonizeOnServer`), over the connection the client already has to it
+/// (`ClientConn.ofClrootConncheck`), which is then registered under the
+/// canonical root. Making the connection comes later in milestone 3.
 pub async fn canonize_root(rpc: &Rpc, clroot: &Clroot) -> Result<Root, Error> {
-    match clroot {
+    let path = match clroot {
         Clroot::ConnectLocal(s) => {
             let arg = (s.as_ref().map(|s| s.as_bytes().to_vec()), true);
             let (_, fspath) = rpc
                 .call_host(&CANONIZE_ON_SERVER, &Host::Local, arg)
                 .await?;
-            Ok(Root::local(fspath))
+            return Ok(Root::local(fspath));
         }
-        Clroot::ConnectByShell { .. } | Clroot::ConnectBySocket { .. } => Err(Error::Fatal(
-            format!("Remote roots are not supported yet: {clroot}"),
-        )),
-    }
+        Clroot::ConnectByShell { path, .. } | Clroot::ConnectBySocket { path, .. } => path,
+    };
+    let Some(conn) = rpc.connection_checked(clroot).await else {
+        return Err(Error::Fatal(format!(
+            "Remote roots are not supported yet: {clroot}"
+        )));
+    };
+    let arg = (path.as_ref().map(|s| s.as_bytes().to_vec()), true);
+    let (host, fspath) = conn.call_host(&CANONIZE_ON_SERVER, arg).await?;
+    let root = Root {
+        host: Host::Remote(host),
+        fspath,
+    };
+    rpc.name_connection(clroot.clone(), root.clone(), conn);
+    Ok(root)
 }
 
 #[cfg(test)]
