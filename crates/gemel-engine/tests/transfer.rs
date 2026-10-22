@@ -534,7 +534,12 @@ type Case = (&'static str, Vec<u8>, Option<Vec<u8>>);
 /// with nothing in common.
 #[test]
 fn files_transfer_between_hosts_both_ways() {
-    for prefs in [&[][..], &["-stream=false"], &["-rsync=false"]] {
+    for prefs in [
+        &[][..],
+        &["-stream=false"],
+        &["-rsync=false"],
+        &["-halfduplex=true"],
+    ] {
         let h = hosts("two-hosts", prefs);
         let base = random(40, 300_000);
         for (from, to) in [("a", "b"), ("b", "a")] {
@@ -553,6 +558,8 @@ fn files_transfer_between_hosts_both_ways() {
                 ),
                 ("replaced", random(45, 250_000), Some(base.clone())),
                 ("empty", Vec::new(), Some(base.clone())),
+                // Many chunks, well over the pipe's size.
+                ("big", random(46, 3_000_000), None),
             ];
             for (name, contents, old) in cases {
                 let name = format!("{name}-{from}");
@@ -567,14 +574,18 @@ fn files_transfer_between_hosts_both_ways() {
                 let wire = h.wire() - wire;
                 // Deltas go when rsync is on and the files share most of
                 // their blocks; otherwise the whole file does.
+                // (In half duplex, idle sides hand the write token back and
+                // forth, as OCaml's do, which adds bytes as time passes.)
                 let rsync = !prefs.contains(&"-rsync=false");
-                if rsync && (name.starts_with("edited") || name.starts_with("appended")) {
+                let half_duplex = prefs.contains(&"-halfduplex=true");
+                let delta = rsync && (name.starts_with("edited") || name.starts_with("appended"));
+                if delta && !half_duplex {
                     let new_bytes = contents.len() - base.len().min(contents.len());
                     assert!(
                         wire < (new_bytes + 20_000) as u64,
                         "{name} {prefs:?}: {wire} bytes"
                     );
-                } else {
+                } else if !delta {
                     assert!(
                         wire >= contents.len() as u64,
                         "{name} {prefs:?}: {wire} bytes"
@@ -642,4 +653,168 @@ fn a_file_already_transferred_is_not_sent_again() {
         (total, how),
         (contents.len() as i64, vec!["rem".to_owned()])
     );
+}
+
+// ---- Against OCaml's own sessions ----
+
+const CAPTURED: &str = include_str!("captured/transfers.txt");
+
+/// The features a captured sync negotiated, from its `negotiateFeatures`
+/// reply.
+fn captured_features(session: &str) -> gemel_base::features::Features {
+    let reply = CAPTURED
+        .lines()
+        .map(|l| l.split('\t').collect::<Vec<_>>())
+        .find(|f| f[0] == session && f[2] == "res" && f[3] == "negotiateFeatures")
+        .unwrap();
+    let names =
+        gemel_rpc::protocol::decode_section_body("negotiateFeatures-res", &unhex(reply[4]), |r| {
+            r.list(|r| Ok(String::from_utf8(r.string()?).unwrap()))
+        })
+        .unwrap();
+    let mut f = new_features();
+    f.set_enabled(&names);
+    f
+}
+
+/// Every transfer section OCaml sent, decoded with gemel's codecs and
+/// encoded again, comes out the same: `transferFile`'s argument and
+/// result, `compress`'s (with and without block information), the stream
+/// chunks and their pings.
+#[test]
+fn ocamls_transfer_messages_decode_and_encode_the_same() {
+    let mut seen = std::collections::BTreeSet::new();
+    for line in CAPTURED.lines().filter(|l| !l.starts_with('#')) {
+        let f: Vec<&str> = line.split('\t').collect();
+        let (session, kind, name, body) = (f[0], f[2], f[3], unhex(f[4]));
+        let features = captured_features(session);
+        // A section is its length, then its body.
+        let again = match (kind, name) {
+            ("args", "transferFile") => {
+                let a = copy::TRANSFER_FILE.decode_arg(&body, &features).unwrap();
+                copy::TRANSFER_FILE.encode_arg(&a, &features)
+            }
+            ("res", "transferFile") => {
+                let r = copy::TRANSFER_FILE.decode_res(&body, &features).unwrap();
+                copy::TRANSFER_FILE.encode_res(&r, &features)
+            }
+            ("args", "compress") => {
+                let a = copy::COMPRESS.decode_arg(&body, &features).unwrap();
+                if session == "update" {
+                    assert!(a.block_info.is_some(), "{line:.80}");
+                }
+                copy::COMPRESS.encode_arg(&a, &features)
+            }
+            ("res", "compress") => {
+                copy::COMPRESS.decode_res(&body, &features).unwrap();
+                copy::COMPRESS.encode_res(&(), &features)
+            }
+            ("str", "processTransferInstruction") => {
+                let c = copy::PROCESS_TRANSFER_INSTRUCTION
+                    .decode_chunk(&body)
+                    .unwrap();
+                copy::PROCESS_TRANSFER_INSTRUCTION.encode_chunk(&c)
+            }
+            ("args", "processTransferInstructionPing") => {
+                let tag = "processTransferInstructionPing-args";
+                let id = gemel_rpc::protocol::decode_section_body(tag, &body, |r| r.int()).unwrap();
+                gemel_rpc::protocol::encode_section(tag, |w| w.int(id))
+            }
+            ("res", "processTransferInstructionPing") => {
+                let tag = "processTransferInstructionPing-res";
+                gemel_rpc::protocol::decode_section_body(tag, &body, |r| r.unit()).unwrap();
+                gemel_rpc::protocol::encode_section(tag, |w| w.unit())
+            }
+            ("args" | "res", "negotiateFeatures") => continue,
+            other => panic!("{other:?}"),
+        }
+        .unwrap();
+        assert_eq!(again[5..], body[..], "{session} {kind} {name}");
+        seen.insert((session, kind, name));
+    }
+    assert_eq!(seen.len(), 14, "{seen:?}");
+}
+
+/// A resource fork goes after the data fork, both ways (macOS).
+#[cfg(target_os = "macos")]
+#[test]
+fn resource_forks_transfer_between_hosts() {
+    let h = hosts("two-hosts-ress", &["-rsrc=true"]);
+    gemel_fs::osx::init(&mut h.rpc.client_host().prefs().borrow_mut(), true);
+    block_on(globals::propagate_prefs(&h.rpc, &h.roots)).unwrap();
+    assert!(*h.server.prefs().borrow().read(&gemel_fs::osx::RSRC_AUX));
+    for (from, to) in [("a", "b"), ("b", "a")] {
+        let name = format!("forked-{from}");
+        let fork = random(70, 3000);
+        write_file(&h.path(from, &name), b"the data fork");
+        write_file(&h.path(from, &format!("{name}/..namedfork/rsrc")), &fork);
+        let source = {
+            let fs = FsConfig::from_prefs(&h.rpc.client_host().prefs().borrow());
+            let root = h.root(from);
+            let info = fileinfo::get(true, &root.fspath, &local(&name), &|_| false, &fs).unwrap();
+            let fp =
+                os::fingerprint(&root.fspath, &local(&name), info.typ.info_kind(), true).unwrap();
+            Source {
+                desc: info.desc.clone(),
+                fp,
+                stamp: None,
+                ress: info.ress_stamp(),
+            }
+        };
+        assert_eq!(gemel_fs::osx::ress_length(&source.ress), 3000);
+        h.transfer_with(from, &name, Replacing::Copy, &source)
+            .unwrap_or_else(|e| panic!("{from}: {e}"));
+        let tmp = h.path(to, &format!(".tmp-{name}"));
+        assert_eq!(std::fs::read(&tmp).unwrap(), b"the data fork");
+        assert!(
+            std::fs::read(tmp.join("..namedfork/rsrc")).unwrap() == fork,
+            "{from}: the resource fork"
+        );
+    }
+}
+
+/// Aborting everything partway through stops a transfer, whichever host
+/// sends: the client's own reading or decoding fails, or the server stops
+/// streaming once the client aborts the stream. Nothing waits forever, and
+/// the connection serves the next transfer.
+#[test]
+fn an_abort_stops_a_transfer_both_ways() {
+    for (from, to) in [("a", "b"), ("b", "a")] {
+        let h = hosts("two-hosts-abort", &[]);
+        let client = h.rpc.client_host().clone();
+        let flag = client
+            .state::<gemel_engine::abort::Abort>()
+            .borrow()
+            .all_flag();
+        let total = Arc::new(Mutex::new(0i64));
+        let t = total.clone();
+        uutil::set_progress_printer(
+            &client,
+            Some(Arc::new(move |_, n, _| {
+                let mut t = t.lock().unwrap();
+                *t += n;
+                if *t > 1_000_000 {
+                    flag.set();
+                }
+            })),
+        );
+        let name = format!("big-{from}");
+        write_file(&h.path(from, &name), &random(80, 5_000_000));
+        let e = h.transfer(from, &name, false).unwrap_err();
+        assert!(gemel_engine::abort::is_abort(&e), "{from}: {e}");
+        let sent = *total.lock().unwrap();
+        assert!(sent < 5_000_000, "{from}: {sent}");
+        // Nothing is aborted any more: the next transfer goes through.
+        client
+            .state::<gemel_engine::abort::Abort>()
+            .borrow_mut()
+            .reset();
+        uutil::set_progress_printer(&client, None);
+        write_file(&h.path(from, "after"), b"after the abort");
+        h.transfer(from, "after", false).unwrap();
+        assert_eq!(
+            std::fs::read(h.path(to, ".tmp-after")).unwrap(),
+            b"after the abort"
+        );
+    }
 }
