@@ -197,3 +197,54 @@ fn the_server_answers_and_fails_as_ocamls_does() {
         }
     }
 }
+
+/// [`serve`] with standard input and output one end of a socket pair, as
+/// sshd may give them (OpenSSH unless built with `USE_PIPES`): the client
+/// sends `input`, then shuts its side, and gets what the server wrote.
+#[cfg(unix)]
+fn serve_on_socket(server: &OsStr, dir: &StdPath, input: &[u8]) -> Served {
+    use std::io::Read;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+    let u = dir.join("u");
+    let _ = std::fs::remove_dir_all(&u);
+    let (mut ours, theirs) = UnixStream::pair().unwrap();
+    let child = Command::new(server)
+        .args(["-server", "__new-rpc-mode"])
+        .current_dir(dir)
+        .env("UNISON", &u)
+        .env("HOME", dir)
+        .stdin(Stdio::from(OwnedFd::from(theirs.try_clone().unwrap())))
+        .stdout(Stdio::from(OwnedFd::from(theirs)))
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    ours.write_all(input).unwrap();
+    ours.shutdown(std::net::Shutdown::Write).unwrap();
+    let mut stdout = Vec::new();
+    ours.read_to_end(&mut stdout).unwrap();
+    let out = child.wait_with_output().unwrap();
+    Served {
+        code: out.status.code(),
+        stdout,
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        unison_dir: std::fs::metadata(&u).ok().map(|m| mode(&m)),
+    }
+}
+
+/// On a socket the server answers as on pipes.
+#[cfg(unix)]
+#[test]
+fn the_server_answers_on_a_socket_as_on_pipes() {
+    let dir = TempDir::new("server-socket");
+    let d = std::fs::canonicalize(&dir.0).unwrap();
+    let gemel = serve_on_socket(OsStr::new(env!("CARGO_BIN_EXE_gemel")), &d, b"VERSION 1\n");
+    assert_eq!(gemel, answered("OK\n"));
+    if let Some(ocaml) = std::env::var_os("GEMEL_REFERENCE_UNISON") {
+        assert_eq!(
+            gemel,
+            serve_on_socket(&ocaml, &d, b"VERSION 1\n"),
+            "against OCaml"
+        );
+    }
+}
