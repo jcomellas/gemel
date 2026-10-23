@@ -445,15 +445,18 @@ fn features(prev_state2: bool) -> Features {
 /// does: tasks one call starts (a loopback connection's) live on into the
 /// next.
 fn block_on<F: std::future::Future>(f: F) -> F::Output {
+    // The tasks go first: the runtime's drivers wake them as they shut
+    // down, which they can't once the thread's `LocalSet` has gone.
     thread_local! {
-        static ENGINE: (tokio::runtime::Runtime, tokio::task::LocalSet) = (
+        static ENGINE: (tokio::task::LocalSet, tokio::runtime::Runtime) = (
+            tokio::task::LocalSet::new(),
             tokio::runtime::Builder::new_current_thread()
+                .enable_all()
                 .build()
                 .unwrap(),
-            tokio::task::LocalSet::new(),
         );
     }
-    ENGINE.with(|(rt, local)| local.block_on(rt, f))
+    ENGINE.with(|(local, rt)| local.block_on(rt, f))
 }
 
 #[test]
