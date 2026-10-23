@@ -149,3 +149,19 @@ where
 {
     tokio::task::spawn_local(f)
 }
+
+/// Runs `f` now, in the caller, until it has to wait, and leaves the rest
+/// to a task on the engine thread: as Lwt runs a thread until it blocks.
+/// What `f` waits for must be polled again to wake it (as I/O is), since
+/// the first poll has no one to wake.
+///
+/// # Panics
+///
+/// When `f` has to wait, outside the engine thread's runtime.
+pub fn run_now(f: impl Future<Output = ()> + 'static) {
+    let mut f = Box::pin(f);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    if f.as_mut().poll(&mut cx).is_pending() {
+        spawn_local(f);
+    }
+}
