@@ -183,6 +183,25 @@ mod unix {
         unsafe { libc::kill(libc::getpid(), number(s)) };
     }
 
+    /// `end_ssh`: if the child `pid` is still running, asks it to stop
+    /// (`SIGTERM`), gives it a moment to restore the terminal's settings,
+    /// then kills it (`SIGKILL`). Nothing if it has ended, or isn't a child.
+    pub fn end_child(pid: u32) {
+        let Ok(pid) = libc::pid_t::try_from(pid) else {
+            return;
+        };
+        let mut status = 0;
+        // SAFETY: `status` is writable; WNOHANG doesn't wait.
+        if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } != 0 {
+            return;
+        }
+        // SAFETY: plain values.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // SAFETY: plain values.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+
     /// `Util.blockSignals [Sys.sigint]` around starting a process: `cmd`
     /// starts with `SIGINT` blocked, so that Ctrl-C at the terminal, which
     /// reaches the whole foreground process group, doesn't reach it.
@@ -277,6 +296,9 @@ mod windows {
 
     /// Not on Windows.
     pub fn raise(_: Signal) {}
+
+    /// Not yet on Windows (phase 6 of milestone 3).
+    pub fn end_child(_: u32) {}
 
     /// Nothing on Windows, as in OCaml, where `Unix.sigprocmask` doesn't
     /// exist there.

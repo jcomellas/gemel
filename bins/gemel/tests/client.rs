@@ -115,3 +115,62 @@ fn broken_shells_and_servers_end_as_with_ocaml() {
         }
     }
 }
+
+/// Ssh starts with Ctrl-C blocked, so the client ends it as it exits,
+/// should it still run, waiting at the terminal for a password say
+/// (`end_ssh`). Gemel's only: OCaml's client (2.54) doesn't stop on
+/// Ctrl-C while it waits for the server.
+#[test]
+fn a_shell_still_running_ends_with_the_client() {
+    let pair = Pair::new("client-end-shell");
+    let pid_file = pair.base().join("shell.pid");
+    let shim = shell(
+        &pair,
+        Some(&format!(
+            "echo $$ > {}\nexec sleep 300 < /dev/null",
+            pid_file.display()
+        )),
+    );
+    let mut child = common::command(
+        gemel_path(),
+        &pair,
+        &[
+            "a",
+            "ssh://server/b",
+            "-batch",
+            "-sshcmd",
+            shim.to_str().unwrap(),
+        ],
+    )
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .spawn()
+    .unwrap();
+    let pid = (0..400)
+        .find_map(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+        })
+        .expect("the shell started");
+    // The shell's `kill`: some systems have no program of that name.
+    let kill = |sig: &str, pid: u32| {
+        std::process::Command::new("sh")
+            .args(["-c", &format!("kill {sig} {pid}")])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(kill("-INT", child.id()));
+    assert_eq!(child.wait().unwrap().code(), Some(3));
+    // Gone once the client has exited (and no longer a zombie of its own).
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let alive = kill("-0", pid);
+    if alive {
+        kill("-KILL", pid);
+    }
+    assert!(!alive, "the shell outlived the client");
+}
