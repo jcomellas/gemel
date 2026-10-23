@@ -22,6 +22,7 @@ use std::sync::Mutex;
 
 use gemel_base::prefs::Prefs;
 use gemel_base::util::{self, Error, MY_MAJOR_VERSION, MY_NAME};
+use gemel_fs::signal::Started;
 use gemel_fs::system::SysError;
 
 use crate::connection::{ADD_VERSION_NO, Connection, Endpoint, SERVER_CMD, SSH_ARGS, SSH_CMD};
@@ -81,15 +82,15 @@ pub fn command(
     (program, args)
 }
 
-/// The shells started, by process id, for [`end_shells`].
-static SHELLS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// The shells started, for [`end_shells`].
+static SHELLS: Mutex<Vec<Started>> = Mutex::new(Vec::new());
 
 /// OCaml's `at_exit end_ssh`, for each shell started: ends those still
 /// running. For the program to call as it exits.
 pub fn end_shells() {
     let shells = std::mem::take(&mut *SHELLS.lock().unwrap_or_else(|e| e.into_inner()));
-    for pid in shells {
-        gemel_fs::signal::end_child(pid);
+    for shell in shells {
+        gemel_fs::signal::end_child(shell);
     }
 }
 
@@ -111,8 +112,8 @@ pub async fn connect(
     let mut child = tokio::process::Command::from(cmd).spawn().map_err(|e| {
         SysError::new("create_process", program.as_bytes(), e).to_fatal("starting shell connection")
     })?;
-    if let Some(pid) = child.id() {
-        SHELLS.lock().unwrap_or_else(|e| e.into_inner()).push(pid);
+    if let Some(shell) = child.id().and_then(Started::new) {
+        SHELLS.lock().unwrap_or_else(|e| e.into_inner()).push(shell);
     }
     let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return Err(Error::Fatal("Internal error: the shell's pipes".into()));
