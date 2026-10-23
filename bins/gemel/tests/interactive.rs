@@ -17,7 +17,7 @@ mod support;
 mod ui_support;
 
 #[cfg(unix)]
-use common::Driven;
+use common::{Driven, gemel_path, ocaml_path};
 use common::{same_keys, twins, twins_each};
 use support::sync::T0;
 use support::write;
@@ -62,7 +62,6 @@ fn items_in(g: Pair, o: Pair) -> (Pair, Pair) {
 /// that don't exist, and quitting from the proceed menu.
 #[test]
 fn going_through_the_items() {
-    // (Both roots here: differences with a remote root come with phase 5.)
     let (g, o) = items("int-moves");
     let keys = [
         // The conflict: no default, then the help, the details, and the
@@ -208,6 +207,51 @@ fn a_merge_is_confirmed() {
     assert_eq!(r.code, Some(2), "{r:#?}");
     let r = same(&g, &o, &["p"], "\ny\ny\n");
     assert_eq!(r.code, Some(0), "{r:#?}");
+}
+
+/// The differences between a file's versions, and their merge, with root
+/// `b` on a server, given first or second: its version is copied next to
+/// root `a`'s for both.
+#[cfg(unix)]
+#[test]
+fn differences_and_merges_with_a_remote_root() {
+    let ocaml = ocaml_path().unwrap_or_else(|| gemel_path().to_owned());
+    for b_first in [false, true] {
+        let tag = if b_first {
+            "int-remote-b"
+        } else {
+            "int-remote-a"
+        };
+        let (g, o) = (
+            Pair::remote(&format!("{tag}-g"), gemel_path()),
+            Pair::remote(&format!("{tag}-o"), &ocaml),
+        );
+        let roots = if b_first { ["b", "a"] } else { ["a", "b"] };
+        let merge = "Name f -> cat CURRENT1 CURRENT2 > NEW";
+        let args = [roots[0], roots[1], "-times", "-merge", merge];
+        for p in [&g, &o] {
+            write(&p.a(), "f", "same\n", T0);
+            write(&p.b(), "f", "same\n", T0);
+        }
+        same(&g, &o, &[&args[..], &["-batch"]].concat(), "");
+        for p in [&g, &o] {
+            write(&p.a(), "f", "a's\n", T0 + 10.0);
+            write(&p.b(), "f", "b's\n", T0 + 11.0);
+        }
+        // The differences, then the merge proposed, and proceeding.
+        let r = same(&g, &o, &args, "d\n\ny\n");
+        assert_eq!(r.code, Some(0), "{r:#?}");
+        // a's is older: it comes first.
+        let shown = r.stdout.join("\n");
+        assert!(shown.contains("-a's\n+b's"), "{r:#?}");
+        for root in [g.a(), g.b()] {
+            assert_eq!(
+                std::fs::read_to_string(root.join("f")).unwrap(),
+                "a's\nb's\n",
+                "{root:?}"
+            );
+        }
+    }
 }
 
 /// The input ends while the user is asked something.

@@ -338,8 +338,15 @@ fn merges_like_ocaml() {
     for script in scripts {
         let merge = format!("merge = Name m -> {script}");
         let prefs = [merge.as_str()];
-        // Not yet with a remote root (phase 5 of milestone 3).
-        for via in [Via::Direct, Via::Loopback] {
+        // With the remote root first too, which merges as if it were
+        // second: the merge happens next to the local root's version.
+        let ways = [
+            (Via::Direct, false),
+            (Via::Loopback, false),
+            (Via::Remote, false),
+            (Via::Remote, true),
+        ];
+        for (via, swapped) in ways {
             let dir = TempDir::new("files-merge");
             let s = merge_conflict(&dir, via, &prefs);
             settle(&[&s.a(), &s.b()]);
@@ -354,15 +361,23 @@ fn merges_like_ocaml() {
             };
             assert_eq!(d.direction, Direction::Merge);
             let roots = s.roots.list();
+            let mut sides = [
+                (&roots[0], &ri.path1, &d.rc1.ui),
+                (&roots[1], &ri.path2, &d.rc2.ui),
+            ];
+            if swapped {
+                sides.reverse();
+            }
+            let [(root1, path1, ui1), (root2, path2, ui2)] = sides;
             let mut shown = Vec::new();
             let r = block_on(files::merge(
                 &s.rpc,
-                &roots[0],
-                &ri.path1,
-                &d.rc1.ui,
-                &roots[1],
-                &ri.path2,
-                &d.rc2.ui,
+                root1,
+                path1,
+                ui1,
+                root2,
+                path2,
+                ui2,
                 FileId(0),
                 &mut |title, log| {
                     shown.push((title, log));
@@ -372,11 +387,12 @@ fn merges_like_ocaml() {
             block_on(update::commit_updates(&s.rpc, &s.roots)).unwrap();
             assert_eq!(shown[0].0, "Results of merging m", "{script}");
             // No working files are left.
-            let leftovers: Vec<_> = listing(&s.a())
-                .into_iter()
+            let leftovers: Vec<_> = [s.a(), s.b()]
+                .iter()
+                .flat_map(|r| listing(r))
                 .filter(|(n, _)| n.contains(".unison."))
                 .collect();
-            assert!(leftovers.is_empty(), "{script}: {leftovers:?}");
+            assert!(leftovers.is_empty(), "{script} ({via}): {leftovers:?}");
             let ours = listings(&s);
             if r.is_ok() && ours.0 == ours.1 {
                 ocaml_agrees(&s, &prefs);
@@ -385,7 +401,7 @@ fn merges_like_ocaml() {
                 continue;
             };
             let twin_dir = TempDir::new("files-merge-ocaml");
-            let twin = merge_conflict(&twin_dir, Via::Direct, &prefs);
+            let twin = merge_conflict(&twin_dir, via, &prefs);
             let out = ocaml_command(&unison, &twin.base, via_of(&twin))
                 .args([
                     "-batch",
@@ -418,47 +434,75 @@ fn merges_like_ocaml() {
     }
 }
 
+/// With a remote root, its version is copied next to the local one; the
+/// older version still comes first, whichever root is first.
 #[cfg(unix)]
 #[test]
 fn diffs_run_the_diff_command() {
-    let dir = TempDir::new("files-diff");
-    let s = merge_conflict(&dir, Via::Direct, &[]);
-    settle(&[&s.a(), &s.b()]);
-    let found = s.find();
-    let (items, _, _) = block_on(recon::reconcile_all(&s.rpc, &s.roots, false, found)).unwrap();
-    let Replicas::Different(d) = &items[0].replicas else {
-        panic!()
-    };
-    let roots = s.roots.list();
-    let mut shown = Vec::new();
-    block_on(files::diff(
-        &s.rpc,
-        &roots[0],
-        &items[0].path1,
-        &d.rc1.ui,
-        &roots[1],
-        &items[0].path2,
-        &d.rc2.ui,
-        &mut |cmd, result| shown.push((cmd.to_owned(), result.to_owned())),
-        FileId(0),
-    ))
-    .unwrap();
-    let (cmd, result) = &shown[0];
-    // b's is newer: the older (a's) first.
-    assert_eq!(
-        cmd,
-        &format!(
-            "diff -u '{}' '{}'",
-            s.roots.list()[0]
-                .fspath
-                .concat(&Path::<gemel_base::path::Local>::from_bytes(b"m").unwrap()),
-            s.roots.list()[1]
-                .fspath
-                .concat(&Path::<gemel_base::path::Local>::from_bytes(b"m").unwrap())
-        )
-    );
-    assert!(result.contains("-a\n+b"), "{result}");
-    assert!(result.ends_with("Exited with status 1"), "{result}");
+    for (via, swapped) in [
+        (Via::Direct, false),
+        (Via::Remote, false),
+        (Via::Remote, true),
+    ] {
+        let what = format!("{via}{}", if swapped { ", swapped" } else { "" });
+        let dir = TempDir::new("files-diff");
+        let s = merge_conflict(&dir, via, &[]);
+        settle(&[&s.a(), &s.b()]);
+        let found = s.find();
+        let (items, _, _) = block_on(recon::reconcile_all(&s.rpc, &s.roots, false, found)).unwrap();
+        let Replicas::Different(d) = &items[0].replicas else {
+            panic!()
+        };
+        let roots = s.roots.list();
+        let mut sides = [
+            (&roots[0], &items[0].path1, &d.rc1.ui),
+            (&roots[1], &items[0].path2, &d.rc2.ui),
+        ];
+        if swapped {
+            sides.reverse();
+        }
+        let [(root1, path1, ui1), (root2, path2, ui2)] = sides;
+        let mut shown = Vec::new();
+        block_on(files::diff(
+            &s.rpc,
+            root1,
+            path1,
+            ui1,
+            root2,
+            path2,
+            ui2,
+            &mut |cmd, result| shown.push((cmd.to_owned(), result.to_owned())),
+            FileId(0),
+        ))
+        .unwrap();
+        let (cmd, result) = &shown[0];
+        // b's is newer: the older (a's) first.
+        let m = Path::<gemel_base::path::Local>::from_bytes(b"m").unwrap();
+        let a = roots[0].fspath.concat(&m);
+        if via == Via::Remote {
+            // b's copied into a, as a temporary file, which is then gone.
+            let (older, newer) = cmd
+                .strip_prefix("diff -u ")
+                .and_then(|c| c.split_once(' '))
+                .unwrap_or_else(|| panic!("{what}: {cmd}"));
+            assert_eq!(older, format!("'{a}'"), "{what}");
+            let temp = format!("{}/.unison.m-diff.", roots[0].fspath);
+            assert!(
+                newer.starts_with(&format!("'{temp}")) && newer.ends_with(".unison.tmp'"),
+                "{what}: {cmd}"
+            );
+            let leftovers: Vec<_> = listing(&s.a())
+                .into_iter()
+                .filter(|(n, _)| n.contains(".unison."))
+                .collect();
+            assert!(leftovers.is_empty(), "{what}: {leftovers:?}");
+        } else {
+            let b = roots[1].fspath.concat(&m);
+            assert_eq!(cmd, &format!("diff -u '{a}' '{b}'"), "{what}");
+        }
+        assert!(result.contains("-a\n+b"), "{what}: {result}");
+        assert!(result.ends_with("Exited with status 1"), "{what}: {result}");
+    }
 }
 
 #[test]
