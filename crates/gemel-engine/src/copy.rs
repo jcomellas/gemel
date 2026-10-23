@@ -984,7 +984,30 @@ impl Receiving {
                     )?);
                 }
                 let reference = self.reference.as_mut().expect("opened");
-                d.chunk(reference, out, &mut *self.progress, data)?
+                // `copyFileRange`, with the buffered output flushed first.
+                let mut copy_range = |r: &mut std::fs::File,
+                                      w: &mut std::io::BufWriter<std::fs::File>,
+                                      offset: u64,
+                                      length: usize| {
+                    // Elsewhere it never can: no need to flush for it.
+                    if !cfg!(target_os = "linux") || w.flush().is_err() {
+                        return 0;
+                    }
+                    let mut copied = 0;
+                    while copied < length {
+                        match reflink::copy_file(
+                            r,
+                            w.get_ref(),
+                            offset + copied as u64,
+                            length - copied,
+                        ) {
+                            Ok(n) if n > 0 => copied += n,
+                            _ => break,
+                        }
+                    }
+                    copied
+                };
+                d.chunk_with(reference, out, &mut *self.progress, data, &mut copy_range)?
             }
         };
         if eof {
