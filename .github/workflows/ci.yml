@@ -130,11 +130,20 @@ jobs:
               --reference unison-src/src/unison --candidate-server target/debug/gemel --count 30
             oracle --remote $remote --reference unison-src/src/unison --candidate target/debug/gemel \
               --candidate-server unison-src/src/unison --count $n
+            # A gemel client running items concurrently, in OCaml's order as above, and as
+            # it comes otherwise.
+            oracle --remote $remote --concurrent --ordered --client-args -xferbycopying=false \
+              --reference unison-src/src/unison --candidate target/debug/gemel \
+              --candidate-server unison-src/src/unison --count 30
+            oracle --remote $remote --concurrent --reference unison-src/src/unison --candidate target/debug/gemel \
+              --candidate-server unison-src/src/unison --count $n
             for v in 2.52.1 2.53.8; do
               oracle --remote $remote --reference unison-src/src/unison --reference-server releases/unison-$v \
                 --candidate target/debug/gemel --candidate-server releases/unison-$v --count $m
             done
             oracle --remote $remote --reference unison-src/src/unison --candidate target/debug/gemel --count $n
+            oracle --remote $remote --concurrent --ordered --client-args -xferbycopying=false \
+              --reference unison-src/src/unison --candidate target/debug/gemel --count 30
           done
           for v in 2.52.1 2.53.8; do
             oracle --remote ssh --old-server --reference unison-src/src/unison --reference-server releases/unison-$v \
