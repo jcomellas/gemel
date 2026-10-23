@@ -448,12 +448,15 @@ fn a_failed_item_is_logged_like_ocaml() {
 }
 
 /// A fatal error stops the run: nothing more starts, everything is
-/// aborted, and nothing is committed.
+/// aborted, and nothing is committed. (One item at a time: with a remote
+/// root they run concurrently, and which end before the error is down to
+/// timing. `bins/gemel`'s interactive tests check that case against
+/// OCaml.)
 #[test]
 fn a_fatal_error_stops_the_run() {
     for via in Via::ALL {
         let dir = TempDir::new("transport-fatal");
-        let s = synced(&dir, via, &[], build_tree);
+        let s = synced(&dir, via, &["maxthreads = 1"], build_tree);
         write(&s.a(), "README", "a's version", T0 + 20.0);
         std::fs::remove_dir_all(s.a().join("src")).unwrap();
         write(&s.a(), "src", "a file", T0 + 20.0);
@@ -616,12 +619,13 @@ fn progress_adds_up_to_what_each_item_transfers() {
 
 /// Aborting everything from another thread (a signal handler's, say)
 /// reaches the run, through the flag the copies read: nothing more starts.
-/// The next run starts afresh.
+/// The next run starts afresh. (One item at a time: see the next test for
+/// items that have started.)
 #[test]
 fn aborting_from_another_thread_stops_the_run() {
     for via in Via::ALL {
         let dir = TempDir::new("transport-abort-flag");
-        let s = synced(&dir, via, &[], build_tree);
+        let s = synced(&dir, via, &["maxthreads = 1"], build_tree);
         for n in ["a1", "a2", "a3"] {
             write(&s.a(), n, n, T0 + 20.0);
         }
@@ -644,6 +648,35 @@ fn aborting_from_another_thread_stops_the_run() {
         assert_eq!(s.sync().unwrap(), Vec::<String>::new());
         assert_eq!((there("a1"), there("a2"), there("a3")), (true, true, true));
     }
+}
+
+/// With a remote root, items run concurrently: those already under way
+/// when everything is aborted fail at their next check, as OCaml's do
+/// (`Abort.checkAll`), and are done by the next run.
+#[test]
+fn items_under_way_fail_when_everything_is_aborted() {
+    let dir = TempDir::new("transport-abort-running");
+    let s = synced(&dir, Via::Remote, &[], build_tree);
+    for n in ["a1", "a2", "a3"] {
+        write(&s.a(), n, n, T0 + 20.0);
+    }
+    let flag = s.rpc.client_host().state::<Abort>().borrow().all_flag();
+    uutil::set_progress_printer(
+        s.rpc.client_host(),
+        Some(Arc::new(move |_, _, _| flag.set())),
+    );
+    assert_eq!(
+        s.sync().unwrap(),
+        ["a2: Aborted by user request", "a3: Aborted by user request"]
+    );
+    let there = |n: &str| s.b().join(n).exists();
+    assert_eq!(
+        (there("a1"), there("a2"), there("a3")),
+        (true, false, false)
+    );
+    uutil::set_progress_printer(s.rpc.client_host(), None);
+    assert_eq!(s.sync().unwrap(), Vec::<String>::new());
+    assert_eq!((there("a1"), there("a2"), there("a3")), (true, true, true));
 }
 
 /// A merge logs its command and result, and says what it made of the
