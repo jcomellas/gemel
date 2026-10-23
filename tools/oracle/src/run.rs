@@ -46,6 +46,16 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a socket server may take to say it has started.
 const SERVER_START: Duration = Duration::from_secs(20);
 
+/// How syncs run, besides how replica `b` is reached.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct How {
+    /// Items run concurrently (no `-maxthreads 1`).
+    pub concurrent: bool,
+    /// The ssh shim drops `__new-rpc-mode` from the server's command, so
+    /// that a 2.52 or 2.53 server starts in its compatibility mode.
+    pub old_server: bool,
+}
+
 /// The host names of the two ends (`UNISONLOCALHOSTNAME`) with a remote
 /// root, which archive names and the output depend on.
 const CLIENT_HOST: &str = "client";
@@ -111,6 +121,9 @@ pub struct Outcome {
     /// The reference implementation, run again on this implementation's
     /// final state: it should find nothing to do.
     pub recheck: Step,
+    /// The arguments each sync gave the ssh shim, a line each, with the
+    /// server's path as `<server>`. (Not recorded.)
+    pub shell_args: String,
 }
 
 /// Reads a stream to its end on a thread of its own.
@@ -228,7 +241,7 @@ impl Drop for SocketServer {
 ///
 /// OCaml splits `servercmd` on spaces, so the paths it is given must have
 /// none.
-fn ssh_shim(work: &Path) -> io::Result<PathBuf> {
+fn ssh_shim(work: &Path, old_server: bool) -> io::Result<PathBuf> {
     let dir = work.join("remote");
     let shim = dir.join("ssh");
     let path = |p: PathBuf| -> io::Result<String> {
@@ -242,6 +255,7 @@ fn ssh_shim(work: &Path) -> io::Result<PathBuf> {
          printf '%s\\n' \"$*\" >> {log}\n\
          while [ $# -gt 0 ] && [ \"$1\" != -e ]; do shift; done\n\
          shift 2\n\
+         {drop}\
          # A background command's input is /dev/null, so it comes through fd 3.\n\
          exec 3<&0\n\
          (\n\
@@ -256,6 +270,12 @@ fn ssh_shim(work: &Path) -> io::Result<PathBuf> {
         unison = path(work.join("unison-server"))?,
         home = path(work.to_owned())?,
         stderr = path(dir.join("stderr"))?,
+        drop = if old_server {
+            "n=$#; while [ $n -gt 0 ]; do a=$1; shift; n=$((n - 1)); \
+             [ \"$a\" = __new-rpc-mode ] || set -- \"$@\" \"$a\"; done\n"
+        } else {
+            ""
+        },
     );
     fs::write(&shim, script)?;
     #[cfg(unix)]
@@ -272,7 +292,7 @@ fn shim_runs(work: &Path) -> u64 {
     fs::metadata(work.join("remote").join("argv")).map_or(0, |m| m.len())
 }
 
-fn run(p: &Pairing, remote: Option<Remote>, concurrent: bool, work: &Path) -> io::Result<Step> {
+fn run(p: &Pairing, remote: Option<Remote>, how: How, work: &Path) -> io::Result<Step> {
     let mut cmd = Command::new(&p.client);
     cmd.arg(work.join("a"));
     let mut server = None;
@@ -293,7 +313,7 @@ fn run(p: &Pairing, remote: Option<Remote>, concurrent: bool, work: &Path) -> io
             runs = shim_runs(work);
             cmd.arg(format!("ssh://{SERVER_HOST}/b"))
                 .arg("-sshcmd")
-                .arg(ssh_shim(work)?)
+                .arg(ssh_shim(work, how.old_server)?)
                 .arg("-servercmd")
                 .arg(&p.server);
         }
@@ -308,7 +328,11 @@ fn run(p: &Pairing, remote: Option<Remote>, concurrent: bool, work: &Path) -> io
     }
     let mut child = cmd
         .args(FLAGS)
-        .args(if concurrent { &[][..] } else { ONE_AT_A_TIME })
+        .args(if how.concurrent {
+            &[][..]
+        } else {
+            ONE_AT_A_TIME
+        })
         .env("UNISON", work.join("unison"))
         .env("HOME", work)
         .stdin(Stdio::null())
@@ -368,7 +392,7 @@ pub fn outcome(
     p: &Pairing,
     reference: &Pairing,
     remote: Option<Remote>,
-    concurrent: bool,
+    how: How,
     scenario: &Scenario,
     work: &Path,
 ) -> io::Result<Outcome> {
@@ -383,17 +407,21 @@ pub fn outcome(
     let (a, b) = (work.join("a"), work.join("b"));
     scenario::apply(&a, &scenario.initial_a)?;
     scenario::apply(&b, &scenario.initial_b)?;
-    let first = run(p, remote, concurrent, work)?;
+    let first = run(p, remote, how, work)?;
     scenario::apply(&a, &scenario.changes_a)?;
     scenario::apply(&b, &scenario.changes_b)?;
-    let second = run(p, remote, concurrent, work)?;
+    let second = run(p, remote, how, work)?;
     let (snap_a, snap_b) = (snapshot(&a)?, snapshot(&b)?);
     let unison_dir = listing(&work.join("unison"))?;
     let server_dir = match remote {
         Some(_) => listing(&work.join("unison-server"))?,
         None => Vec::new(),
     };
-    let recheck = run(reference, remote, concurrent, work)?;
+    let recheck = run(reference, remote, how, work)?;
+    let mut shell_args = fs::read_to_string(work.join("remote").join("argv")).unwrap_or_default();
+    for server in [&p.server, &reference.server] {
+        shell_args = shell_args.replace(&*server.to_string_lossy(), "<server>");
+    }
     Ok(Outcome {
         first,
         second,
@@ -402,6 +430,7 @@ pub fn outcome(
         unison_dir,
         server_dir,
         recheck,
+        shell_args,
     })
 }
 
