@@ -17,17 +17,22 @@
 //! process's globals; here the client and a loopback server live in one
 //! process, so they are values.
 //!
-//! A [`Connection`] runs on the engine thread: a writer task drains its
-//! output queues, and [`Connection::receive`] reads messages, wakes the
-//! requests waiting for their replies, and starts a task for each request
-//! from the other side. Writes go out in OCaml's order and with its write
-//! token, so that a peer with flow control on (`halfduplex`) gets it when
-//! it expects it:
-//! - urgent writes go out at once, even without the token (aborting a
-//!   stream); normal writes, then idle ones (stream chunks), only with it;
-//! - once the queues are empty, the output is flushed, after a yield in
-//!   case more is coming; with flow control on, the token is handed to the
-//!   other side first, even with nothing written.
+//! A [`Connection`] runs on the engine thread: [`Connection::receive`]
+//! reads messages, wakes the requests waiting for their replies, and
+//! starts a task for each request from the other side. Writes go out as
+//! OCaml's do (`performOutput`), in its order and with its write token, so
+//! that a peer with flow control on (`halfduplex`) gets it when it expects
+//! it:
+//! - a message goes into the output buffer at once, whatever its kind, if
+//!   no other write is under way and this side holds the token (urgent
+//!   ones need no token); the buffer is written out when it is full, at
+//!   once if the output takes it, else by a task, and other writes wait;
+//! - those that wait go out in turn: urgent ones (aborting a stream), then
+//!   normal ones, then idle ones (stream chunks), the last two only with
+//!   the token;
+//! - once none waits, the output is flushed, after a yield in case more is
+//!   coming; with flow control on, the token is handed to the other side
+//!   first, even with nothing written.
 //!
 //! The server starts with the token. Then the client asks the server to
 //! turn flow control off (`negociateFlowControl`), unless `halfduplex` is
@@ -44,7 +49,7 @@ use std::rc::Rc;
 
 use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
 use gemel_base::util::Error;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, oneshot};
 
 use crate::host::Host;
@@ -146,12 +151,31 @@ pub enum Kind {
 
 /// The output queues (`outputQueue`).
 struct Queues {
+    /// No write is under way (`available`).
+    available: bool,
     can_write: bool,
     flow_control: bool,
     closed: bool,
+    /// A flush is due (`maybeFlush`'s `pendingFlush`).
+    pending_flush: bool,
     urgent: VecDeque<Queued>,
     normal: VecDeque<Queued>,
     idle: VecDeque<Queued>,
+}
+
+/// The output buffer (`outputBuffer`). The output is taken out while it is
+/// written to.
+struct OutputBuffer {
+    output: Option<Output>,
+    buf: Vec<u8>,
+    /// The output was closed.
+    closed: bool,
+}
+
+/// A write (`performOutput`'s action): a message, or a flush (`Last`).
+enum Write {
+    Message(Queued, Kind),
+    Flush,
 }
 
 /// A message, and who waits for it to be written (`performOutput`'s
@@ -172,12 +196,6 @@ impl Queues {
             .map(|m| (m, Kind::Normal))
             .or_else(|| self.idle.pop_front().map(|m| (m, Kind::Idle)))
     }
-
-    /// Whether a message may go out now.
-    fn ready(&self) -> bool {
-        !self.urgent.is_empty()
-            || (self.can_write && !(self.normal.is_empty() && self.idle.is_empty()))
-    }
 }
 
 type Reply = oneshot::Sender<Result<Vec<u8>, Error>>;
@@ -188,7 +206,11 @@ struct Inner {
     version: Cell<u32>,
     input: RefCell<Option<Input>>,
     queues: RefCell<Queues>,
-    writer: Notify,
+    out: RefCell<OutputBuffer>,
+    /// Notified when a write gives the output back.
+    idle: Notify,
+    /// Notified when the connection is closed.
+    closing: Notify,
     receivers: RefCell<HashMap<u32, Reply>>,
     failure: RefCell<Option<Error>>,
     close_handlers: RefCell<Vec<Box<dyn FnOnce()>>>,
@@ -225,7 +247,8 @@ impl Eq for Connection {}
 impl Connection {
     /// `makeConnection`: a connection over `input` and `output`, served by
     /// `endpoint`, with flow control off until [`enable_flow_control`].
-    /// Starts the writer; nothing is received until [`receive`].
+    /// Starts the task that closes the output; nothing is received until
+    /// [`receive`].
     ///
     /// [`enable_flow_control`]: Connection::enable_flow_control
     /// [`receive`]: Connection::receive
@@ -240,14 +263,22 @@ impl Connection {
             version: Cell::new(protocol::RPC_SUPPORTED_VERSIONS[0]),
             input: RefCell::new(Some(input)),
             queues: RefCell::new(Queues {
+                available: true,
                 can_write: true,
                 flow_control: false,
                 closed: false,
+                pending_flush: false,
                 urgent: VecDeque::new(),
                 normal: VecDeque::new(),
                 idle: VecDeque::new(),
             }),
-            writer: Notify::new(),
+            out: RefCell::new(OutputBuffer {
+                output: Some(output),
+                buf: Vec::with_capacity(BUFFER_SIZE),
+                closed: false,
+            }),
+            idle: Notify::new(),
+            closing: Notify::new(),
             receivers: RefCell::default(),
             failure: RefCell::default(),
             close_handlers: RefCell::default(),
@@ -257,7 +288,7 @@ impl Connection {
             emitted: Cell::new(0),
             received: Cell::new(0),
         }));
-        runtime::spawn_local(conn.clone().write(output));
+        runtime::spawn_local(conn.clone().close_output());
         conn
     }
 
@@ -303,14 +334,14 @@ impl Connection {
         self.0.failure.borrow().clone()
     }
 
-    /// Queues a message (`dump`, `dumpIdle`, `dumpUrgent`). Messages of a
-    /// kind go out in the order they are queued; nothing goes out once the
+    /// Sends a message (`dump`, `dumpIdle`, `dumpUrgent`). Messages of a
+    /// kind go out in the order they are sent; nothing goes out once the
     /// connection is closed.
     pub fn send(&self, kind: Kind, message: Vec<u8>) {
-        self.queue(kind, (message, None));
+        self.perform_output(kind, (message, None));
     }
 
-    /// Queues a message and waits until it is written (into the output
+    /// Sends a message and waits until it is written (into the output
     /// buffer), as OCaml's senders wait for `dump`: so that what is sent
     /// after it, of whatever kind, goes after it. Fails if the connection
     /// does first.
@@ -319,13 +350,21 @@ impl Connection {
             return Err(e);
         }
         let (tx, rx) = oneshot::channel();
-        self.queue(kind, (message, Some(tx)));
+        self.perform_output(kind, (message, Some(tx)));
         rx.await.map_err(|_| self.failure().unwrap_or_else(lost))
     }
 
-    fn queue(&self, kind: Kind, queued: Queued) {
+    /// `performOutput`: writes the message now if no other write is under
+    /// way and it may go out, else queues it.
+    fn perform_output(&self, kind: Kind, queued: Queued) {
         let mut q = self.0.queues.borrow_mut();
         if q.closed {
+            return;
+        }
+        if q.available && (kind == Kind::Urgent || q.can_write) {
+            q.available = false;
+            drop(q);
+            self.write_now(Some(Write::Message(queued, kind)));
             return;
         }
         match kind {
@@ -333,97 +372,197 @@ impl Connection {
             Kind::Normal => q.normal.push_back(queued),
             Kind::Idle => q.idle.push_back(queued),
         }
-        drop(q);
-        self.0.writer.notify_one();
     }
 
-    /// The writer: drains the queues, then flushes (`popOutputQueues` and
-    /// `maybeFlush`), until the connection is closed or a write fails.
-    async fn write(self, output: Output) {
-        let mut w = BufWriter::with_capacity(BUFFER_SIZE, output);
-        // Whether anything was written since the last flush. (The buffer
-        // can be empty with something to flush still: a message larger
-        // than the buffer goes past it, into an output that may buffer it,
-        // as standard output does up to a newline.)
-        let mut unflushed = false;
-        let result: std::io::Result<()> = async {
+    /// `performOutputRec`: does `first`, then what is queued
+    /// (`popOutputQueues`), in the caller until the output has to be
+    /// waited for. Once nothing is queued, a flush is scheduled.
+    fn write_now(&self, first: Option<Write>) {
+        let conn = self.clone();
+        runtime::run_now(async move {
+            let mut next = first;
             loop {
-                let next = self.0.queues.borrow_mut().pop();
-                if let Some(((message, written), kind)) = next {
-                    w.write_all(&message).await?;
-                    unflushed = true;
-                    self.0
-                        .emitted
-                        .set(self.0.emitted.get() + message.len() as u64);
-                    if kind == Kind::Urgent {
-                        w.flush().await?;
-                        unflushed = false;
-                    }
-                    if let Some(written) = written {
-                        let _ = written.send(());
-                    }
-                    continue;
-                }
-                let (closed, token) = {
-                    let q = self.0.queues.borrow();
-                    (q.closed, q.flow_control && q.can_write)
+                let write = next.take().or_else(|| {
+                    conn.0
+                        .queues
+                        .borrow_mut()
+                        .pop()
+                        .map(|(m, k)| Write::Message(m, k))
+                });
+                let Some(write) = write else {
+                    conn.0.queues.borrow_mut().available = true;
+                    conn.maybe_flush();
+                    return;
                 };
-                if closed {
-                    w.flush().await?;
-                    return w.shutdown().await;
-                }
-                if !unflushed && !token {
-                    self.0.writer.notified().await;
-                    // As `allowWrites` does, let the receiver and the
-                    // requests it started run first.
-                    tokio::task::yield_now().await;
-                    continue;
-                }
-                // Wait a bit, in case there are new requests being
-                // processed; if more is to be written, don't flush yet.
-                tokio::task::yield_now().await;
-                if self.0.queues.borrow().ready() {
-                    continue;
-                }
-                let token = {
-                    let mut q = self.0.queues.borrow_mut();
-                    let token = q.flow_control && q.can_write && !q.closed;
-                    if token {
-                        q.can_write = false;
+                let result = match write {
+                    Write::Message((message, written), kind) => {
+                        let r = conn.fill_buffer(&message).await;
+                        let r = match (r, kind) {
+                            (Ok(()), Kind::Urgent) => conn.flush_buffer().await,
+                            (r, _) => r,
+                        };
+                        if let Some(written) = written {
+                            let _ = written.send(());
+                        }
+                        r
                     }
-                    token
+                    Write::Flush => {
+                        let token = {
+                            let mut q = conn.0.queues.borrow_mut();
+                            let token = q.flow_control;
+                            if token {
+                                q.can_write = false;
+                            }
+                            token
+                        };
+                        let r = if token {
+                            conn.fill_buffer(&protocol::encode_int(0)).await
+                        } else {
+                            Ok(())
+                        };
+                        match r {
+                            Ok(()) => conn.flush_buffer().await,
+                            r => r,
+                        }
+                    }
                 };
-                if token {
-                    w.write_all(&protocol::encode_int(0)).await?;
-                    self.0.emitted.set(self.0.emitted.get() + INT_SIZE as u64);
+                if result.is_err() {
+                    // In a task: failing runs the close handlers, which
+                    // mustn't run inside whatever was sending.
+                    let c = conn.clone();
+                    runtime::spawn_local(async move { c.fail(lost()) });
+                    return;
                 }
-                w.flush().await?;
-                unflushed = false;
             }
+        });
+    }
+
+    /// `maybeFlush`: once the queues are empty, flushes the output after a
+    /// yield, unless more is being written by then; with flow control on
+    /// and the token, hands the token over first, even with nothing to
+    /// flush.
+    fn maybe_flush(&self) {
+        {
+            let mut q = self.0.queues.borrow_mut();
+            let empty = self.0.out.borrow().buf.is_empty();
+            if q.pending_flush || q.closed || (empty && !(q.flow_control && q.can_write)) {
+                return;
+            }
+            q.pending_flush = true;
         }
-        .await;
-        if result.is_err() {
-            self.fail(lost());
+        let conn = self.clone();
+        runtime::spawn_local(async move {
+            // Wait a bit, in case there are new requests being processed.
+            tokio::task::yield_now().await;
+            let mut q = conn.0.queues.borrow_mut();
+            q.pending_flush = false;
+            // If there are other writes under way, they flush.
+            if !q.available || q.closed || !q.can_write {
+                return;
+            }
+            q.available = false;
+            drop(q);
+            conn.write_now(Some(Write::Flush));
+        });
+    }
+
+    /// `fillBuffer`: copies `s` into the output buffer, writing the buffer
+    /// out each time it is full.
+    async fn fill_buffer(&self, mut s: &[u8]) -> std::io::Result<()> {
+        while !s.is_empty() {
+            let full = self.0.out.borrow().buf.len() >= BUFFER_SIZE;
+            if full {
+                self.send_output().await?;
+                continue;
+            }
+            let mut out = self.0.out.borrow_mut();
+            let l = s.len().min(BUFFER_SIZE - out.buf.len());
+            out.buf.extend_from_slice(&s[..l]);
+            s = &s[l..];
+        }
+        Ok(())
+    }
+
+    /// `flushBuffer`: writes the output buffer out, all of it.
+    async fn flush_buffer(&self) -> std::io::Result<()> {
+        while !self.0.out.borrow().buf.is_empty() {
+            self.send_output().await?;
+        }
+        let mut output = self.take_output().await?;
+        let r = output.flush().await;
+        self.put_output(output);
+        r
+    }
+
+    /// `sendOutput`: one write of the output buffer; what it took goes.
+    /// (What another write puts in the buffer meanwhile goes after what is
+    /// left.)
+    async fn send_output(&self) -> std::io::Result<()> {
+        let mut output = self.take_output().await?;
+        let buf = std::mem::take(&mut self.0.out.borrow_mut().buf);
+        let r = output.write(&buf).await;
+        let n = match r {
+            Ok(0) => Err(std::io::ErrorKind::WriteZero.into()),
+            r => r,
+        };
+        {
+            let mut out = self.0.out.borrow_mut();
+            let written = *n.as_ref().unwrap_or(&0);
+            let added = std::mem::take(&mut out.buf);
+            out.buf = [&buf[written..], &added[..]].concat();
+        }
+        self.put_output(output);
+        let n = n?;
+        self.0.emitted.set(self.0.emitted.get() + n as u64);
+        Ok(())
+    }
+
+    fn put_output(&self, output: Output) {
+        self.0.out.borrow_mut().output = Some(output);
+        self.0.idle.notify_waiters();
+    }
+
+    /// The output, once no other write has it; none once it is closed.
+    async fn take_output(&self) -> std::io::Result<Output> {
+        loop {
+            let idle = self.0.idle.notified();
+            {
+                let mut out = self.0.out.borrow_mut();
+                if let Some(output) = out.output.take() {
+                    return Ok(output);
+                }
+                if out.closed {
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+            }
+            idle.await;
         }
     }
 
     /// `enableFlowControl`, once the handshake is done: the server holds
-    /// the write token first.
+    /// the write token first, and writes what is queued.
     pub fn enable_flow_control(&self) {
         let mut q = self.0.queues.borrow_mut();
+        q.available = false;
         q.flow_control = true;
         q.can_write = self.0.is_server;
+        let can_write = q.can_write;
         drop(q);
-        self.0.writer.notify_one();
+        if can_write {
+            self.write_now(None);
+        }
     }
 
     /// `disableFlowControl`.
     pub fn disable_flow_control(&self) {
-        let mut q = self.0.queues.borrow_mut();
-        q.flow_control = false;
-        q.can_write = true;
-        drop(q);
-        self.0.writer.notify_one();
+        let can_write = {
+            let mut q = self.0.queues.borrow_mut();
+            q.flow_control = false;
+            q.can_write
+        };
+        if !can_write {
+            self.grant_writes();
+        }
     }
 
     /// Whether flow control is on.
@@ -435,7 +574,7 @@ impl Connection {
     /// OCaml asserts that this side didn't hold it. A token that crossed
     /// this side turning flow control off is ignored.
     fn allow_writes(&self) -> Result<(), Error> {
-        let mut q = self.0.queues.borrow_mut();
+        let q = self.0.queues.borrow();
         if q.can_write {
             if !q.flow_control {
                 return Ok(());
@@ -444,10 +583,23 @@ impl Connection {
                 "Protocol error: write token received while holding it".into(),
             ));
         }
-        q.can_write = true;
         drop(q);
-        self.0.writer.notify_one();
+        self.grant_writes();
         Ok(())
+    }
+
+    /// `allowWrites`'s effect: what is queued goes out, after a yield that
+    /// lets the receiver and the requests it started run first.
+    fn grant_writes(&self) {
+        let mut q = self.0.queues.borrow_mut();
+        q.can_write = true;
+        q.available = false;
+        drop(q);
+        let conn = self.clone();
+        runtime::spawn_local(async move {
+            tokio::task::yield_now().await;
+            conn.write_now(None);
+        });
     }
 
     /// Sends a request for the command `name` with its argument section
@@ -666,9 +818,28 @@ impl Connection {
         }
     }
 
+    /// Nothing more is sent; the output is closed (see
+    /// [`Connection::close_output`]).
     fn shut(&self) {
-        self.0.queues.borrow_mut().closed = true;
-        self.0.writer.notify_one();
+        let mut q = self.0.queues.borrow_mut();
+        if !q.closed {
+            q.closed = true;
+            self.0.closing.notify_one();
+        }
+    }
+
+    /// Once the connection is closed, and a write under way is done, flushes
+    /// and closes the output. A task from the start, so that a connection
+    /// dropped outside the engine thread's runtime is closed the next time
+    /// it runs.
+    async fn close_output(self) {
+        self.0.closing.notified().await;
+        let _ = self.flush_buffer().await;
+        if let Ok(mut output) = self.take_output().await {
+            let _ = output.shutdown().await;
+        }
+        self.0.out.borrow_mut().closed = true;
+        self.0.idle.notify_waiters();
     }
 
     /// `at_conn_close'`: runs `f` when the connection fails or closes (at
