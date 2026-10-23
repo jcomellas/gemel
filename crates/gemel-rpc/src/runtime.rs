@@ -35,7 +35,9 @@ impl<C: Send + 'static, E: Send + 'static> EngineThread<C, E> {
     {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (ev_tx, ev_rx) = mpsc::unbounded_channel();
-        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
         let thread = std::thread::Builder::new()
             .name("gemel-engine".into())
             .spawn(move || {
@@ -109,7 +111,9 @@ impl<C: Send + 'static, E: Send + 'static> EngineThread<C, E> {
 /// that is only an engine (a server). Blocking work still under way when
 /// it ends (reading standard input, say) is left to end with the process.
 pub fn run_here<F: Future>(engine: F) -> std::io::Result<F::Output> {
-    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
     let local = tokio::task::LocalSet::new();
     let output = local.block_on(&runtime, engine);
     drop(local);

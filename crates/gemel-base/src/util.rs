@@ -250,6 +250,14 @@ pub const MY_NAME_AND_VERSION: &str = concat!("gemel ", env!("CARGO_PKG_VERSION"
 /// `Uutil.myVersion`.
 pub const MY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// `Uutil.myMajorVersion`: the version without its last number, as
+/// `addversionno` appends it to the server's command.
+pub const MY_MAJOR_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR")
+);
+
 /// `Uutil.quotes`: `s` quoted for the shell (single quotes on Unix,
 /// double quotes on Windows).
 pub fn quotes(s: &str) -> String {
