@@ -112,7 +112,7 @@ Three constraints from the Unison sources shaped this layering:
   1. compat and base
   2. local↔local engine plus the text UI (port of `uitext`)
   3. remote
-  4. GUI
+  4. GUI, with ssh's prompts in it (a pseudo-terminal or ConPTY, `terminal.ml`), moved there from milestone 3
   5. platform polish
 
   The text UI is the first frontend *and* the test harness. Milestones 1 and 2 are done ([milestone-2-plan.md](milestone-2-plan.md)); milestone 3 is planned in [milestone-3-plan.md](milestone-3-plan.md).

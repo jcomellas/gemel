@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 4a, 2026-10-23) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 5a, 2026-10-23) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -32,7 +32,7 @@ Out of scope, and how each behaves until it is done:
 | `rsh` (`rshcmd`, `rshargs`) | Marked removed, as in OCaml since 2.52 | Never |
 | The self-test commands (`test.ml`: `makeRootEmpty`, `getfs`, `putfs`, ...) | Not registered | Never |
 | `dumpArchive`, `inspectFilesystem` (debugging) | Not registered | M5, if wanted |
-| GUI, with ssh's prompts in it (a pseudo-terminal, `terminal.ml`, and the session's `openConnection*`) | ssh asks at the terminal, as with OCaml's text interface; OCaml's GUIs alone run ssh under a pseudo-terminal (phase 4's notes) | Phase 4b or M4 |
+| GUI, with ssh's prompts in it (a pseudo-terminal or ConPTY, `terminal.ml`, and the session's `openConnection*`) | ssh asks at the terminal, as with OCaml's text interface; OCaml's GUIs alone run ssh under a pseudo-terminal (phase 4's notes) | M4, with the GUI (decided 2026-10-23) |
 
 ## Design decisions
 
@@ -74,7 +74,7 @@ Milestone 2's loopback dispatch encodes every root call's sections as a server w
 ### 5. Testing doesn't need an ssh server
 
 - **An `sshcmd` shim:** a script given as `-sshcmd` runs the server command locally and ignores the host. With `servercmd` it chooses which program serves: gemel, or one of the OCaml builds.
-- **Password prompts:** the same shim can print `user@host's password:` and read the answer through the pseudo-terminal, so the prompt path is tested deterministically.
+- **Password prompts:** the same shim can print `user@host's password:` on `/dev/tty` and read the answer there, with the client in a pseudo-terminal the test holds, so the prompt path is tested deterministically.
 - **Sockets** are tested on localhost and in a temporary directory.
 - **A real sshd** runs in one Linux CI cell at most.
 
@@ -330,7 +330,7 @@ It is split in two, since gemel's server can be tested against OCaml clients bef
   - **Test runtimes** have tokio's drivers now, as the engine thread's do, and drop their tasks before the runtime, whose drivers wake them as they shut down. The ssh connection's close handler drops the process rather than starting a task to wait for it (tokio reaps it), since it can run as the engine thread ends.
 - **A flaky test, once:** on macOS, `copy.rs`'s `resource_forks_are_copied` read a resource fork's length as other than 17 right after writing it, during a whole-workspace run; alone, and in three runs of its suite, it passed. It isn't changed here.
 
-### Phase 4: sockets, and ssh at the terminal (`remote.ml`'s sockets, ~0.4k; `terminal.ml`, `pty.c`, `uicommon`'s `openConnection*`, ~0.5k)
+### Phase 4: sockets, and ssh at the terminal (`remote.ml`'s sockets, ~0.4k)
 
 - **Sockets:**
   - TCP, with OCaml's address resolution and its order of attempts (`buildSocket`), and Unix-domain sockets;
@@ -338,16 +338,16 @@ It is split in two, since gemel's server can be tested against OCaml clients bef
   - The manual's warning that the TCP method is insecure goes into gemel's documentation. OCaml prints none at run time.
   - Against 2.52 and 2.53 socket servers, this is where the compatibility mode of phase 3 is met.
 - **ssh at the terminal:** OCaml's text interface connects without a pseudo-terminal (`connectRoots` without `termInteract`): ssh asks for passwords, passphrases and host keys at the terminal itself, with Ctrl-C blocked, and the client ends it as it exits should it still run (`end_ssh`). Gemel's client did the first since phase 3b; the second is here.
-- **Prompts through the user interface:** a pseudo-terminal for ssh, `terminal.ml`'s handling of what it prints (`handlePasswordRequests`, its escape sequences), and the session's `openConnectionStart`, `Prompt`, `Reply`, `End` and `Cancel`. Only OCaml's GUIs use them (`uigtk3`'s `termInteract`, the Mac bridge), so they go with gemel's GUI.
+- **Prompts through the user interface:** a pseudo-terminal for ssh, `terminal.ml`'s handling of what it prints (`handlePasswordRequests`, its escape sequences), and the session's `openConnectionStart`, `Prompt`, `Reply`, `End` and `Cancel`. Only OCaml's GUIs use them (`uigtk3`'s `termInteract`, the Mac bridge), so they move to milestone 4 with gemel's GUI.
 - **Tests:**
   - sockets on localhost and on a path, against each version, both ways, with the oracle;
   - the servers' and clients' failures against OCaml's;
   - a shim standing in for ssh that asks for a password at the terminal (design decision 5);
   - one real sshd cell in Linux CI, moved to phase 6 with the other odds and ends.
 
-It is split in two:
-- **4a, sockets,** ending ssh at exit, and ssh's prompts at the terminal tested.
-- **4b, prompts through the user interface,** unless they move to milestone 4 with the GUI, their only user. Decided once 4a is merged.
+It was split in two:
+- **4a, sockets,** ending ssh at exit, and ssh's prompts at the terminal tested (PR #40).
+- **4b, prompts through the user interface,** moved to milestone 4 with the GUI, their only user (decided 2026-10-23, once 4a was merged). Phase 4 ends with 4a.
 
 **Notes (phase 4a, 2026-10-23):**
 - **The client** (`gemel_rpc::socket`, `buildConnectSocket`) tries the host's addresses in the resolver's order (`getaddrinfo`, in `gemel_fs::net`, the one new piece of `unsafe`); one whose family or protocol the system lacks (`EAFNOSUPPORT`, `EPROTONOSUPPORT`, `EINVAL`) is skipped, and any other failure ends the attempt, as in OCaml. A path in braces is a Unix-domain socket.
@@ -370,7 +370,7 @@ It is split in two:
 
 - Resuming a partial transfer: `fingerprintSubfile`, `validFilePrefix` and the append threshold.
 - Copying a moved file instead (`tryCopyMovedFile`, with `xferhint`, and `registerFileTransfer`): done in phase 3a, since OCaml clients see it.
-- `checkForChangesToSource` across hosts.
+- `checkForChangesToSource` across hosts: done in phase 3a, with transfers.
 - Diff and merge with a remote root, copying the other side's file to a local temporary file.
 - **Concurrency:**
   - transport runs items concurrently with a remote root (`maxthreads`);
@@ -380,10 +380,14 @@ It is split in two:
   - remote diff and merge;
   - concurrent items, with the log order checked against OCaml's, for a gemel server too (phase 3a's notes).
 
+It is split in two, since concurrency changes how the engine yields and wants a review of its own:
+- **5a:** resuming transfers, and diff and merge with a remote root.
+- **5b:** concurrency, with `exclusive` revisited first.
+
 ### Phase 6: Windows and the rest
 
 - **Windows:**
-  - ssh under ConPTY with the Windows OpenSSH client;
+  - ssh with the Windows OpenSSH client, asking at the console, as with OCaml's text interface, which starts it as a plain process (`buildShellConnection` without `termInteract`); ConPTY (`terminal.ml`'s `win_openpty`) is the GUI's, in milestone 4;
   - sockets.
   - OCaml's Windows handling where it differs: `kill_noerr` with `SIGKILL`, and path forms on the server.
 - **Matrix:** the recorded outcomes for Windows cover remote scenarios.
@@ -411,8 +415,8 @@ It is split in two:
 | A deadlock between flow control and ssh's buffering | Port OCaml's write tokens exactly, and keep `halfduplex`; test with large transfers in both directions at once |
 | rsync's token stream or checksums drift by a bit, which OCaml rejects or silently mis-decodes | Golden vectors from OCaml before any end-to-end test; compare the files transferred, not only the outcome |
 | 2.52.1 needs OCaml 4, which may age out of Debian, and of the CI runner's apt | Locally the bookworm image builds it. CI caches the binaries by tag and compiler version, so a runner whose apt moves to OCaml 5 fails to build them; then CI installs OCaml 4 through opam, or 2.52 is dropped from the matrix and the plan says so |
-| Prompts differ across ssh versions and platforms | Port `terminal.ml`'s patterns as they are, test them with the shim, and keep the real-sshd cell for drift |
-| ConPTY on Windows behaves differently from Unix pseudo-terminals | Phase 6 alone, after the Unix path is settled; OCaml's Windows code is the reference |
+| Prompts differ across ssh versions and platforms | ssh asks them itself at the terminal, so gemel matches none in this milestone; milestone 4 ports `terminal.ml`'s patterns as they are, and the real-sshd cell watches for drift |
+| ConPTY on Windows behaves differently from Unix pseudo-terminals | Milestone 4, with the GUI, after the Unix path is settled; OCaml's Windows code is the reference |
 | Concurrent transport exposes atomicity that milestone 2 relied on items running one at a time for | Revisit `exclusive` in phase 5 before turning `maxthreads` on |
 | A server scanning (on blocking tasks) while it serves other requests | The scan already runs off the engine thread; requests that touch the same root wait on the host's turn, as local scans do |
 | The socket mode has no authentication | As in OCaml: documented; gemel prints no warning, since OCaml doesn't |
