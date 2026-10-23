@@ -159,8 +159,9 @@ fn interrupts_in_raw_mode() {
 }
 
 /// ssh asks for a password at the terminal itself, before the program
-/// sets the terminal up for its keys: a shim standing in for ssh asks on
-/// `/dev/tty`, without echo, and runs the server once the answer is right.
+/// sets the terminal up for its keys: a shim standing in for ssh turns
+/// echo off, as ssh does before it asks, asks on `/dev/tty`, and runs the
+/// server once the answer is right.
 #[test]
 fn ssh_asks_for_a_password_at_the_terminal() {
     let ocaml = common::ocaml_path().unwrap_or_else(|| common::gemel_path().to_owned());
@@ -175,8 +176,9 @@ fn ssh_asks_for_a_password_at_the_terminal() {
             &shim,
             format!(
                 "#!/bin/sh\n\
+                 stty -echo < /dev/tty\n\
                  printf \"me@server's password: \" > /dev/tty\n\
-                 stty -echo < /dev/tty; read -r pw < /dev/tty; stty echo < /dev/tty\n\
+                 read -r pw < /dev/tty; stty echo < /dev/tty\n\
                  printf '\\n' > /dev/tty\n\
                  [ \"$pw\" = secret ] || {{ echo 'Permission denied.' >&2; exit 255; }}\n\
                  while [ \"$1\" != -e ]; do shift; done; shift 2\n\
