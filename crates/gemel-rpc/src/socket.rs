@@ -147,7 +147,8 @@ async fn connect_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
     }
 }
 
-/// Windows: as tokio connects (phase 6).
+/// Windows: as tokio connects, which is as OCaml's Windows Lwt does it
+/// (`connect`, then waiting for the connection's event and its error).
 #[cfg(not(unix))]
 async fn connect_tcp(addr: SocketAddr) -> io::Result<TcpStream> {
     let socket = match addr {
@@ -179,7 +180,7 @@ async fn connect_unix(host: &str) -> Result<(Input, Output), Error> {
             error_message(&e)
         ))),
     }
-    // Unix-domain sockets on Windows come with phase 6.
+    // Not on Windows, where tokio has none (milestone 3's phase 6a notes).
     #[cfg(not(unix))]
     Err(Error::Fatal(format!("{ERR}{path}")))
 }
@@ -309,7 +310,7 @@ fn listen_unix(path: &str, cleanup: &mut Cleanup) -> Result<Vec<Listener>, Error
             ))),
         }
     }
-    // Unix-domain sockets on Windows come with phase 6.
+    // Not on Windows, where tokio has none (milestone 3's phase 6a notes).
     #[cfg(not(unix))]
     {
         let _ = cleanup;
