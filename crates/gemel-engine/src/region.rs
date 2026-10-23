@@ -19,7 +19,7 @@ use tokio::sync::oneshot;
 
 /// `Lwt_util.region`.
 pub struct Region {
-    size: usize,
+    size: Cell<usize>,
     count: Cell<usize>,
     waiters: RefCell<VecDeque<(oneshot::Sender<()>, usize)>>,
 }
@@ -28,15 +28,20 @@ impl Region {
     /// `make_region`.
     pub fn new(size: usize) -> Region {
         Region {
-            size,
+            size: Cell::new(size),
             count: Cell::new(0),
             waiters: RefCell::default(),
         }
     }
 
+    /// `resize_region`: a new size, for those that enter from now on.
+    pub fn resize(&self, size: usize) {
+        self.size.set(size);
+    }
+
     /// `run_in_region`: runs `f`, counting for `sz`, once it may enter.
     pub async fn run<T>(&self, sz: usize, f: impl Future<Output = T>) -> T {
-        if self.count.get() >= self.size {
+        if self.count.get() >= self.size.get() {
             let (tx, rx) = oneshot::channel();
             self.waiters.borrow_mut().push_back((tx, sz));
             // Let in by `leave`, which counts it.
@@ -52,7 +57,7 @@ impl Region {
     /// the size.
     fn leave(&self, sz: usize) {
         let count = self.count.get() - sz;
-        if count < self.size {
+        if count < self.size.get() {
             while let Some((w, sz)) = self.waiters.borrow_mut().pop_front() {
                 // One that has given up waiting doesn't enter.
                 if w.send(()).is_ok() {

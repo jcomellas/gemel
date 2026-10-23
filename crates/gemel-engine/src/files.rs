@@ -12,14 +12,17 @@
 //! runs at once, without yielding, as OCaml's does (see [`exclusive`]),
 //! except a copy between local roots, on another thread.
 //!
-//! Copying a directory copies its children one at a time, in name order,
-//! which is the order OCaml's threads run in between local roots; running
-//! transfers concurrently (`maxthreads`) comes with transport. Extended
-//! data (xattrs and ACLs) isn't read or written yet, so the props pass
-//! through as they are.
+//! Copying a directory starts a copy of each child, in name order, as
+//! OCaml starts a thread for each: with a remote root they run at once, up
+//! to `copyReg`'s limit (as many as items may run at once); between local
+//! roots, one at a time, the order OCaml's threads run in there, since
+//! they don't yield. Extended data (xattrs and ACLs) isn't read or written
+//! yet, so the props pass through as they are.
 
+use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use gemel_base::case::{self, Mode};
 use gemel_base::name::Name;
@@ -41,6 +44,7 @@ use crate::archive::{self, Archive};
 use crate::common::{Codec, ContentsChange, UpdateContent, UpdateItem};
 use crate::copy::{self, Ctx, Replacing, Source};
 use crate::globals::Roots;
+use crate::region::Region;
 use crate::stasher::{self, Disposition};
 use crate::update::{self, TRANSLATE_PATH};
 use crate::with_trace;
@@ -1084,8 +1088,24 @@ struct Copying<'a> {
     props: PropsConfig,
     fs: gemel_fs::fileinfo::FsConfig,
     max_errors: i64,
+    /// Whether a directory's children are copied concurrently, as OCaml's
+    /// threads copy them: with a remote root (between local roots its
+    /// copies don't yield, so they go one at a time).
+    concurrent: bool,
+    /// `copyReg`.
+    copy_reg: Rc<Region>,
     /// The transient errors, most recent first.
-    errors: Vec<Error>,
+    errors: RefCell<Vec<Error>>,
+}
+
+/// `copyReg`: the region a client's copies share, as many at once as items
+/// propagate (see [`crate::transport::transport_items`]).
+pub struct CopyReg(pub Rc<Region>);
+
+impl Default for CopyReg {
+    fn default() -> Self {
+        CopyReg(Rc::new(Region::new(50)))
+    }
 }
 
 impl<'a> Copying<'a> {
@@ -1102,7 +1122,7 @@ impl<'a> Copying<'a> {
     /// `real_p_to`), returning the archive of what was copied and the paths
     /// that failed. A transient error fails the subtree only.
     fn copy_rec<'b>(
-        &'b mut self,
+        &'b self,
         p_from: Path<Local>,
         p_to: Path<Local>,
         real_p_to: Path<Local>,
@@ -1122,7 +1142,7 @@ impl<'a> Copying<'a> {
                             .borrow_mut()
                             .file(self.id);
                     }
-                    self.errors.insert(0, e);
+                    self.errors.borrow_mut().insert(0, e);
                     Ok((Archive::NoArchive, vec![p_from]))
                 }
                 Err(e) => Err(e),
@@ -1131,7 +1151,7 @@ impl<'a> Copying<'a> {
     }
 
     async fn copy_one(
-        &mut self,
+        &self,
         p_from: &Path<Local>,
         p_to: &Path<Local>,
         real_p_to: &Path<Local>,
@@ -1139,26 +1159,31 @@ impl<'a> Copying<'a> {
     ) -> Result<(Archive, Vec<Path<Local>>), Error> {
         match f {
             Archive::File(desc, fp, stamp, ress) => {
-                self.check_abort()?;
                 let source = Source {
                     desc: desc.clone(),
                     fp: fp.clone(),
                     stamp: self.fast_check.then_some(*stamp),
                     ress: ress.clone(),
                 };
-                let info = copy::file(
-                    self.rpc,
-                    self.root_from,
-                    p_from,
-                    self.root_to,
-                    self.working_dir,
-                    p_to,
-                    real_p_to,
-                    self.replacing,
-                    &source,
-                    self.id,
-                )
-                .await?;
+                let info = self
+                    .copy_reg
+                    .run(1, async {
+                        self.check_abort()?;
+                        copy::file(
+                            self.rpc,
+                            self.root_from,
+                            p_from,
+                            self.root_to,
+                            self.working_dir,
+                            p_to,
+                            real_p_to,
+                            self.replacing,
+                            &source,
+                            self.id,
+                        )
+                        .await
+                    })
+                    .await?;
                 Ok((
                     Archive::File(
                         info.desc.override_with(desc, &self.props),
@@ -1170,39 +1195,80 @@ impl<'a> Copying<'a> {
                 ))
             }
             Archive::Symlink(l) => {
-                self.check_abort()?;
-                self.rpc
-                    .call_root(
-                        &MAKE_SYMLINK,
-                        self.root_to,
-                        (self.working_dir.clone(), p_to.clone(), l.clone()),
-                    )
+                self.copy_reg
+                    .run(1, async {
+                        self.check_abort()?;
+                        self.rpc
+                            .call_root(
+                                &MAKE_SYMLINK,
+                                self.root_to,
+                                (self.working_dir.clone(), p_to.clone(), l.clone()),
+                            )
+                            .await
+                    })
                     .await?;
                 Ok((f.clone(), Vec::new()))
             }
             Archive::Dir(desc, children) => {
                 let (existing, initial_desc) = self
-                    .rpc
-                    .call_root(
-                        &MKDIR,
-                        self.root_to,
-                        (self.working_dir.clone(), p_to.clone()),
+                    .copy_reg
+                    .run(
+                        1,
+                        self.rpc.call_root(
+                            &MKDIR,
+                            self.root_to,
+                            (self.working_dir.clone(), p_to.clone()),
+                        ),
                     )
                     .await?;
                 self.check_abort()?;
+                // A thread for each child, in name order; their results
+                // are taken last name first, as OCaml's fold does (so are
+                // the paths that failed, and the first error to stop it).
+                let copy_child = |name: &Name, child| {
+                    let name_to = name.normalize(self.mode).into_owned();
+                    self.copy_rec(
+                        p_from.child(name),
+                        p_to.child(&name_to),
+                        real_p_to.child(&name_to),
+                        child,
+                    )
+                };
+                let mut results = Vec::with_capacity(children.len());
+                if self.concurrent {
+                    use futures_util::StreamExt;
+                    let mut running: futures_util::stream::FuturesUnordered<_> = children
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (name, child))| {
+                            let copy = copy_child(name, child);
+                            async move { (i, copy.await) }
+                        })
+                        .collect();
+                    results.resize_with(children.len(), || None);
+                    while let Some((i, r)) = running.next().await {
+                        results[i] = Some(r);
+                    }
+                } else {
+                    for (name, child) in children.iter() {
+                        let r = copy_child(name, child).await;
+                        let stop = r.is_err();
+                        results.push(Some(r));
+                        if stop {
+                            break;
+                        }
+                    }
+                    results.resize_with(children.len(), || None);
+                }
                 let mut new_children = crate::name_map::NameMap::new(self.mode);
                 let mut paths = Vec::new();
                 let mut child_error = false;
-                for (name, child) in children.iter() {
-                    let name_to = name.normalize(self.mode).into_owned();
-                    let (arch, failed) = self
-                        .copy_rec(
-                            p_from.child(name),
-                            p_to.child(&name_to),
-                            real_p_to.child(&name_to),
-                            child,
-                        )
-                        .await?;
+                let names: Vec<&Name> = children.iter().map(|(n, _)| n).collect();
+                for (name, r) in names.into_iter().zip(results).rev() {
+                    let Some(r) = r else {
+                        continue;
+                    };
+                    let (arch, failed) = r?;
                     if arch == Archive::NoArchive {
                         child_error = true;
                     } else {
@@ -1221,15 +1287,18 @@ impl<'a> Copying<'a> {
                         .await?;
                 }
                 // The actual permissions, to keep inherited bits.
-                self.rpc
-                    .call_root(
-                        &SET_DIR_PROP,
-                        self.root_to,
-                        (
-                            self.working_dir.clone(),
-                            p_to.clone(),
-                            initial_desc,
-                            desc.clone(),
+                self.copy_reg
+                    .run(
+                        1,
+                        self.rpc.call_root(
+                            &SET_DIR_PROP,
+                            self.root_to,
+                            (
+                                self.working_dir.clone(),
+                                p_to.clone(),
+                                initial_desc,
+                                desc.clone(),
+                            ),
                         ),
                     )
                     .await?;
@@ -1307,7 +1376,7 @@ pub async fn copy(
         &local_path_from,
         ui_from,
     )?;
-    let mut c = Copying {
+    let c = Copying {
         rpc,
         root_from,
         root_to,
@@ -1319,7 +1388,9 @@ pub async fn copy(
         props,
         fs,
         max_errors,
-        errors: Vec::new(),
+        concurrent: !(root_from.is_local() && root_to.is_local()),
+        copy_reg: rpc.client_host().state::<CopyReg>().borrow().0.clone(),
+        errors: RefCell::default(),
     };
     let (arch_to, err_paths) = c
         .copy_rec(
@@ -1329,7 +1400,7 @@ pub async fn copy(
             &local_arch,
         )
         .await?;
-    let errors = std::mem::take(&mut c.errors);
+    let errors = c.errors.take();
     if arch_to == Archive::NoArchive {
         // Nothing could be copied: the most recent error.
         return Err(errors
