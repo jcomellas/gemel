@@ -97,9 +97,9 @@ fn changing_the_actions() {
             write(&p.b(), "c1", "b's c1\n", T0 + 16.0);
             write(&p.a(), "c2", "a's c2\n", T0 + 18.0);
             write(&p.b(), "c2", "b's c2\n", T0 + 17.0);
-            // Not the same contents: OCaml's client would copy them at
-            // once, the second from the first's temporary file, where
-            // gemel's copies them one at a time until phase 5c.
+            // Not the same contents: the second would be copied from the
+            // first's temporary file, and OCaml runs it at once as the
+            // first ends, so it ends first (milestone 3's phase 5b notes).
             write(&p.b(), "n1", "new\n", T0 + 19.0);
             write(&p.b(), "n2", "new 2\n", T0 + 20.0);
         }

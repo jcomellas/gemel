@@ -249,8 +249,7 @@ pub fn lines(ls: &[String], pair: &Pair, banners: &[String]) -> (Vec<String>, Ve
 }
 
 pub fn log(pair: &Pair) -> Vec<String> {
-    let log = pair.log().lines().map(str::to_owned).collect();
-    crate::ui_support::ends_unordered(pair, log)
+    pair.log().lines().map(str::to_owned).collect()
 }
 
 pub fn banners() -> Vec<String> {
@@ -269,10 +268,6 @@ pub fn compare(g: &Pair, o: &Pair, what: &str, ours: &Run, theirs: &Run) {
     assert_eq!(out1, out2, "stdout: {what}");
     let (err1, c1) = lines(&ours.stderr, g, &b);
     let (err2, c2) = lines(&theirs.stderr, o, &b);
-    let (err1, err2) = (
-        crate::ui_support::ends_unordered(g, err1),
-        crate::ui_support::ends_unordered(o, err2),
-    );
     assert_eq!(err1, err2, "stderr: {what}");
     // Local times, within a few seconds of each other.
     assert_eq!(c1.len(), c2.len(), "{what}");

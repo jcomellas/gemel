@@ -182,22 +182,6 @@ pub fn startup_log(pair: &Pair) -> Vec<String> {
     out
 }
 
-/// A log without the order of its `[END]` lines, when root `b` is
-/// remote: OCaml's client then runs items concurrently, and interleaves
-/// them with the next items' `[BGN]`; gemel's runs them one at a time
-/// until phase 5c of milestone 3. Otherwise, the log as it is.
-pub fn ends_unordered(pair: &Pair, log: Vec<String>) -> Vec<String> {
-    if !pair.is_remote() {
-        return log;
-    }
-    let (mut ends, mut rest): (Vec<String>, Vec<String>) =
-        log.into_iter().partition(|l| l.starts_with("[END] "));
-    ends.sort();
-    rest.push("(ends, sorted)".to_owned());
-    rest.extend(ends);
-    rest
-}
-
 pub const NOTHING_TO_DO: &str = "Nothing to do: replicas have not changed since last sync.";
 
 /// Syncs a pair with gemel, and with OCaml a twin pair, from the profile
@@ -259,11 +243,7 @@ pub fn sync_like_ocaml(
             }
             assert_eq!(listing(&g.a()), listing(&o.a()), "{what}");
             assert_eq!(listing(&g.b()), listing(&o.b()), "{what}");
-            assert_eq!(
-                ends_unordered(&g, startup_log(&g)),
-                ends_unordered(&o, startup_log(&o)),
-                "{what}"
-            );
+            assert_eq!(startup_log(&g), startup_log(&o), "{what}");
         }
         for fastcheck in ["true", "false"] {
             let flag = format!("-fastcheck={fastcheck}");

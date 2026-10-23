@@ -192,16 +192,6 @@ fn sync_like_ocaml(what: &str, prefs: &[&str], build: fn(&StdPath), change: Chan
     sync_like_ocaml_via(&Via::ALL, what, prefs, build, change)
 }
 
-/// The transport log without the order of its `[END]` lines, which OCaml
-/// interleaves with the next items' when a root is remote, where it runs
-/// items concurrently; gemel runs them one at a time until phase 5c of
-/// milestone 3.
-fn ends_unordered(log: &[String]) -> (Vec<&String>, Vec<&String>) {
-    let (mut ends, rest): (Vec<_>, Vec<_>) = log.iter().partition(|l| l.starts_with("[END] "));
-    ends.sort();
-    (rest, ends)
-}
-
 /// [`sync_like_ocaml`], with only some of the ways.
 fn sync_like_ocaml_via(
     ways: &[Via],
@@ -233,15 +223,7 @@ fn sync_like_ocaml_via(
             let all = ocaml_run(&unison, &twin, &flags);
             let theirs = transport_log(&read_log(&theirs_log), &twin);
             assert_eq!(listings(&s), listings(&twin), "{what}: {r:?}\n{all}");
-            if via == Via::Remote {
-                assert_eq!(
-                    ends_unordered(&ours),
-                    ends_unordered(&theirs),
-                    "{what}: {r:?}\n{all}"
-                );
-            } else {
-                assert_eq!(ours, theirs, "{what}: {r:?}\n{all}");
-            }
+            assert_eq!(ours, theirs, "{what}: {r:?}\n{all}");
             // OCaml then finds nothing to do on both (so the archives agree
             // with the replicas), or the same to do, to the same effect.
             let theirs_next = ocaml_sync(&unison, &twin, &flags_of(prefs));
