@@ -165,13 +165,28 @@ fn wildcard_paths_sync_like_ocaml() {
 /// A pair with the profile `p` (and `lines`), synced once in batch mode
 /// with `build` on both replicas.
 fn synced_pair(tag: &str, lines: &[&str], build: fn(&std::path::Path)) -> Pair {
-    let pair = Pair::new(tag);
+    synced_pair_on(Pair::new(tag), lines, build, false)
+}
+
+/// [`synced_pair`], on `pair`, in loopback mode or not.
+fn synced_pair_on(pair: Pair, lines: &[&str], build: fn(&std::path::Path), loopback: bool) -> Pair {
     pair.profile("p", lines);
     build(&pair.a());
     build(&pair.b());
     settle(&[&pair.a(), &pair.b()]);
-    gemel(&pair, &["p", "-batch"], false);
+    gemel(&pair, &["p", "-batch"], loopback);
     pair
+}
+
+/// A pair made for each way the session reaches root `b`: here, in
+/// loopback mode, and on an OCaml server (only with OCaml Unison, on
+/// Unix); with whether it is in loopback mode.
+fn ways(tag: &str) -> Vec<(Pair, bool)> {
+    let mut ways = vec![(Pair::new(tag), false), (Pair::new(tag), true)];
+    if let Some(unison) = std::env::var_os("GEMEL_REFERENCE_UNISON").filter(|_| cfg!(unix)) {
+        ways.push((Pair::remote(tag, &unison), false));
+    }
+    ways
 }
 
 fn item<'a>(items: &'a [ItemView], path: &str) -> (usize, &'a ItemView) {
@@ -308,60 +323,72 @@ fn warnings_are_shown_or_asked_about() {
 /// back.
 #[test]
 fn actions_can_be_changed_and_reverted() {
-    let pair = synced_pair("session-actions", &["times = true"], |r| {
-        write(r, "both", "same", T0);
-    });
-    write(&pair.a(), "both", "a's", T0 + 10.0);
-    write(&pair.b(), "both", "b's, newer", T0 + 20.0);
-    write(&pair.a(), "new", "new in a", T0 + 10.0);
-    settle(&[&pair.a(), &pair.b()]);
-    let (mut s, _) = start(&pair, &["p", "-batch"], false);
-    load(&mut s, &mut no_questions);
-    let u = updates(&mut s, &mut no_questions);
-    let (i, both) = item(&u.items, "both");
-    assert_eq!(
-        (both.left, both.right, both.action, both.conflict),
-        ("Modified", "Modified", Action::Skip(false), true)
-    );
-    assert!(both.can_diff && both.problematic && !both.changed_from_default);
-    assert!(both.line.contains("<-?->"), "{}", both.line);
-    let (_, new) = item(&u.items, "new");
-    assert_eq!(
-        (new.left, new.right, new.action, new.length),
-        ("Created", "", Action::LtoR(false), 8)
-    );
-    let set = |s: &mut Session, a| match ok(s, Command::SetAction(i, a), &mut no_questions) {
-        Event::Item(j, v) => {
-            assert_eq!(j, i);
-            v
-        }
-        e => panic!("{e:?}"),
-    };
-    let v = set(&mut s, SetAction::Right);
-    assert_eq!(v.action, Action::LtoR(false));
-    assert!(v.changed_from_default && !v.problematic);
-    assert_eq!(set(&mut s, SetAction::Revert).action, Action::Skip(false));
-    assert_eq!(set(&mut s, SetAction::Older).action, Action::LtoR(false));
-    assert_eq!(set(&mut s, SetAction::Newer).action, Action::RtoL(false));
-    assert_eq!(set(&mut s, SetAction::Skip).action, Action::Skip(false));
-    assert_eq!(set(&mut s, SetAction::Left).action, Action::RtoL(false));
-    let (_, summary) = synchronize(&mut s, &mut no_questions);
-    assert_eq!(summary.transferred, 2);
-    assert_eq!(summary.exit_code(), ExitCode::Perfect);
-    ok(&mut s, Command::Commit, &mut no_questions);
-    s.join().unwrap();
-    assert_eq!(support::read(&pair.a().join("both")), "b's, newer");
-    assert_eq!(support::read(&pair.b().join("new")), "new in a");
+    for (pair, loopback) in ways("session-actions") {
+        let pair = synced_pair_on(
+            pair,
+            &["times = true"],
+            |r| {
+                write(r, "both", "same", T0);
+            },
+            loopback,
+        );
+        write(&pair.a(), "both", "a's", T0 + 10.0);
+        write(&pair.b(), "both", "b's, newer", T0 + 20.0);
+        write(&pair.a(), "new", "new in a", T0 + 10.0);
+        settle(&[&pair.a(), &pair.b()]);
+        let (mut s, _) = start(&pair, &["p", "-batch"], loopback);
+        load(&mut s, &mut no_questions);
+        let u = updates(&mut s, &mut no_questions);
+        let (i, both) = item(&u.items, "both");
+        assert_eq!(
+            (both.left, both.right, both.action, both.conflict),
+            ("Modified", "Modified", Action::Skip(false), true)
+        );
+        assert!(both.can_diff && both.problematic && !both.changed_from_default);
+        assert!(both.line.contains("<-?->"), "{}", both.line);
+        let (_, new) = item(&u.items, "new");
+        assert_eq!(
+            (new.left, new.right, new.action, new.length),
+            ("Created", "", Action::LtoR(false), 8)
+        );
+        let set = |s: &mut Session, a| match ok(s, Command::SetAction(i, a), &mut no_questions) {
+            Event::Item(j, v) => {
+                assert_eq!(j, i);
+                v
+            }
+            e => panic!("{e:?}"),
+        };
+        let v = set(&mut s, SetAction::Right);
+        assert_eq!(v.action, Action::LtoR(false));
+        assert!(v.changed_from_default && !v.problematic);
+        assert_eq!(set(&mut s, SetAction::Revert).action, Action::Skip(false));
+        assert_eq!(set(&mut s, SetAction::Older).action, Action::LtoR(false));
+        assert_eq!(set(&mut s, SetAction::Newer).action, Action::RtoL(false));
+        assert_eq!(set(&mut s, SetAction::Skip).action, Action::Skip(false));
+        assert_eq!(set(&mut s, SetAction::Left).action, Action::RtoL(false));
+        let (_, summary) = synchronize(&mut s, &mut no_questions);
+        assert_eq!(summary.transferred, 2);
+        assert_eq!(summary.exit_code(), ExitCode::Perfect);
+        ok(&mut s, Command::Commit, &mut no_questions);
+        s.join().unwrap();
+        assert_eq!(support::read(&pair.a().join("both")), "b's, newer");
+        assert_eq!(support::read(&pair.b().join("new")), "new in a");
+    }
 }
 
 /// A sync reports each item's progress up to its length, then how it
 /// went; a summary counts what was skipped and what failed.
 #[test]
 fn progress_and_outcomes_are_reported() {
-    for loopback in [false, true] {
-        let pair = synced_pair("session-progress", &[], |r| {
-            write(r, "conflict", "same", T0);
-        });
+    for (pair, loopback) in ways("session-progress") {
+        let pair = synced_pair_on(
+            pair,
+            &[],
+            |r| {
+                write(r, "conflict", "same", T0);
+            },
+            loopback,
+        );
         write(&pair.a(), "big", &"x".repeat(300_000), T0 + 10.0);
         write(&pair.a(), "small", "small", T0 + 10.0);
         write(&pair.a(), "changing", "first", T0 + 10.0);
@@ -573,45 +600,64 @@ fn diffs_are_shown() {
 /// before the roots are connected fail.
 #[test]
 fn status_comes_as_events() {
-    let pair = synced_pair("session-status", &[], |r| {
-        for i in 0..40 {
-            write(r, &format!("d/f{i:02}"), "f", T0);
+    for (pair, loopback) in ways("session-status") {
+        let pair = synced_pair_on(
+            pair,
+            &[],
+            |r| {
+                for i in 0..40 {
+                    write(r, &format!("d/f{i:02}"), "f", T0);
+                }
+            },
+            loopback,
+        );
+        write(&pair.a(), "new", "new", T0 + 10.0);
+        settle(&[&pair.a(), &pair.b()]);
+        let (mut s, _) = start(&pair, &["p", "-batch"], loopback);
+        load(&mut s, &mut no_questions);
+        let (_, e) = call(&mut s, Command::Commit, &mut no_questions);
+        assert!(
+            matches!(&e, Event::Error(m) if m == "The roots are not connected"),
+            "{e:?}"
+        );
+        let c = Command::Update {
+            allow_partial: true,
+            want_watcher: false,
+            paths: None,
+        };
+        let (before, _) = call(&mut s, c, &mut no_questions);
+        let statuses: Vec<_> = before
+            .iter()
+            .filter_map(|e| match e {
+                Event::Status(m) => Some(m.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(statuses.contains(&"Looking for changes "), "{statuses:?}");
+        assert!(statuses.contains(&"Reconciling changes "), "{statuses:?}");
+        let scanned: Vec<_> = before
+            .iter()
+            .filter_map(|e| match e {
+                Event::Scanning(p) => Some(p.as_str()),
+                _ => None,
+            })
+            .collect();
+        // The client shows what it scans, then an empty status; in
+        // loopback mode the roots' host scans, and shows nothing. With a
+        // server, once the client's own scan has ended, the status also
+        // says it waits for the server.
+        let waiting = statuses
+            .iter()
+            .any(|m| m.contains("Waiting for changes from server"));
+        assert_eq!(waiting, pair.is_remote(), "{statuses:?}");
+        if loopback {
+            assert_eq!(scanned, [""]);
+        } else {
+            assert!(scanned.len() >= 2 || pair.is_remote(), "{scanned:?}");
+            assert_eq!(scanned.last(), Some(&""));
         }
-    });
-    write(&pair.a(), "new", "new", T0 + 10.0);
-    settle(&[&pair.a(), &pair.b()]);
-    let (mut s, _) = start(&pair, &["p", "-batch"], false);
-    load(&mut s, &mut no_questions);
-    let (_, e) = call(&mut s, Command::Commit, &mut no_questions);
-    assert!(
-        matches!(&e, Event::Error(m) if m == "The roots are not connected"),
-        "{e:?}"
-    );
-    let c = Command::Update {
-        allow_partial: true,
-        want_watcher: false,
-        paths: None,
-    };
-    let (before, _) = call(&mut s, c, &mut no_questions);
-    let statuses: Vec<_> = before
-        .iter()
-        .filter_map(|e| match e {
-            Event::Status(m) => Some(m.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert!(statuses.contains(&"Looking for changes "), "{statuses:?}");
-    assert!(statuses.contains(&"Reconciling changes "), "{statuses:?}");
-    let scanned: Vec<_> = before
-        .iter()
-        .filter_map(|e| match e {
-            Event::Scanning(p) => Some(p.as_str()),
-            _ => None,
-        })
-        .collect();
-    assert!(scanned.len() >= 2, "{scanned:?}");
-    assert_eq!(scanned.last(), Some(&""));
-    s.join().unwrap();
+        s.join().unwrap();
+    }
 }
 
 /// A frontend that quits with a question unanswered doesn't hang: the
@@ -698,36 +744,43 @@ fn items_can_be_arranged_and_sorted() {
 /// whose default is one.
 #[test]
 fn conflicts_are_resolved_only_if_they_are_conflicts() {
-    let pair = synced_pair("session-if-conflict", &["times = true"], |r| {
-        write(r, "both", "same", T0);
-    });
-    write(&pair.a(), "both", "a's", T0 + 10.0);
-    write(&pair.b(), "both", "b's, newer", T0 + 20.0);
-    write(&pair.a(), "new", "new in a", T0 + 10.0);
-    settle(&[&pair.a(), &pair.b()]);
-    let (mut s, _) = start(&pair, &["p", "-batch"], false);
-    load(&mut s, &mut no_questions);
-    let u = updates(&mut s, &mut no_questions);
-    let set = |s: &mut Session, i, a| match ok(s, Command::SetAction(i, a), &mut no_questions) {
-        Event::Item(_, v) => v.action,
-        e => panic!("{e:?}"),
-    };
-    let (both, _) = item(&u.items, "both");
-    let (new, _) = item(&u.items, "new");
-    assert_eq!(
-        set(&mut s, new, SetAction::OlderIfConflict),
-        Action::LtoR(false)
-    );
-    assert_eq!(
-        set(&mut s, both, SetAction::NewerIfConflict),
-        Action::RtoL(false)
-    );
-    // No longer a conflict, but its default is one.
-    assert_eq!(
-        set(&mut s, both, SetAction::OlderIfConflict),
-        Action::LtoR(false)
-    );
-    s.join().unwrap();
+    for (pair, loopback) in ways("session-if-conflict") {
+        let pair = synced_pair_on(
+            pair,
+            &["times = true"],
+            |r| {
+                write(r, "both", "same", T0);
+            },
+            loopback,
+        );
+        write(&pair.a(), "both", "a's", T0 + 10.0);
+        write(&pair.b(), "both", "b's, newer", T0 + 20.0);
+        write(&pair.a(), "new", "new in a", T0 + 10.0);
+        settle(&[&pair.a(), &pair.b()]);
+        let (mut s, _) = start(&pair, &["p", "-batch"], loopback);
+        load(&mut s, &mut no_questions);
+        let u = updates(&mut s, &mut no_questions);
+        let set = |s: &mut Session, i, a| match ok(s, Command::SetAction(i, a), &mut no_questions) {
+            Event::Item(_, v) => v.action,
+            e => panic!("{e:?}"),
+        };
+        let (both, _) = item(&u.items, "both");
+        let (new, _) = item(&u.items, "new");
+        assert_eq!(
+            set(&mut s, new, SetAction::OlderIfConflict),
+            Action::LtoR(false)
+        );
+        assert_eq!(
+            set(&mut s, both, SetAction::NewerIfConflict),
+            Action::RtoL(false)
+        );
+        // No longer a conflict, but its default is one.
+        assert_eq!(
+            set(&mut s, both, SetAction::OlderIfConflict),
+            Action::LtoR(false)
+        );
+        s.join().unwrap();
+    }
 }
 
 /// What the matching conditions and "in favour of the changed" need: only
@@ -735,30 +788,37 @@ fn conflicts_are_resolved_only_if_they_are_conflicts() {
 #[cfg(unix)]
 #[test]
 fn props_changes_are_told_apart() {
-    use std::os::unix::fs::PermissionsExt;
-    let pair = synced_pair("session-props", &["times = true"], |r| {
-        write(r, "props", "same", T0);
-        write(r, "mixed", "same", T0);
-    });
-    let chmod = |p: std::path::PathBuf| {
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).unwrap()
-    };
-    chmod(pair.a().join("props"));
-    write(&pair.a(), "mixed", "a's", T0 + 10.0);
-    chmod(pair.b().join("mixed"));
-    settle(&[&pair.a(), &pair.b()]);
-    let (mut s, _) = start(&pair, &["p", "-batch"], false);
-    load(&mut s, &mut no_questions);
-    let u = updates(&mut s, &mut no_questions);
-    let (_, props) = item(&u.items, "props");
-    assert!(
-        props.props_only && props.favor_changed.is_none(),
-        "{props:?}"
-    );
-    let (_, mixed) = item(&u.items, "mixed");
-    assert!(!mixed.props_only, "{mixed:?}");
-    assert_eq!(mixed.favor_changed, Some(SetAction::Right));
-    s.join().unwrap();
+    for (pair, loopback) in ways("session-props") {
+        use std::os::unix::fs::PermissionsExt;
+        let pair = synced_pair_on(
+            pair,
+            &["times = true"],
+            |r| {
+                write(r, "props", "same", T0);
+                write(r, "mixed", "same", T0);
+            },
+            loopback,
+        );
+        let chmod = |p: std::path::PathBuf| {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600)).unwrap()
+        };
+        chmod(pair.a().join("props"));
+        write(&pair.a(), "mixed", "a's", T0 + 10.0);
+        chmod(pair.b().join("mixed"));
+        settle(&[&pair.a(), &pair.b()]);
+        let (mut s, _) = start(&pair, &["p", "-batch"], loopback);
+        load(&mut s, &mut no_questions);
+        let u = updates(&mut s, &mut no_questions);
+        let (_, props) = item(&u.items, "props");
+        assert!(
+            props.props_only && props.favor_changed.is_none(),
+            "{props:?}"
+        );
+        let (_, mixed) = item(&u.items, "mixed");
+        assert!(!mixed.props_only, "{mixed:?}");
+        assert_eq!(mixed.favor_changed, Some(SetAction::Right));
+        s.join().unwrap();
+    }
 }
 
 /// An interrupt stops what the session is doing, a question left

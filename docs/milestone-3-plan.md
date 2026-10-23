@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 3b, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 3c, 2026-10-23) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -317,6 +317,18 @@ It is split in two, since gemel's server can be tested against OCaml clients bef
   - every way a shell or a server can be wrong, with OCaml's client in the same place (`bins/gemel/tests/client.rs`): no shell, a shell that prints something else or dies, an old server with and without the upgrade, `NOK`, versions it doesn't speak, a refused version;
   - whole syncs, a gemel client against `8772d26`'s client with the same server: on Linux, 30 of 30 scenarios with each of `8772d26`, 2.53.8 and 2.52.1 as the server, 10 of 10 with 2.53.8 and 2.52.1 in their compatibility mode, and 30 of 30 with gemel at both ends; on macOS, 20 of 20 against Homebrew's 2.54.0 and with gemel at both ends.
   - With `--concurrent`, a gemel client agrees on trees and archives but not always on its output (18 of 20), since it runs items one at a time until phase 5; CI doesn't run that pairing.
+
+**Notes (phase 3c, 2026-10-23):**
+- **A remote way for the user interface's suites:** `ui_support::Pair::remote` puts root `b` at `ssh://server//...`, reached through a shim in the pair's directory that runs the server here, named "server", with the pair's Unison directory and home set in the shim (an in-process client's server would otherwise inherit the test's environment, and its real `~/.unison`).
+  - **`gemel-ui-api`'s suites** run the client in-process, so their server is OCaml's, and the remote way runs only with OCaml Unison, on Unix: the profile syncs of `startup` and `session` (three ways now), and `session`'s progress, status, props, conflict and action tests. `startup` checks that a remote root is connected once, and again once its connection is closed (`isRootConnected`).
+  - **`bins/gemel`'s suites** run gemel's twin with the gemel program as its server, and OCaml's with OCaml's (`common::twins_each`): four batch tests, four interactive ones, both repeat tests, the raw-mode keys and the main watch test, where the server runs its own watcher. Without OCaml, the gemel runs are still checked, so the test jobs run gemel at both ends.
+  - **Left with both roots here:** merging and differences with a remote root (phase 5), and the tests about profiles and options, which don't reach the roots.
+- **Comparisons:** with a remote root, the log's and stderr's `[END]` lines are compared without their order, since gemel's client runs items one at a time until phase 5 (as in phase 2c). For the same reason, a test with two new files of the same contents gives them different contents: OCaml's client would copy the second from the first's temporary file.
+- **What the suites found:**
+  - **Warnings before the scan:** the session asked about warnings at the end of the update step, where OCaml's text interface asks as each is given. With a remote root, the client then scanned, and said it waited for the server, before the warning that there are no archives. The session now asks once the archives are loaded, before the scan (`update::find_loaded_updates`), which also spares a first sync of a large replica a whole scan before the question.
+  - **Closing a root's connection** forgets it at once, as OCaml's `clientConnClose` does, so `connectRoots` connects again; the close handlers still run when the connection ends.
+  - **Test runtimes** have tokio's drivers now, as the engine thread's do, and drop their tasks before the runtime, whose drivers wake them as they shut down. The ssh connection's close handler drops the process rather than starting a task to wait for it (tokio reaps it), since it can run as the engine thread ends.
+- **A flaky test, once:** on macOS, `copy.rs`'s `resource_forks_are_copied` read a resource fork's length as other than 17 right after writing it, during a whole-workspace run; alone, and in three runs of its suite, it passed. It isn't changed here.
 
 ### Phase 4: sockets, prompts and the session (`remote.ml`'s sockets, `terminal.ml`, `pty.c`, `uicommon`'s `openConnection*`, ~0.9k)
 

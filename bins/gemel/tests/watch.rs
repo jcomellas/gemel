@@ -224,16 +224,27 @@ fn replicas(tag: &str) -> (Pair, Pair) {
 }
 
 /// New files and deletions propagate as the watcher reports them; asked to
-/// stop, the program does so with the last sync's exit code.
+/// stop, the program does so with the last sync's exit code. Also with root
+/// `b` on a server, which runs its own watcher for it.
 #[test]
 fn syncs_whenever_the_watcher_reports_changes() {
-    let (g, o) = replicas("watch-sync");
+    let each = common::twins_each("watch-sync", &["times = true"], |r, side| {
+        if side == "a" {
+            write(r, "first", "1", T0);
+        }
+    });
+    for (g, o) in each {
+        syncs_whenever_the_watcher_reports_changes_on(&g, &o);
+    }
+}
+
+fn syncs_whenever_the_watcher_reports_changes_on(g: &Pair, o: &Pair) {
     let args = ["p", "-repeat", "watch"];
     let d = same(
-        &g,
-        &o,
-        gemel(&g, &args, None),
-        ocaml_watcher().and_then(|w| ocaml(&o, &args, Some(&w))),
+        g,
+        o,
+        gemel(g, &args, None),
+        ocaml_watcher().and_then(|w| ocaml(o, &args, Some(&w))),
         |pair, p| {
             until("the first sync", || pair.b().join("first").exists());
             std::thread::sleep(Duration::from_millis(1500));
