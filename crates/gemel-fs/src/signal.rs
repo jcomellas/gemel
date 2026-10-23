@@ -183,13 +183,21 @@ mod unix {
         unsafe { libc::kill(libc::getpid(), number(s)) };
     }
 
-    /// `end_ssh`: if the child `pid` is still running, asks it to stop
+    /// A child process started, for [`end_child`].
+    pub struct Started(libc::pid_t);
+
+    impl Started {
+        /// The child `pid`.
+        pub fn new(pid: u32) -> Option<Started> {
+            libc::pid_t::try_from(pid).ok().map(Started)
+        }
+    }
+
+    /// `end_ssh`: if the child is still running, asks it to stop
     /// (`SIGTERM`), gives it a moment to restore the terminal's settings,
     /// then kills it (`SIGKILL`). Nothing if it has ended, or isn't a child.
-    pub fn end_child(pid: u32) {
-        let Ok(pid) = libc::pid_t::try_from(pid) else {
-            return;
-        };
+    pub fn end_child(child: Started) {
+        let pid = child.0;
         let mut status = 0;
         // SAFETY: `status` is writable; WNOHANG doesn't wait.
         if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } != 0 {
@@ -229,9 +237,12 @@ mod windows {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use windows_sys::Win32::Foundation::{FALSE, TRUE};
+    use windows_sys::Win32::Foundation::{CloseHandle, FALSE, HANDLE, TRUE, WAIT_TIMEOUT};
     use windows_sys::Win32::System::Console::{
         CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
     };
     use windows_sys::core::BOOL;
 
@@ -297,8 +308,41 @@ mod windows {
     /// Not on Windows.
     pub fn raise(_: Signal) {}
 
-    /// Not yet on Windows (phase 6 of milestone 3).
-    pub fn end_child(_: u32) {}
+    /// A child process started, for [`end_child`]: a handle of its own,
+    /// so that its process id can't be another's by then.
+    pub struct Started(HANDLE);
+
+    // SAFETY: a process handle may be used and closed from any thread.
+    unsafe impl Send for Started {}
+
+    impl Started {
+        /// The child `pid`, if it can be opened.
+        pub fn new(pid: u32) -> Option<Started> {
+            // SAFETY: plain values; a null handle is a failure.
+            let h = unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, FALSE, pid) };
+            (!h.is_null()).then_some(Started(h))
+        }
+    }
+
+    impl Drop for Started {
+        fn drop(&mut self) {
+            // SAFETY: the handle is ours, closed once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    /// `end_ssh`, as OCaml's runs on Windows: if the child is still
+    /// running, a moment later it is terminated. (`Unix.kill` there only
+    /// takes `SIGKILL`, so the `SIGTERM` before it does nothing.)
+    pub fn end_child(child: Started) {
+        // SAFETY: the handle is open; a zero timeout doesn't wait.
+        if unsafe { WaitForSingleObject(child.0, 0) } != WAIT_TIMEOUT {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        // SAFETY: the handle is open, with the right to terminate.
+        unsafe { TerminateProcess(child.0, 0) };
+    }
 
     /// Nothing on Windows, as in OCaml, where `Unix.sigprocmask` doesn't
     /// exist there.
@@ -308,4 +352,40 @@ mod windows {
 /// Whether signals other than Ctrl-C can be caught (`supportSignals`).
 pub fn supported() -> bool {
     cfg!(unix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child still running is ended at once; one that has ended is left.
+    #[test]
+    fn a_running_child_is_ended() {
+        let mut sleeper = if cfg!(windows) {
+            let mut c = std::process::Command::new("ping");
+            c.args(["-n", "30", "127.0.0.1"]);
+            c
+        } else {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("30");
+            c
+        };
+        let mut child = sleeper.stdout(std::process::Stdio::null()).spawn().unwrap();
+        let start = std::time::Instant::now();
+        end_child(Started::new(child.id()).unwrap());
+        let status = child.wait().unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        // `TerminateProcess` with 0, as OCaml's `Unix.kill` calls it.
+        #[cfg(windows)]
+        assert_eq!(status.code(), Some(0));
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(status.signal(), Some(libc::SIGTERM));
+        }
+        // Reaped: nothing to do.
+        if let Some(gone) = Started::new(child.id()) {
+            end_child(gone);
+        }
+    }
 }
