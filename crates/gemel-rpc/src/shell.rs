@@ -28,7 +28,6 @@ use crate::connection::{
     self, ADD_VERSION_NO, Connection, Endpoint, Output, SERVER_CMD, SSH_ARGS, SSH_CMD,
 };
 use crate::handshake::{self, RPC_SERVER_CMDLINE_OVERRIDE};
-use crate::runtime;
 
 /// How long the handshake may take (`initConnection`'s timeout).
 const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -89,8 +88,8 @@ pub fn command(
 
 /// `buildShellConnection`: starts the shell for `host` and, over its input
 /// and output, the client's side of a connection served by `endpoint`,
-/// once the handshake is done. When the connection closes, the shell is
-/// waited for.
+/// once the handshake is done. When the connection closes, the shell goes
+/// (tokio waits for it in the background, as OCaml's `safe_waitpid` does).
 pub async fn connect(
     endpoint: Rc<Endpoint>,
     (program, args): (String, Vec<String>),
@@ -123,21 +122,16 @@ pub async fn connect(
     let version = match version {
         Ok(v) => v,
         Err(e) => {
-            // Closing the pipes ends the shell; it is waited for.
-            drop((input, output));
-            runtime::spawn_local(async move {
-                let _ = child.wait().await;
-            });
+            // Closing the pipes ends the shell.
+            drop((input, output, child));
             return Err(e);
         }
     };
     let conn = connection::start_client(endpoint, Box::new(input), output, half_duplex);
     conn.set_version(version);
-    conn.at_close(move || {
-        runtime::spawn_local(async move {
-            let _ = child.wait().await;
-        });
-    });
+    // Kept until the connection closes. (Its handlers may run as the
+    // engine thread ends, so this one starts nothing.)
+    conn.at_close(move || drop(child));
     Ok(conn)
 }
 

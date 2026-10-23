@@ -72,11 +72,13 @@ static NEXT_KEY: AtomicU64 = AtomicU64::new(0);
 fn forwarder(conn: &Connection) -> Forwarder {
     let key = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
     FORWARDED_TO.with(|f| f.borrow_mut().insert(key, conn.clone()));
+    // As the engine thread ends, the table may be gone already.
     conn.at_close(move || {
-        FORWARDED_TO.with(|f| f.borrow_mut().remove(&key));
+        let _ = FORWARDED_TO.try_with(|f| f.borrow_mut().remove(&key));
     });
     Box::new(move |m| {
-        if let Some(conn) = FORWARDED_TO.with(|f| f.borrow().get(&key).cloned()) {
+        let conn = FORWARDED_TO.try_with(|f| f.borrow().get(&key).cloned());
+        if let Ok(Some(conn)) = conn {
             // Queued now; the reply isn't waited for.
             let _ = conn.start_call(&FORWARD_MSG_TO_CLIENT, m);
         }
