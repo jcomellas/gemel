@@ -26,6 +26,8 @@
 //! <file name>
 //! server 3                 (with a remote root only)
 //! <file name>
+//! ssh 3                    (over ssh only: the shim's arguments)
+//! <line>
 //! ```
 //!
 //! A stream's text is split on `\n`, so a count of one with an empty line
@@ -94,6 +96,9 @@ pub fn write(r: &Recording) -> String {
         write_names(&mut out, "unison", &o.unison_dir);
         if remote {
             write_names(&mut out, "server", &o.server_dir);
+        }
+        if r.remote == Some(Remote::Ssh) {
+            write_text(&mut out, "ssh", &o.shell_args);
         }
     }
     out
@@ -212,6 +217,11 @@ pub fn parse(text: &str) -> Result<Recording, String> {
         } else {
             Vec::new()
         };
+        let shell_args = if remote == Some(Remote::Ssh) {
+            lines.text("ssh")?
+        } else {
+            String::new()
+        };
         outcomes.push((
             seed,
             Outcome {
@@ -222,7 +232,7 @@ pub fn parse(text: &str) -> Result<Recording, String> {
                 unison_dir,
                 server_dir,
                 recheck,
-                shell_args: String::new(),
+                shell_args,
             },
         ));
     }
@@ -392,6 +402,10 @@ mod tests {
                 include_str!("../recorded/windows-socket.txt"),
                 Some(Remote::Socket),
             ),
+            (
+                include_str!("../recorded/windows-ssh.txt"),
+                Some(Remote::Ssh),
+            ),
         ] {
             let r = parse(text).unwrap();
             assert_eq!(r.remote, remote);
@@ -402,19 +416,26 @@ mod tests {
 
     #[test]
     fn a_remote_recording_reads_back() {
-        let mut o = outcome();
-        o.first.server = "server started\n".into();
-        o.server_dir = vec!["ar4567".into()];
-        let r = Recording {
-            flavour: Flavour::Unix,
-            remote: Some(Remote::Socket),
-            outcomes: vec![(1, o)],
-        };
-        let text = write(&r);
-        assert!(text.starts_with("flavour unix\nremote socket\nscenario 1\n"));
-        let back = parse(&text).unwrap();
-        assert_eq!(back.remote, Some(Remote::Socket));
-        assert_eq!(back.outcomes, r.outcomes);
+        for remote in [Remote::Socket, Remote::Ssh] {
+            let mut o = outcome();
+            o.first.server = "server started\n".into();
+            o.server_dir = vec!["ar4567".into()];
+            // Only ssh's are recorded.
+            if remote == Remote::Ssh {
+                o.shell_args = "server -e none <server> -server\n".into();
+            }
+            let r = Recording {
+                flavour: Flavour::Unix,
+                remote: Some(remote),
+                outcomes: vec![(1, o)],
+            };
+            let text = write(&r);
+            let head = format!("flavour unix\nremote {}\nscenario 1\n", remote.name());
+            assert!(text.starts_with(&head));
+            let back = parse(&text).unwrap();
+            assert_eq!(back.remote, Some(remote));
+            assert_eq!(back.outcomes, r.outcomes);
+        }
     }
 
     #[test]

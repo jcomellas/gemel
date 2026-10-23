@@ -168,12 +168,16 @@ cargo run -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt \
 Windows-flavour scenarios with replica `b` on a socket, recorded with
 `8772d26` at both ends. Its first lines say so (`remote socket`), and
 each step has the server's standard error, and each scenario the server's
-Unison directory. CI replays it with OCaml on Linux, and with gemel on
-macOS and Windows.
+Unison directory. [`recorded/windows-ssh.txt`](recorded/windows-ssh.txt)
+holds the same over ssh (`remote ssh`), and each scenario also has the
+arguments the client gave ssh. CI replays both with OCaml on Linux, and
+with gemel on macOS and Windows.
 
 ```sh
 scripts/oracle.sh /path/to/unison --flavour windows --remote socket --count 100 \
     --record /work/tools/oracle/recorded/windows-socket.txt
+scripts/oracle.sh /path/to/unison --flavour windows --remote ssh --count 100 \
+    --record /work/tools/oracle/recorded/windows-ssh.txt
 ```
 
 A replay compares the same things, with what depends on the system

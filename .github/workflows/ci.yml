@@ -36,6 +36,7 @@ jobs:
           gemel=target/debug/gemel${{ runner.os == 'Windows' && '.exe' || '' }}
           cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt --candidate $gemel
           cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-socket.txt --candidate $gemel
+          cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-ssh.txt --candidate $gemel
 
   oracle:
     # The differential harness (tools/oracle) against OCaml Unison built
@@ -150,8 +151,9 @@ jobs:
               --candidate target/debug/gemel --candidate-server releases/unison-$v --count 20
           done
         shell: bash
-      # Outcomes on a socket for Windows, still the reference's.
+      # Outcomes on a socket and over ssh for Windows, still the reference's.
       - run: cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-socket.txt --candidate unison-src/src/unison
+      - run: cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-ssh.txt --candidate unison-src/src/unison
       # gemel reads replicas as this OCaml Unison does (gemel-engine/tests/reading.rs),
       # finds no updates in the archives it writes (tests/update.rs), and accepts
       # the archives gemel commits (tests/commit.rs).
