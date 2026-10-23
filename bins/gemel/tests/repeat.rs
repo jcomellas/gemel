@@ -12,7 +12,7 @@ mod support;
 #[path = "../../../crates/gemel-ui-api/tests/ui_support/mod.rs"]
 mod ui_support;
 
-use common::{Driven, same_driven, same_keys, twins};
+use common::{Driven, same_driven, same_keys, twins, twins_each};
 use support::sync::T0;
 use support::write;
 use ui_support::Pair;
@@ -20,6 +20,17 @@ use ui_support::Pair;
 /// Replicas synced once, then a new file in each and a conflict.
 fn changed(tag: &str) -> (Pair, Pair) {
     let (g, o) = twins(tag, &["times = true"], |r, _| write(r, "c", "c\n", T0));
+    changed_in(g, o)
+}
+
+/// [`changed`], for each way of reaching root `b` (see
+/// [`common::twins_each`]).
+fn changed_each(tag: &str) -> Vec<(Pair, Pair)> {
+    let each = twins_each(tag, &["times = true"], |r, _| write(r, "c", "c\n", T0));
+    each.into_iter().map(|(g, o)| changed_in(g, o)).collect()
+}
+
+fn changed_in(g: Pair, o: Pair) -> (Pair, Pair) {
     same_keys(&g, &o, &["p", "-batch"], None);
     for p in [&g, &o] {
         write(&p.a(), "new-a", "a", T0 + 1.0);
@@ -34,25 +45,27 @@ fn changed(tag: &str) -> (Pair, Pair) {
 /// asked to stop, it does so at once, with the last sync's exit code.
 #[test]
 fn repeats_until_asked_to_stop() {
-    let (g, o) = changed("repeat-stop");
-    // Long enough a sleep for the stop to come during it.
-    let r = same_driven(&g, &o, &["p", "-repeat", "3"], |p| {
-        p.wait_for_err("Sleeping for 3 seconds...", 2);
-        p.signal("USR2");
-    });
-    assert_eq!(r.code, Some(1), "{r:#?}");
+    for (g, o) in changed_each("repeat-stop") {
+        // Long enough a sleep for the stop to come during it.
+        let r = same_driven(&g, &o, &["p", "-repeat", "3"], |p| {
+            p.wait_for_err("Sleeping for 3 seconds...", 2);
+            p.signal("USR2");
+        });
+        assert_eq!(r.code, Some(1), "{r:#?}");
+    }
 }
 
 /// Ctrl-C while it sleeps stops it.
 #[test]
 fn ctrl_c_while_it_sleeps() {
-    let (g, o) = changed("repeat-ctrl-c");
-    let r = common::same_signals(Driven::start, &g, &o, &["p", "-repeat", "30"], |p| {
-        p.wait_for_err("Sleeping for 30 seconds...", 1);
-        p.signal("INT");
-    });
-    assert_eq!(r.code, Some(3), "{r:#?}");
-    assert_eq!(r.stderr.last().map(String::as_str), Some("Terminated!"));
+    for (g, o) in changed_each("repeat-ctrl-c") {
+        let r = common::same_signals(Driven::start, &g, &o, &["p", "-repeat", "30"], |p| {
+            p.wait_for_err("Sleeping for 30 seconds...", 1);
+            p.signal("INT");
+        });
+        assert_eq!(r.code, Some(3), "{r:#?}");
+        assert_eq!(r.stderr.last().map(String::as_str), Some("Terminated!"));
+    }
 }
 
 /// A setting that isn't an interval is an error once the roots are

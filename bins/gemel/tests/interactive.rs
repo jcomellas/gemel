@@ -18,7 +18,7 @@ mod ui_support;
 
 #[cfg(unix)]
 use common::Driven;
-use common::{same_keys, twins};
+use common::{same_keys, twins, twins_each};
 use support::sync::T0;
 use support::write;
 use ui_support::Pair;
@@ -27,11 +27,24 @@ fn same(g: &Pair, o: &Pair, args: &[&str], keys: &str) -> common::Run {
     same_keys(g, o, args, Some(keys.as_bytes()))
 }
 
-/// Items of every kind, from replicas synced once (`archives`).
+/// Items of every kind, from replicas synced once (`archives`), for each
+/// way of reaching root `b` (see [`common::twins_each`]).
+fn items_each(tag: &str) -> Vec<(Pair, Pair)> {
+    let each = twins_each(tag, &["times = true"], |r, _| {
+        write(r, "c", "c\n", T0);
+    });
+    each.into_iter().map(|(g, o)| items_in(g, o)).collect()
+}
+
+/// [`items_each`], with both roots here.
 fn items(tag: &str) -> (Pair, Pair) {
     let (g, o) = twins(tag, &["times = true"], |r, _| {
         write(r, "c", "c\n", T0);
     });
+    items_in(g, o)
+}
+
+fn items_in(g: Pair, o: Pair) -> (Pair, Pair) {
     same(&g, &o, &["p", "-batch"], "");
     for p in [&g, &o] {
         for side in ["a", "b"] {
@@ -49,6 +62,7 @@ fn items(tag: &str) -> (Pair, Pair) {
 /// that don't exist, and quitting from the proceed menu.
 #[test]
 fn going_through_the_items() {
+    // (Both roots here: differences with a remote root come with phase 5.)
     let (g, o) = items("int-moves");
     let keys = [
         // The conflict: no default, then the help, the details, and the
@@ -66,40 +80,44 @@ fn going_through_the_items() {
 /// conditions, then propagating.
 #[test]
 fn changing_the_actions() {
-    let (g, o) = twins("int-actions", &[], |r, side| {
+    for (g, o) in twins_each("int-actions", &[], |r, side| {
         for f in ["f1", "f2", "f3", "f4", "f5", "c1", "c2"] {
             write(r, f, &format!("{f}\n"), T0);
         }
         let _ = side;
-    });
-    let args = ["a", "b", "-times"];
-    same(&g, &o, &["a", "b", "-times", "-batch"], "");
-    for p in [&g, &o] {
-        write(&p.a(), "f1", "a's f1\n", T0 + 10.0);
-        write(&p.b(), "f2", "b's f2\n", T0 + 11.0);
-        write(&p.a(), "f3", "a's f3\n", T0 + 12.0);
-        write(&p.b(), "f4", "b's f4\n", T0 + 13.0);
-        write(&p.a(), "f5", "a's f5\n", T0 + 14.0);
-        write(&p.a(), "c1", "a's c1\n", T0 + 15.0);
-        write(&p.b(), "c1", "b's c1\n", T0 + 16.0);
-        write(&p.a(), "c2", "a's c2\n", T0 + 18.0);
-        write(&p.b(), "c2", "b's c2\n", T0 + 17.0);
-        write(&p.b(), "n1", "new\n", T0 + 19.0);
-        write(&p.b(), "n2", "new\n", T0 + 20.0);
+    }) {
+        let args = ["a", "b", "-times"];
+        same(&g, &o, &["a", "b", "-times", "-batch"], "");
+        for p in [&g, &o] {
+            write(&p.a(), "f1", "a's f1\n", T0 + 10.0);
+            write(&p.b(), "f2", "b's f2\n", T0 + 11.0);
+            write(&p.a(), "f3", "a's f3\n", T0 + 12.0);
+            write(&p.b(), "f4", "b's f4\n", T0 + 13.0);
+            write(&p.a(), "f5", "a's f5\n", T0 + 14.0);
+            write(&p.a(), "c1", "a's c1\n", T0 + 15.0);
+            write(&p.b(), "c1", "b's c1\n", T0 + 16.0);
+            write(&p.a(), "c2", "a's c2\n", T0 + 18.0);
+            write(&p.b(), "c2", "b's c2\n", T0 + 17.0);
+            // Not the same contents: OCaml's client would copy them at
+            // once, the second from the first's temporary file, where
+            // gemel's copies them one at a time until phase 5.
+            write(&p.b(), "n1", "new\n", T0 + 19.0);
+            write(&p.b(), "n2", "new 2\n", T0 + 20.0);
+        }
+        let keys = [
+            // c1 and c2: in favour of the newer, then of the older.
+            "]", "[", // f1: the other way, inverted, skipped, reverted.
+            "<", "p", "i", "p", "/", "p", "r",
+            // f2: can't take the changed side, merge, revert.
+            "c", "m", "p", "u", // Conditions: those to the right, and not; and two at once.
+            "1", "X", "L", "2", "&", "L", "|", "L", "D", "D", "D", "C", "M", "P", "U", "U",
+            // Everything after here to the left, then skipped.
+            "A", "<", "L", "U", "%", "L", // Back to the start: revert all, drop f5, and go.
+            "0", "*", "r", "U", "n", "n", "n", "n", "n", "n", "-", "g",
+        ];
+        let r = same(&g, &o, &args, &(keys.join("\n") + "\n"));
+        assert_eq!(r.code, Some(1), "{r:#?}");
     }
-    let keys = [
-        // c1 and c2: in favour of the newer, then of the older.
-        "]", "[", // f1: the other way, inverted, skipped, reverted.
-        "<", "p", "i", "p", "/", "p", "r",
-        // f2: can't take the changed side, merge, revert.
-        "c", "m", "p", "u", // Conditions: those to the right, and not; and two at once.
-        "1", "X", "L", "2", "&", "L", "|", "L", "D", "D", "D", "C", "M", "P", "U", "U",
-        // Everything after here to the left, then skipped.
-        "A", "<", "L", "U", "%", "L", // Back to the start: revert all, drop f5, and go.
-        "0", "*", "r", "U", "n", "n", "n", "n", "n", "n", "-", "g",
-    ];
-    let r = same(&g, &o, &args, &(keys.join("\n") + "\n"));
-    assert_eq!(r.code, Some(1), "{r:#?}");
 }
 
 /// Ignoring a path, an extension and a name for good, from a profile.
@@ -195,25 +213,27 @@ fn a_merge_is_confirmed() {
 /// The input ends while the user is asked something.
 #[test]
 fn the_input_ends() {
-    let (g, o) = items("int-eof");
-    let r = same(&g, &o, &["p"], "");
-    assert_eq!(r.code, Some(3), "{r:#?}");
-    let r = same(&g, &o, &["p"], ">\n");
-    assert_eq!(r.code, Some(3), "{r:#?}");
+    for (g, o) in items_each("int-eof") {
+        let r = same(&g, &o, &["p"], "");
+        assert_eq!(r.code, Some(3), "{r:#?}");
+        let r = same(&g, &o, &["p"], ">\n");
+        assert_eq!(r.code, Some(3), "{r:#?}");
+    }
 }
 
 /// Stopping at a warning: the one that there are no archives, which
 /// comes before any path is scanned.
 #[test]
 fn stopping_at_a_warning() {
-    let (g, o) = twins("int-warning", &[], |r, side| {
+    for (g, o) in twins_each("int-warning", &[], |r, side| {
         write(r, &format!("new-{side}"), side, T0);
-    });
-    let r = same(&g, &o, &["a", "b"], "x\n");
-    assert_eq!(r.code, Some(3), "{r:#?}");
-    // And the archives were left unlocked: the next run goes through.
-    let r = same(&g, &o, &["a", "b", "-batch"], "");
-    assert_eq!(r.code, Some(0), "{r:#?}");
+    }) {
+        let r = same(&g, &o, &["a", "b"], "x\n");
+        assert_eq!(r.code, Some(3), "{r:#?}");
+        // And the archives were left unlocked: the next run goes through.
+        let r = same(&g, &o, &["a", "b", "-batch"], "");
+        assert_eq!(r.code, Some(0), "{r:#?}");
+    }
 }
 
 /// The archives' lock files left in the Unison directory.
@@ -231,14 +251,15 @@ fn locks(p: &Pair) -> Vec<String> {
 #[cfg(unix)]
 #[test]
 fn ctrl_c_at_a_prompt() {
-    let (g, o) = items("int-ctrl-c");
-    let r = common::same_signals(Driven::start, &g, &o, &["p"], |p| {
-        p.wait_for("c  [] ", 1);
-        p.signal("INT");
-    });
-    assert_eq!(r.code, Some(3), "{r:#?}");
-    assert_eq!(r.stderr.last().map(String::as_str), Some("Terminated!"));
-    assert_eq!(locks(&g), Vec::<String>::new());
+    for (g, o) in items_each("int-ctrl-c") {
+        let r = common::same_signals(Driven::start, &g, &o, &["p"], |p| {
+            p.wait_for("c  [] ", 1);
+            p.signal("INT");
+        });
+        assert_eq!(r.code, Some(3), "{r:#?}");
+        assert_eq!(r.stderr.last().map(String::as_str), Some("Terminated!"));
+        assert_eq!(locks(&g), Vec::<String>::new());
+    }
 }
 
 /// A merge to confirm, after a first sync: the sync waits for the user.

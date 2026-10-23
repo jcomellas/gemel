@@ -233,6 +233,33 @@ fn roots_are_installed_once_per_profile() {
     assert_eq!(waits.get(), 2);
 }
 
+/// A remote root counts as connected while its connection is up
+/// (`isRootConnected`): `connectRoots` connects again only once it is
+/// lost. (On an OCaml server, so only with OCaml Unison, on Unix.)
+#[test]
+fn a_remote_root_is_reconnected_once_its_connection_is_lost() {
+    let Some(unison) = std::env::var_os("GEMEL_REFERENCE_UNISON").filter(|_| cfg!(unix)) else {
+        return;
+    };
+    let pair = Pair::remote("ui-reconnect", &unison);
+    pair.profile("p", &[]);
+    let (mut ui, _, _) = new_ui(&pair, &["p"], false);
+    let waits = Cell::new(0);
+    let mut wait = || waits.set(waits.get() + 1);
+    block_on(async {
+        ui.init_prefs("p", async || None).await.unwrap();
+        ui.connect_roots(&mut wait).await.unwrap();
+        let b = ui.roots().expect("connected").list()[1].clone();
+        assert!(!b.is_local());
+        ui.connect_roots(&mut wait).await.unwrap();
+        assert_eq!(waits.get(), 1);
+        ui.rpc().close_root_connection(&b);
+        ui.connect_roots(&mut wait).await.unwrap();
+        assert_eq!(waits.get(), 2);
+        assert!(ui.rpc().is_root_connected(&b).await);
+    });
+}
+
 #[test]
 fn the_log_starts_with_the_roots() {
     let pair = Pair::new("ui-log");

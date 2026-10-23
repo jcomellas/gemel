@@ -10,7 +10,7 @@ mod support;
 #[path = "../../../crates/gemel-ui-api/tests/ui_support/mod.rs"]
 mod ui_support;
 
-use common::{gemel, ocaml, same, twins};
+use common::{gemel, ocaml, same, twins, twins_each};
 use support::sync::T0;
 use support::write;
 use ui_support::Pair;
@@ -19,82 +19,86 @@ use ui_support::Pair;
 /// deletion, then nothing to do: from the command line's roots.
 #[test]
 fn roots_on_the_command_line() {
-    let (g, o) = twins("batch-roots", &[], |r, side| {
+    for (g, o) in twins_each("batch-roots", &[], |r, side| {
         if side == "a" {
             write(r, "f", "one", T0);
             write(r, "sub/g", "two", T0 + 1.0);
         } else {
             write(r, "h", "three", T0 + 2.0);
         }
-    });
-    let args = ["a", "b", "-batch", "-times"];
-    let r = same(&g, &o, &args);
-    assert_eq!(r.code, Some(0), "{r:#?}");
-    for p in [&g, &o] {
-        write(&p.a(), "f", "a's", T0 + 10.0);
-        write(&p.b(), "f", "b's", T0 + 11.0);
-        std::fs::remove_file(p.a().join("sub/g")).unwrap();
-        write(&p.b(), "new", "new in b", T0 + 12.0);
+    }) {
+        let args = ["a", "b", "-batch", "-times"];
+        let r = same(&g, &o, &args);
+        assert_eq!(r.code, Some(0), "{r:#?}");
+        for p in [&g, &o] {
+            write(&p.a(), "f", "a's", T0 + 10.0);
+            write(&p.b(), "f", "b's", T0 + 11.0);
+            std::fs::remove_file(p.a().join("sub/g")).unwrap();
+            write(&p.b(), "new", "new in b", T0 + 12.0);
+        }
+        // With `-auto`, only conflicts get their details.
+        let r = same(&g, &o, &["a", "b", "-batch", "-times", "-auto"]);
+        assert_eq!(r.code, Some(1), "{r:#?}");
+        // The conflict is left.
+        let r = same(&g, &o, &args);
+        assert_eq!(r.code, Some(1), "{r:#?}");
     }
-    // With `-auto`, only conflicts get their details.
-    let r = same(&g, &o, &["a", "b", "-batch", "-times", "-auto"]);
-    assert_eq!(r.code, Some(1), "{r:#?}");
-    // The conflict is left.
-    let r = same(&g, &o, &args);
-    assert_eq!(r.code, Some(1), "{r:#?}");
 }
 
 /// From a profile, with `-terse`, then only a conflict (nothing to
 /// propagate).
 #[test]
 fn a_profile_with_terse() {
-    let (g, o) = twins("batch-terse", &["times = true"], |r, side| {
+    for (g, o) in twins_each("batch-terse", &["times = true"], |r, side| {
         write(r, "same", "same", T0);
         write(r, &format!("only-{side}"), side, T0 + 1.0);
-    });
-    same(&g, &o, &["p", "-batch", "-terse"]);
-    let r = same(&g, &o, &["p", "-batch"]);
-    assert!(
-        r.stderr.iter().any(|l| l.starts_with("Nothing to do")),
-        "{r:#?}"
-    );
-    for p in [&g, &o] {
-        write(&p.a(), "same", "a's", T0 + 10.0);
-        write(&p.b(), "same", "b's", T0 + 11.0);
+    }) {
+        same(&g, &o, &["p", "-batch", "-terse"]);
+        let r = same(&g, &o, &["p", "-batch"]);
+        assert!(
+            r.stderr.iter().any(|l| l.starts_with("Nothing to do")),
+            "{r:#?}"
+        );
+        for p in [&g, &o] {
+            write(&p.a(), "same", "a's", T0 + 10.0);
+            write(&p.b(), "same", "b's", T0 + 11.0);
+        }
+        let r = same(&g, &o, &["p", "-batch"]);
+        assert!(
+            r.stdout.iter().any(|l| l == "No updates to propagate"),
+            "{r:#?}"
+        );
     }
-    let r = same(&g, &o, &["p", "-batch"]);
-    assert!(
-        r.stdout.iter().any(|l| l == "No updates to propagate"),
-        "{r:#?}"
-    );
 }
 
 /// `-silent` prints nothing but errors.
 #[test]
 fn silent() {
-    let (g, o) = twins("batch-silent", &["times = true"], |r, side| {
+    for (g, o) in twins_each("batch-silent", &["times = true"], |r, side| {
         write(r, &format!("only-{side}"), side, T0);
-    });
-    let r = same(&g, &o, &["p", "-silent"]);
-    assert_eq!(r.code, Some(0));
+    }) {
+        let r = same(&g, &o, &["p", "-silent"]);
+        assert_eq!(r.code, Some(0));
+    }
 }
 
 /// Deleting everything in one replica is dangerous: batch mode aborts.
 #[test]
 fn a_dangerous_deletion_aborts() {
-    let (g, o) = twins("batch-dangerous", &["times = true"], |r, _| {
+    for (g, o) in twins_each("batch-dangerous", &["times = true"], |r, _| {
         write(r, "f", "f", T0);
         write(r, "g", "g", T0);
-    });
-    same(&g, &o, &["p", "-batch"]);
-    for p in [&g, &o] {
-        for n in ["f", "g"] {
-            std::fs::remove_file(p.a().join(n)).unwrap();
+    }) {
+        same(&g, &o, &["p", "-batch"]);
+        for p in [&g, &o] {
+            for n in ["f", "g"] {
+                std::fs::remove_file(p.a().join(n)).unwrap();
+            }
         }
+        let r = same(&g, &o, &["p", "-batch"]);
+        assert_eq!(r.code, Some(3), "{r:#?}");
+        assert_eq!(r.stdout.last().map(String::as_str), Some("Aborting..."));
     }
-    let r = same(&g, &o, &["p", "-batch"]);
-    assert_eq!(r.code, Some(3), "{r:#?}");
-    assert_eq!(r.stdout.last().map(String::as_str), Some("Aborting..."));
 }
 
 /// A merge shows its program's output.

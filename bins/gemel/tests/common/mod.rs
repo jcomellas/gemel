@@ -57,17 +57,23 @@ pub fn screen(bytes: &[u8]) -> Vec<String> {
 
 /// The command for `prog` with `args` in `pair`'s directory, with
 /// `pair`'s Unison directory, and nothing in the environment that changes
-/// the output.
+/// the output. With a remote root `b`, a `b` among the arguments is that
+/// root, and the shim and the server go after them.
 pub fn command(prog: &OsStr, pair: &Pair, args: &[&str]) -> Command {
     let mut c = Command::new(prog);
-    c.args(args)
-        .current_dir(pair.base())
-        .env("UNISON", pair.u())
-        .env("HOME", pair.base())
-        .env_remove("EMACS")
-        .env_remove("NO_COLOR")
-        .env_remove("TERM")
-        .env_remove("PAGER");
+    c.args(args.iter().map(|a| match *a {
+        // Root `b`, on the command line.
+        "b" if pair.is_remote() => pair.root("b"),
+        a => a.to_owned(),
+    }))
+    .args(pair.ssh_args())
+    .current_dir(pair.base())
+    .env("UNISON", pair.u())
+    .env("HOME", pair.base())
+    .env_remove("EMACS")
+    .env_remove("NO_COLOR")
+    .env_remove("TERM")
+    .env_remove("PAGER");
     // On Windows raw mode depends on the console (`CONIN$`), not on
     // stdin: keys on a pipe are read a line at a time only with
     // `dumbtty`, which `EMACS` sets.
@@ -215,7 +221,8 @@ pub fn lines(ls: &[String], pair: &Pair, banners: &[String]) -> (Vec<String>, Ve
 }
 
 pub fn log(pair: &Pair) -> Vec<String> {
-    pair.log().lines().map(str::to_owned).collect()
+    let log = pair.log().lines().map(str::to_owned).collect();
+    crate::ui_support::ends_unordered(pair, log)
 }
 
 pub fn banners() -> Vec<String> {
@@ -234,6 +241,10 @@ pub fn compare(g: &Pair, o: &Pair, what: &str, ours: &Run, theirs: &Run) {
     assert_eq!(out1, out2, "stdout: {what}");
     let (err1, c1) = lines(&ours.stderr, g, &b);
     let (err2, c2) = lines(&theirs.stderr, o, &b);
+    let (err1, err2) = (
+        crate::ui_support::ends_unordered(g, err1),
+        crate::ui_support::ends_unordered(o, err2),
+    );
     assert_eq!(err1, err2, "stderr: {what}");
     // Local times, within a few seconds of each other.
     assert_eq!(c1.len(), c2.len(), "{what}");
@@ -264,6 +275,27 @@ pub fn same_keys(g: &Pair, o: &Pair, args: &[&str], keys: Option<&[u8]>) -> Run 
     let theirs = run(&unison, o, &ocaml_args(args), keys);
     compare(g, o, &format!("{args:?} {keys:?}"), &ours, &theirs);
     ours
+}
+
+/// [`twins`], then on Unix twins whose root `b` is on a server: the gemel
+/// program for gemel's pair, and OCaml Unison for OCaml's (gemel when
+/// there is none, for the pair that then isn't used).
+pub fn twins_each(tag: &str, lines: &[&str], build: fn(&StdPath, &str)) -> Vec<(Pair, Pair)> {
+    let mut each = vec![twins(tag, lines, build)];
+    if cfg!(unix) {
+        let ocaml = ocaml_path().unwrap_or_else(|| gemel_path().to_owned());
+        let (g, o) = (
+            Pair::remote(&format!("{tag}-g"), gemel_path()),
+            Pair::remote(&format!("{tag}-o"), &ocaml),
+        );
+        for p in [&g, &o] {
+            p.profile("p", lines);
+            build(&p.a(), "a");
+            build(&p.b(), "b");
+        }
+        each.push((g, o));
+    }
+    each
 }
 
 /// Twin pairs, made with `build(root, side)`, and the profile `p` with

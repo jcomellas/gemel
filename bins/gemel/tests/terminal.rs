@@ -20,7 +20,7 @@ use std::fs::File;
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::process::Stdio;
 
-use common::{Driven, same_driven_by, same_keys, twins};
+use common::{Driven, same_driven_by, same_keys, twins, twins_each};
 use support::sync::T0;
 use support::write;
 use ui_support::Pair;
@@ -62,9 +62,14 @@ fn in_terminal(prog: &OsStr, pair: &Pair, args: &[&str]) -> Driven {
     )
 }
 
-/// Replicas synced once, then with a conflict and new files.
-fn items(tag: &str) -> (Pair, Pair) {
-    let (g, o) = twins(tag, &["times = true"], |r, _| write(r, "c", "c\n", T0));
+/// Replicas synced once, then with a conflict and new files, for each way
+/// of reaching root `b` (see [`common::twins_each`]).
+fn items_each(tag: &str) -> Vec<(Pair, Pair)> {
+    let each = twins_each(tag, &["times = true"], |r, _| write(r, "c", "c\n", T0));
+    each.into_iter().map(|(g, o)| items_in(g, o)).collect()
+}
+
+fn items_in(g: Pair, o: Pair) -> (Pair, Pair) {
     same_keys(&g, &o, &["p", "-batch"], None);
     for p in [&g, &o] {
         write(&p.a(), "c", "a's c\n", T0 + 1.0);
@@ -80,21 +85,22 @@ fn items(tag: &str) -> (Pair, Pair) {
 /// and quitting.
 #[test]
 fn keys_in_raw_mode() {
-    let (g, o) = items("term-keys");
-    let r = same_driven_by(in_terminal, &g, &o, &["p"], |p| {
-        for (n, key) in ["x", "\x1b[B", "p", "?", "z", "f", ">", "", "s", "R", "q"]
-            .iter()
-            .enumerate()
-        {
-            p.wait_for("] ", n + 1);
-            p.type_keys(if key.is_empty() {
-                b"\r"
-            } else {
-                key.as_bytes()
-            });
-        }
-    });
-    assert_eq!(r.code, Some(3), "{r:#?}");
+    for (g, o) in items_each("term-keys") {
+        let r = same_driven_by(in_terminal, &g, &o, &["p"], |p| {
+            for (n, key) in ["x", "\x1b[B", "p", "?", "z", "f", ">", "", "s", "R", "q"]
+                .iter()
+                .enumerate()
+            {
+                p.wait_for("] ", n + 1);
+                p.type_keys(if key.is_empty() {
+                    b"\r"
+                } else {
+                    key.as_bytes()
+                });
+            }
+        });
+        assert_eq!(r.code, Some(3), "{r:#?}");
+    }
 }
 
 /// In raw mode a signal interrupts the read, so a sync's question is

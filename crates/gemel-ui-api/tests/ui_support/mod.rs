@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Path as StdPath, PathBuf};
 
 use crate::support::sync::T0;
@@ -14,9 +15,15 @@ use crate::support::{TempDir, listing, settle, write};
 pub type Gemel = fn(&Pair, &[&str], bool) -> Vec<String>;
 
 /// Replicas `a` and `b` in a directory, with the Unison directory `u`.
+/// Root `b` is there too, or on a server reached over ssh.
 pub struct Pair {
     pub dir: TempDir,
+    /// The server's program, for a remote root `b`.
+    server: Option<OsString>,
 }
+
+/// The host name of a remote root's server.
+pub const SERVER: &str = "server";
 
 impl Pair {
     pub fn new(tag: &str) -> Pair {
@@ -24,7 +31,57 @@ impl Pair {
         for d in ["a", "b", "u"] {
             std::fs::create_dir_all(dir.0.join(d)).unwrap();
         }
-        Pair { dir }
+        Pair { dir, server: None }
+    }
+
+    /// A pair whose root `b` is `ssh://server//...`: a shim in the pair's
+    /// directory stands in for ssh, and runs `server` here, named
+    /// [`SERVER`], with the pair's Unison directory and home (so that
+    /// the client's environment, whatever it is, doesn't reach it).
+    pub fn remote(tag: &str, server: &OsStr) -> Pair {
+        let mut pair = Pair::new(tag);
+        std::fs::write(
+            pair.shim(),
+            format!(
+                "#!/bin/sh\n\
+                 # Drops ssh's arguments, then runs the server here (ui_support).\n\
+                 while [ \"$1\" != -e ]; do shift; done; shift 2\n\
+                 UNISONLOCALHOSTNAME={SERVER} UNISON={u} HOME={home} exec \"$@\"\n",
+                u = pair.u().display(),
+                home = pair.base().display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(pair.shim(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        pair.server = Some(server.to_owned());
+        pair
+    }
+
+    /// Whether root `b` is on a server.
+    pub fn is_remote(&self) -> bool {
+        self.server.is_some()
+    }
+
+    fn shim(&self) -> PathBuf {
+        self.base().join("ssh")
+    }
+
+    /// What reaches root `b` on the command line: the shim and the
+    /// server's program, if it is remote.
+    pub fn ssh_args(&self) -> Vec<String> {
+        match &self.server {
+            None => Vec::new(),
+            Some(server) => vec![
+                "-sshcmd".to_owned(),
+                self.shim().to_str().unwrap().to_owned(),
+                "-servercmd".to_owned(),
+                server.to_str().unwrap().to_owned(),
+            ],
+        }
     }
 
     pub fn base(&self) -> &StdPath {
@@ -43,13 +100,28 @@ impl Pair {
         self.base().join("u")
     }
 
+    /// A root as the profile names it: a path, or for a remote root `b`,
+    /// `ssh://server//...`.
     pub fn root(&self, side: &str) -> String {
-        self.base().join(side).to_str().unwrap().to_owned()
+        let path = self.base().join(side).to_str().unwrap().to_owned();
+        if side == "b" && self.is_remote() {
+            format!("ssh://{SERVER}/{path}")
+        } else {
+            path
+        }
     }
 
-    /// Writes the profile `name`, with this pair's roots and `lines`.
+    /// Writes the profile `name`, with this pair's roots and `lines` (and
+    /// how to reach a remote root).
     pub fn profile(&self, name: &str, lines: &[&str]) {
         let mut text = format!("root = {}\nroot = {}\n", self.root("a"), self.root("b"));
+        if let Some(server) = &self.server {
+            text += &format!(
+                "sshcmd = {}\nservercmd = {}\n",
+                self.shim().display(),
+                server.to_str().unwrap()
+            );
+        }
         for l in lines {
             text += l;
             text.push('\n');
@@ -110,6 +182,22 @@ pub fn startup_log(pair: &Pair) -> Vec<String> {
     out
 }
 
+/// A log without the order of its `[END]` lines, when root `b` is
+/// remote: OCaml's client then runs items concurrently, and interleaves
+/// them with the next items' `[BGN]`; gemel's runs them one at a time
+/// until phase 5 of milestone 3. Otherwise, the log as it is.
+pub fn ends_unordered(pair: &Pair, log: Vec<String>) -> Vec<String> {
+    if !pair.is_remote() {
+        return log;
+    }
+    let (mut ends, mut rest): (Vec<String>, Vec<String>) =
+        log.into_iter().partition(|l| l.starts_with("[END] "));
+    ends.sort();
+    rest.push("(ends, sorted)".to_owned());
+    rest.extend(ends);
+    rest
+}
+
 pub const NOTHING_TO_DO: &str = "Nothing to do: replicas have not changed since last sync.";
 
 /// Syncs a pair with gemel, and with OCaml a twin pair, from the profile
@@ -117,14 +205,33 @@ pub const NOTHING_TO_DO: &str = "Nothing to do: replicas have not changed since 
 /// `change`. Both must leave the same replicas and logs, and each item's
 /// details must be OCaml's. Then OCaml finds nothing to do on gemel's
 /// pair, so its archives agree with the replicas.
+///
+/// It runs three ways: both roots here, then in loopback mode, then with
+/// root `b` on an OCaml server, for both pairs (only with OCaml Unison,
+/// on Unix, where the shim is a shell script).
 pub fn sync_like_ocaml(
     gemel: Gemel,
     lines: &[&str],
     build: fn(&StdPath, &str),
     change: fn(&StdPath, &str),
 ) {
-    for loopback in [false, true] {
-        let (g, o) = (Pair::new("ui-gemel"), Pair::new("ui-ocaml"));
+    let ocaml_server = std::env::var_os("GEMEL_REFERENCE_UNISON").filter(|_| cfg!(unix));
+    let ways = [
+        Some(false),
+        Some(true),
+        ocaml_server.as_ref().map(|_| false),
+    ];
+    for (way, loopback) in ways.into_iter().enumerate() {
+        let Some(loopback) = loopback else {
+            continue;
+        };
+        let (g, o) = match (way, &ocaml_server) {
+            (2, Some(server)) => (
+                Pair::remote("ui-gemel", server),
+                Pair::remote("ui-ocaml", server),
+            ),
+            _ => (Pair::new("ui-gemel"), Pair::new("ui-ocaml")),
+        };
         for p in [&g, &o] {
             p.profile("p", lines);
             build(&p.a(), "a");
@@ -143,13 +250,20 @@ pub fn sync_like_ocaml(
             let Some(out) = ocaml(&o, &["p"]) else {
                 continue;
             };
-            let what = format!("loopback {loopback}, round {round}");
+            let what = format!(
+                "loopback {loopback}, remote {}, round {round}",
+                g.is_remote()
+            );
             for d in &details {
                 assert!(out.contains(d), "{what}: {d:?} not in\n{out}");
             }
             assert_eq!(listing(&g.a()), listing(&o.a()), "{what}");
             assert_eq!(listing(&g.b()), listing(&o.b()), "{what}");
-            assert_eq!(startup_log(&g), startup_log(&o), "{what}");
+            assert_eq!(
+                ends_unordered(&g, startup_log(&g)),
+                ends_unordered(&o, startup_log(&o)),
+                "{what}"
+            );
         }
         for fastcheck in ["true", "false"] {
             let flag = format!("-fastcheck={fastcheck}");
