@@ -32,8 +32,9 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
 use gemel_base::case;
+use gemel_base::features::Features;
 use gemel_base::path::{Local, Path};
-use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
+use gemel_base::prefs::{Category, DumpedPref, PrefDef, Prefs, Topic};
 use gemel_base::util::{Error, FileId};
 use gemel_compat::umarshal::{self, Reader, Writer};
 use gemel_fs::fileinfo::{self, FsConfig, Info, SetAction, Stamp, Typ};
@@ -1251,6 +1252,46 @@ fn should_use_external_copyprog(prefs: &Prefs, a: &TransferArgs) -> bool {
 #[derive(Default)]
 struct WarnedCopyprog(bool);
 
+/// Warns, once on each host, that external copy programs are ignored.
+fn warn_copyprog_ignored(host: &Host) {
+    let warned = host.state::<WarnedCopyprog>();
+    if !std::mem::replace(&mut warned.borrow_mut().0, true) {
+        host.warn(
+            "External copy programs (copyprog, copythreshold) are not supported; \
+             transferring files with the built-in protocol instead.\n",
+        );
+    }
+}
+
+/// The client's preferences as sent to a server (`dump`), with external
+/// copying off (`copythreshold = -1`): a server that is OCaml's would
+/// otherwise have files copied by `copyprog`, which a gemel client can't
+/// finish. If the preferences turn it on, the client warns that it's
+/// ignored, as a gemel server would.
+pub fn without_external_copies(
+    client: &Host,
+    dump: &mut [DumpedPref],
+    features: &Features,
+) -> Result<(), Error> {
+    let on = {
+        let prefs = client.prefs().borrow();
+        !prefs.read(&COPYPROG).is_empty() && *prefs.read(&COPYTHRESHOLD) >= 0
+    };
+    if on {
+        warn_copyprog_ignored(client);
+    }
+    let mut off = Prefs::new();
+    off.register(&COPYTHRESHOLD)?;
+    off.set(&COPYTHRESHOLD, -1);
+    let off = off.dump(1, features)?;
+    for d in dump.iter_mut() {
+        if let Some(o) = off.iter().find(|o| o.0 == d.0) {
+            *d = o.clone();
+        }
+    }
+    Ok(())
+}
+
 /// `tryCopyMovedFile`: copies a file this host already has with the same
 /// contents (found by `xferhint`), instead of transferring it. The copy's
 /// info and the message for the log, if it worked; if not, the hint is
@@ -1389,13 +1430,7 @@ async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<T
             ));
         }
         if should_use_external_copyprog(&host.prefs().borrow(), &a) {
-            let warned = host.state::<WarnedCopyprog>();
-            if !std::mem::replace(&mut warned.borrow_mut().0, true) {
-                host.warn(
-                    "External copy programs (copyprog, copythreshold) are not supported; \
-                     transferring files with the built-in protocol instead.\n",
-                );
-            }
+            warn_copyprog_ignored(&host);
         }
         let status = really_transfer_file(&conn_from, &ctx, &a, &temp_info).await?;
         xferhint::insert_entry(&host, hint);

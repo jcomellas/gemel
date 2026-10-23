@@ -721,6 +721,21 @@ fn a_file_the_destination_has_is_copied_not_sent() {
     }
 }
 
+/// A server gets the client's preferences with external copying off
+/// (`copythreshold = -1`), whatever the client's say, so that one that is
+/// OCaml's never hands a file to `copyprog`.
+#[test]
+fn servers_get_external_copying_off() {
+    let h = hosts("two-hosts-copyprog", &["-copythreshold", "0"]);
+    let threshold = |host: &Host| *host.prefs().borrow().read(&copy::COPYTHRESHOLD);
+    assert_eq!(threshold(h.rpc.client_host()), 0);
+    assert_eq!(threshold(&h.server), -1);
+    let contents = random(90, 50_000);
+    write_file(&h.path("a", "f"), &contents);
+    h.transfer("a", "f", false).unwrap();
+    assert!(std::fs::read(h.path("b", ".tmp-f")).unwrap() == contents);
+}
+
 /// Both futures' outputs, running them together.
 async fn join<A: std::future::Future, B: std::future::Future>(
     a: A,
