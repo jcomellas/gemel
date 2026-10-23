@@ -12,12 +12,13 @@
 //!
 //! OCaml runs up to `maxthreads` items at once, but between local roots
 //! its operations never yield, so each item runs to the end before the
-//! next starts. Here the filesystem work runs on blocking tasks, which do
-//! yield, so between local roots [`transport_items`] runs one item at a
-//! time: that keeps OCaml's order (of the log and of archive updates), and
-//! keeps each operation atomic on its host (see [`crate::exclusive`]).
-//! OCaml runs items concurrently with a remote root; here they run one at
-//! a time with one too, until phase 5 of milestone 3.
+//! next starts. Here a copy between local roots runs on another thread,
+//! which yields, so between local roots [`transport_items`] runs one item
+//! at a time: that keeps OCaml's order (of the log and of archive
+//! updates). The rest of a host's work runs at once, as OCaml's does (see
+//! [`crate::exclusive`]). OCaml runs items concurrently with a remote
+//! root; here they run one at a time with one too, until phase 5c of
+//! milestone 3.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -133,9 +134,8 @@ pub async fn transport_items<'a, T>(
     if abort.borrow().is_all() {
         return Ok(());
     }
-    // One at a time with a remote root too, until items can run
-    // concurrently (phase 5 of milestone 3): `exclusive` keeps each piece
-    // atomic, not each item, which is only safe one at a time.
+    // One at a time with a remote root too, until items run concurrently
+    // (phase 5c of milestone 3).
     let limit = 1;
     let failure = RefCell::new(None);
     let mut next = 0;

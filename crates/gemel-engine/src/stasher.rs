@@ -380,8 +380,7 @@ fn naming(host: &Host) -> Result<(Affix, Affix), Error> {
         .expect("set above"))
 }
 
-/// The backup settings of one operation, taken from the host so that
-/// backups are made off the engine thread.
+/// The backup settings of one operation, taken from the host.
 struct Backups {
     ctx: Ctx,
     naming: (Affix, Affix),
@@ -721,7 +720,7 @@ pub async fn backup(
 ) -> Result<(), Error> {
     let b = Backups::of(host)?;
     let (f, p) = (fspath.clone(), path.clone());
-    let made = exclusive::blocking(host, move || b.backup(&f, &p, disposition)).await?;
+    let made = exclusive::now(move || b.backup(&f, &p, disposition)).await?;
     if let Some((back_root, back_path)) = made {
         update::iter_files(&back_root, &back_path, arch, &mut |f, p, fp| {
             xferhint::insert_entry(host, (f.clone(), p.clone(), fp.clone()));
@@ -732,8 +731,7 @@ pub async fn backup(
 
 /// `stashCurrentVersion`: keeps the current version of `path` (or of the
 /// bits at `source_path`, kept as `path`'s) if `backupcurr` says so; a
-/// directory's children one by one, except ignored ones. The files are
-/// handled off the engine thread.
+/// directory's children one by one, except ignored ones.
 pub async fn stash_current_version(
     host: &Host,
     fspath: &Fspath,
@@ -745,7 +743,7 @@ pub async fn stash_current_version(
     }
     let b = Backups::of(host)?;
     let (f, p, s) = (fspath.clone(), path.clone(), source_path.cloned());
-    exclusive::blocking(host, move || b.stash_current_version(&f, &p, s.as_ref())).await
+    exclusive::now(move || b.stash_current_version(&f, &p, s.as_ref())).await
 }
 
 /// `getRecentVersion`: a backup of `path` (in this replica's backups only)
@@ -758,7 +756,7 @@ pub async fn get_recent_version(
 ) -> Result<Option<Fspath>, Error> {
     let b = Backups::of(host)?;
     let (f, p, fp) = (fspath.clone(), path.clone(), fp.clone());
-    exclusive::blocking(host, move || b.get_recent_version(&f, &p, &fp)).await
+    exclusive::now(move || b.get_recent_version(&f, &p, &fp)).await
 }
 
 // ---- Initialisation ----

@@ -279,8 +279,7 @@ enum SourceState {
 
 /// `checkForChangesToSourceLocal`: fails if the source changed since
 /// update detection (by the archive's record, or against `new_fp`). A
-/// change the fast check missed is recorded for the next scan. The source
-/// is read off the engine thread.
+/// change the fast check missed is recorded for the next scan.
 pub async fn check_for_changes_to_source_local(
     host: &Host,
     fspath: &Fspath,
@@ -289,7 +288,7 @@ pub async fn check_for_changes_to_source_local(
     let ctx = Ctx::of(host)?;
     let abspath = fspath.concat(&check.path);
     let (f, c) = (fspath.clone(), check.clone());
-    match exclusive::blocking(host, move || check_source(&ctx, &f, &c)).await? {
+    match exclusive::now(move || check_source(&ctx, &f, &c)).await? {
         SourceState::AsRecorded => Ok(()),
         SourceState::MissedChange => {
             update::mark_possibly_updated(host, fspath, &check.path)?;
@@ -895,18 +894,25 @@ async fn compress(conn: Connection, a: CompressArgs) -> Result<(), Error> {
                 abort_check(&host, a.id)?;
             }
             let mut progress = transfer_progress(&host, a.id, a.kind);
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
-            // Read off the engine thread, the chunks coming back as they are
-            // made; if sending fails, reading stops at the next chunk.
-            let reading = tokio::task::spawn_blocking(move || -> Result<(), Error> {
+            // OCaml reads the file without yielding, and yields only to
+            // send what it read. So the reading runs on a thread in step
+            // with this task: the engine thread waits while it reads, and
+            // it waits while each chunk is sent; if sending fails, reading
+            // stops at the next chunk.
+            let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(0);
+            let (sent_tx, sent_rx) = std::sync::mpsc::sync_channel::<()>(0);
+            let reading = std::thread::spawn(move || -> Result<(), Error> {
                 let mut f = open_file_in(&a.fspath_from, &a.path_from, a.kind, COMPRESSING)?;
                 // `showPrefixProgress`: a resumed transfer's prefix counts.
                 if let FileKind::DataAppend(len) = a.kind {
                     progress(len as usize)?;
                 }
                 let mut transmit = |c: &[u8]| {
-                    tx.blocking_send(c.to_vec())
-                        .map_err(|_| Error::Transient("Streaming aborted".into()))
+                    chunk_tx
+                        .send(c.to_vec())
+                        .ok()
+                        .and_then(|()| sent_rx.recv().ok())
+                        .ok_or_else(|| Error::Transient("Streaming aborted".into()))
                 };
                 match &a.block_info {
                     None => transfer::send(&mut f, a.size_from, &mut progress, &mut transmit),
@@ -915,13 +921,23 @@ async fn compress(conn: Connection, a: CompressArgs) -> Result<(), Error> {
                     }
                 }
             });
-            while let Some(chunk) = rx.recv().await {
-                sender.send(&(file_id, chunk)).await?;
+            let sent = async {
+                while let Ok(chunk) = chunk_rx.recv() {
+                    sender.send(&(file_id, chunk)).await?;
+                    if sent_tx.send(()).is_err() {
+                        break;
+                    }
+                }
+                Ok::<(), Error>(())
             }
-            match reading.await {
+            .await;
+            // Sending failed: the reader stops at its next chunk.
+            drop((chunk_rx, sent_tx));
+            let read = match reading.join() {
                 Ok(r) => r,
-                Err(e) => std::panic::resume_unwind(e.into_panic()),
-            }
+                Err(e) => std::panic::resume_unwind(e),
+            };
+            sent.and(read)
         },
     )
     .await
@@ -1007,7 +1023,7 @@ async fn process_transfer_instruction(
         .get(&file_id)
         .cloned()
         .ok_or_else(|| internal("a chunk for an unknown transfer"))?;
-    exclusive::blocking(&host, move || {
+    exclusive::now(move || {
         receiving
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1039,7 +1055,7 @@ async fn transfer_file_contents(
     let block_info = if use_rsync {
         let (fspath, path) = (a.fspath_to.clone(), a.real_path_to.clone());
         Some(
-            exclusive::blocking(&host, move || {
+            exclusive::now(move || {
                 let mut f = open_file_in(&fspath, &path, kind, "preprocessing file")?;
                 rsync::preprocess(&mut f, size_from, dest_size)
             })
@@ -1083,10 +1099,9 @@ async fn transfer_file_contents(
     };
     let result = conn_from.call(&COMPRESS, args).await;
     host.state::<Transfers>().borrow_mut().0.remove(&file_id);
-    let closed = exclusive::blocking(&host, move || {
-        receiving.lock().unwrap_or_else(|e| e.into_inner()).close()
-    })
-    .await;
+    let closed =
+        exclusive::now(move || receiving.lock().unwrap_or_else(|e| e.into_inner()).close())
+            .await;
     result.and(closed)
 }
 
@@ -1320,7 +1335,7 @@ async fn try_copy_moved_file(
     type Copied = Result<Result<Option<(Info, String)>, Error>, Error>;
     let copied = {
         let (ctx, a) = (ctx.clone(), a.clone());
-        exclusive::blocking(host, move || -> Copied {
+        exclusive::now(move || -> Copied {
             // If the candidate is the replica's root, `from_root` is
             // right; otherwise it isn't expected to be a link, and it is
             // right still.
@@ -1391,7 +1406,7 @@ async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<T
     let ctx = Ctx::of(&host)?;
     let (temp_info, transferred) = {
         let (ctx, a) = (ctx.clone(), a.clone());
-        exclusive::blocking(&host, move || file_is_transferred(&ctx, &a)).await?
+        exclusive::now(move || file_is_transferred(&ctx, &a)).await?
     };
     let hint = (a.fspath_to.clone(), a.path_to.clone(), a.fp.clone());
     if transferred {
@@ -1406,7 +1421,7 @@ async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<T
         }
         {
             let (ctx, a) = (ctx.clone(), a.clone());
-            exclusive::blocking(&host, move || {
+            exclusive::now(move || {
                 set_fileinfo(
                     &ctx,
                     &a.fspath_to,
@@ -1526,12 +1541,7 @@ pub static FINGERPRINT_SUBFILE: ServerCmd<(Fspath, Path<Local>, Filesize), Vec<F
         |r, _| Ok((Fspath::unmarshal(r)?, Path::unmarshal(r)?, r.int64()?)),
         |fps, w, _| w.list(fps, |w, fp| fp.marshal(w)),
         |r, _| r.list(Fingerprint::unmarshal),
-        |conn, (fspath, path, len)| {
-            Box::pin(async move {
-                exclusive::blocking(conn.host(), move || fingerprint_prefix(&fspath, &path, len))
-                    .await
-            })
-        },
+        |_, (fspath, path, len)| Box::pin(async move { fingerprint_prefix(&fspath, &path, len) }),
     );
 
 /// `appendThreshold`: a temporary file left by an interrupted transfer is
@@ -1561,7 +1571,7 @@ async fn valid_file_prefix(
         return Ok(None);
     };
     let (f, p) = (a.fspath_to.clone(), a.path_to.clone());
-    let to = exclusive::blocking(conn_from.host(), move || fingerprint_prefix(&f, &p, len)).await?;
+    let to = exclusive::now(move || fingerprint_prefix(&f, &p, len)).await?;
     Ok((from == to).then_some(len))
 }
 
@@ -1574,11 +1584,10 @@ async fn really_transfer_file(
     a: &TransferArgs,
     temp_info: &Info,
 ) -> Result<TransferStatus, Error> {
-    let host = conn_from.host().clone();
     let prefix = valid_file_prefix(conn_from, a, temp_info).await?;
     if prefix.is_none() {
         let (ctx, f, p) = (ctx.clone(), a.fspath_to.clone(), a.path_to.clone());
-        exclusive::blocking(&host, move || remove_old_temp_file(&ctx, &f, &p)).await?;
+        exclusive::now(move || remove_old_temp_file(&ctx, &f, &p)).await?;
     }
     let kind = prefix.map_or(FileKind::Data, FileKind::DataAppend);
     transfer_file_contents(conn_from, a, kind, a.desc.length()).await?;
@@ -1588,7 +1597,7 @@ async fn really_transfer_file(
         transfer_file_contents(conn_from, a, FileKind::Ress, ress_length).await?;
     }
     let (ctx, a) = (ctx.clone(), a.clone());
-    exclusive::blocking(&host, move || {
+    exclusive::now(move || {
         set_fileinfo(
             &ctx,
             &a.fspath_to,
@@ -1716,7 +1725,7 @@ pub async fn file(
         let client = rpc.client_host();
         let printer = uutil::progress_printer(client);
         let abort = client.state::<Abort>().borrow().all_flag();
-        exclusive::blocking(rpc.local_host(), move || {
+        gemel_rpc::runtime::blocking(move || {
             let mut progress = |n| {
                 if let Some(p) = &printer {
                     p(id, n, "l");

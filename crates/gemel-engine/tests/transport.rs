@@ -194,7 +194,7 @@ fn sync_like_ocaml(what: &str, prefs: &[&str], build: fn(&StdPath), change: Chan
 
 /// The transport log without the order of its `[END]` lines, which OCaml
 /// interleaves with the next items' when a root is remote, where it runs
-/// items concurrently; gemel runs them one at a time until phase 5 of
+/// items concurrently; gemel runs them one at a time until phase 5c of
 /// milestone 3.
 fn ends_unordered(log: &[String]) -> (Vec<&String>, Vec<&String>) {
     let (mut ends, rest): (Vec<_>, Vec<_>) = log.iter().partition(|l| l.starts_with("[END] "));
