@@ -724,7 +724,17 @@ fn the_scan_and_reconciliation_show_their_status() {
                 && reconciling < copying,
             "{shown:?}"
         );
-        let scanned = scanned.lock().unwrap().clone();
+        let mut scanned = scanned.lock().unwrap().clone();
+        // With a server, once the client's own scan has ended: an empty
+        // status, then that it waits for the server (OCaml's waiting
+        // action).
+        let waiting = shown
+            .iter()
+            .any(|m| m.contains("Waiting for changes from server"));
+        assert_eq!(waiting, via == Via::Remote, "{shown:?}");
+        if via == Via::Remote {
+            assert_eq!(scanned.pop().as_deref(), Some(""), "{scanned:?}");
+        }
         if via == Via::Loopback {
             assert_eq!(scanned, Vec::<String>::new());
         } else {

@@ -221,19 +221,63 @@ impl Roots {
             .collect::<Result<Vec<T>, Error>>()?;
         Ok(self.reorder_canonical_list_to_users_order(results))
     }
+
+    /// `Globals.allRootsMapWithWaitingAction`: [`Roots::map`], calling
+    /// `wait` on the first root in canonical order at once, and on each
+    /// next one once the one before it has ended
+    /// (`Lwt_util.map_with_waiting_action`).
+    pub async fn map_with_waiting_action<'a, T, F, Fut>(
+        &'a self,
+        f: F,
+        wait: impl Fn(&Root),
+    ) -> Result<Vec<T>, Error>
+    where
+        F: Fn(&'a Root) -> Fut,
+        Fut: Future<Output = Result<T, Error>> + 'a,
+    {
+        let canonical = self.in_canonical_order();
+        let order: Vec<&Root> = canonical
+            .iter()
+            .map(|r| self.roots.iter().find(|x| *x == r).expect("same roots"))
+            .collect();
+        if let Some(first) = order.first() {
+            wait(first);
+        }
+        let futures = order.iter().map(|r| f(r)).collect();
+        let results = join_all_with(futures, |i| {
+            if let Some(next) = order.get(i + 1) {
+                wait(next);
+            }
+        })
+        .await
+        .into_iter()
+        .collect::<Result<Vec<T>, Error>>()?;
+        Ok(self.reorder_canonical_list_to_users_order(results))
+    }
 }
 
 /// Runs futures concurrently on this thread (as `Lwt_util.map` does) and
 /// returns their outputs in order.
 async fn join_all<T, F: Future<Output = T>>(futures: Vec<F>) -> Vec<T> {
+    join_all_with(futures, |_| {}).await
+}
+
+/// [`join_all`], calling `done` with each future's index as it ends.
+async fn join_all_with<T, F: Future<Output = T>>(
+    futures: Vec<F>,
+    mut done: impl FnMut(usize),
+) -> Vec<T> {
     let mut futures: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
     let mut outputs: Vec<Option<T>> = futures.iter().map(|_| None).collect();
     std::future::poll_fn(|cx| {
         let mut pending = false;
-        for (f, out) in futures.iter_mut().zip(outputs.iter_mut()) {
+        for (i, (f, out)) in futures.iter_mut().zip(outputs.iter_mut()).enumerate() {
             if out.is_none() {
                 match f.as_mut().poll(cx) {
-                    Poll::Ready(v) => *out = Some(v),
+                    Poll::Ready(v) => {
+                        *out = Some(v);
+                        done(i);
+                    }
                     Poll::Pending => pending = true,
                 }
             }
