@@ -46,7 +46,7 @@ use crate::host::Host;
 use crate::protocol::{self, HEADER_TAG};
 use crate::root::{Host as RootHost, Root};
 use crate::server::{FORWARD_MSG_TO_CLIENT, SHOW_WARNING_ON_CLIENT};
-use crate::shell;
+use crate::{shell, socket};
 
 /// A future on the engine thread.
 pub type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
@@ -955,7 +955,8 @@ impl Rpc {
     }
 
     /// Opens a connection to the server `clroot` names: through its
-    /// shell, for ssh (`buildShellConnection`). Sockets come with phase 4.
+    /// shell, for ssh (`buildShellConnection`), or on its socket
+    /// (`buildSocketConnection`).
     pub async fn open_connection(&self, clroot: &Clroot) -> Result<Connection, Error> {
         match clroot {
             Clroot::ConnectByShell {
@@ -971,9 +972,9 @@ impl Rpc {
                 };
                 shell::connect(self.endpoint().clone(), cmd, self.half_duplex()).await
             }
-            Clroot::ConnectBySocket { .. } => Err(Error::Fatal(format!(
-                "Socket connections are not supported yet: {clroot}"
-            ))),
+            Clroot::ConnectBySocket { host, port, .. } => {
+                socket::connect(self.endpoint().clone(), host, port, self.half_duplex()).await
+            }
             Clroot::ConnectLocal(_) => Err(Error::Fatal(
                 "Internal error: a connection to a local root".into(),
             )),

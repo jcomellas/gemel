@@ -35,7 +35,8 @@
 //!
 //! A connection starts once a transport is open and the version handshake
 //! ([`crate::handshake`]) is done; the in-memory one ([`pipe`]) needs
-//! neither. The transports (ssh and sockets) come later in milestone 3.
+//! neither. The transports are ssh ([`crate::shell`]) and sockets
+//! ([`crate::socket`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};

@@ -1,5 +1,5 @@
-//! `gemel`: the command-line and text UI, and the `-server` mode run on
-//! remote hosts.
+//! `gemel`: the command-line and text UI, and the server modes run on
+//! remote hosts (`-server` and `-socket`).
 //!
 //! Ports Unison `src/main.ml`, `src/uitext.ml` and `src/linktext.ml`.
 //!
@@ -11,9 +11,9 @@
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 //!
 //! `main.ml`'s options handled before any profile is loaded: `-version`,
-//! `-prefsman short`, `-server`, and (not supported yet) `-doc`,
-//! `-prefsdocs`, `-prefsman full` and `-socket`; then the text interface,
-//! whatever `-ui` asks for.
+//! `-prefsman short`, `-server`, `-socket` (with `-listen`), and (not
+//! supported yet) `-doc`, `-prefsdocs` and `-prefsman full`; then the text
+//! interface, whatever `-ui` asks for.
 
 mod infos;
 mod input;
@@ -72,8 +72,12 @@ fn run(args: Vec<String>) -> i32 {
     if argv.contains_key(cli::SERVER.name()) {
         return server::run();
     }
-    if argv.contains_key(cli::SOCKET.name()) {
-        return unsupported("-socket");
+    if let Some(port) = argv.get(cli::SOCKET.name()).and_then(|v| v.first()) {
+        let hosts: Vec<String> = [cli::LISTEN.name(), "host"]
+            .iter()
+            .flat_map(|k| argv.get(*k).into_iter().flatten().cloned())
+            .collect();
+        return server::run_socket(&hosts, port);
     }
     let interface = match argv.get(cli::UI.name()).and_then(|v| v.first()) {
         None => Interface::Text,
