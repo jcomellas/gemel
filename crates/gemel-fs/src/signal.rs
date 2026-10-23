@@ -182,6 +182,25 @@ mod unix {
         // SAFETY: plain values.
         unsafe { libc::kill(libc::getpid(), number(s)) };
     }
+
+    /// `Util.blockSignals [Sys.sigint]` around starting a process: `cmd`
+    /// starts with `SIGINT` blocked, so that Ctrl-C at the terminal, which
+    /// reaches the whole foreground process group, doesn't reach it.
+    pub fn block_interrupt_in_child(cmd: &mut std::process::Command) {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: only async-signal-safe calls, between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut set = std::mem::zeroed::<libc::sigset_t>();
+                libc::sigemptyset(&mut set);
+                libc::sigaddset(&mut set, libc::SIGINT);
+                if libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -258,6 +277,10 @@ mod windows {
 
     /// Not on Windows.
     pub fn raise(_: Signal) {}
+
+    /// Nothing on Windows, as in OCaml, where `Unix.sigprocmask` doesn't
+    /// exist there.
+    pub fn block_interrupt_in_child(_: &mut std::process::Command) {}
 }
 
 /// Whether signals other than Ctrl-C can be caught (`supportSignals`).

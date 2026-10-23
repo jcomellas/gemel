@@ -46,6 +46,7 @@ use crate::host::Host;
 use crate::protocol::{self, HEADER_TAG};
 use crate::root::{Host as RootHost, Root};
 use crate::server::{FORWARD_MSG_TO_CLIENT, SHOW_WARNING_ON_CLIENT};
+use crate::shell;
 
 /// A future on the engine thread.
 pub type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T>>>;
@@ -915,6 +916,27 @@ impl Rpc {
         Some(conn)
     }
 
+    /// `Remote.isRootConnected`: whether `root` can be reached: a local
+    /// one always, a remote one if its connection is still up
+    /// (`ClientConn.ofRootConncheck`).
+    pub async fn is_root_connected(&self, root: &Root) -> bool {
+        if root.is_local() {
+            return true;
+        }
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let conn = self.conns.borrow().of_root(root);
+        match conn {
+            Some(c) if c.failure().is_some() => {
+                self.conns.borrow_mut().unregister(&c);
+                false
+            }
+            Some(_) => true,
+            None => false,
+        }
+    }
+
     /// `clientCloseRootConnection`: closes the connection to a remote
     /// root's host; for a local root, runs the client's close handlers.
     pub fn close_root_connection(&self, root: &Root) {
@@ -926,6 +948,32 @@ impl Rpc {
                     c.close();
                 }
             }
+        }
+    }
+
+    /// Opens a connection to the server `clroot` names: through its
+    /// shell, for ssh (`buildShellConnection`). Sockets come with phase 4.
+    pub async fn open_connection(&self, clroot: &Clroot) -> Result<Connection, Error> {
+        match clroot {
+            Clroot::ConnectByShell {
+                shell,
+                host,
+                user,
+                port,
+                ..
+            } => {
+                let cmd = {
+                    let prefs = self.client.prefs().borrow();
+                    shell::command(&prefs, shell, host, user.as_deref(), port.as_deref())
+                };
+                shell::connect(self.endpoint().clone(), cmd, self.half_duplex()).await
+            }
+            Clroot::ConnectBySocket { .. } => Err(Error::Fatal(format!(
+                "Socket connections are not supported yet: {clroot}"
+            ))),
+            Clroot::ConnectLocal(_) => Err(Error::Fatal(
+                "Internal error: a connection to a local root".into(),
+            )),
         }
     }
 

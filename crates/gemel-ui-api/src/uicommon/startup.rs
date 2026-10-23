@@ -520,12 +520,12 @@ impl Ui {
         if !(self.init_complete && num_roots > 1) {
             return Ok(());
         }
-        // Remote roots come with milestone 3; local ones are always
-        // connected.
-        let num_conn = self
-            .roots
-            .as_ref()
-            .map_or(0, |r| r.list().iter().filter(|r| r.is_local()).count());
+        let mut num_conn = 0;
+        for r in self.roots.iter().flat_map(Roots::list) {
+            if self.rpc.is_root_connected(r).await {
+                num_conn += 1;
+            }
+        }
         if num_conn < num_roots {
             self.init_roots(display_wait_message).await?;
         }

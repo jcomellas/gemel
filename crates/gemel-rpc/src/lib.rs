@@ -10,9 +10,9 @@
 //! [`connection`] connections (packets, message ids, flow control, an
 //! in-memory one for tests), [`host`] the state a host keeps for its roots,
 //! [`protocol`] the byte-exact pieces of messages, [`handshake`] the
-//! version handshake, [`server`] a server's command loop, and [`runtime`]
-//! the engine thread. The transports (ssh and sockets) come later in
-//! milestone 3.
+//! version handshake, [`server`] a server's command loop, [`shell`]
+//! connections through ssh, and [`runtime`] the engine thread. Sockets
+//! come later in milestone 3.
 
 pub mod connection;
 pub mod handshake;
@@ -22,4 +22,5 @@ pub mod registry;
 pub mod root;
 pub mod runtime;
 pub mod server;
+pub mod shell;
 pub mod terminal;

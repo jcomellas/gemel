@@ -131,8 +131,8 @@ fn read_text(r: &mut Reader<'_>) -> umarshal::Result<String> {
 ///
 /// A remote root's server canonicalises its path and names itself
 /// (`canonizeOnServer`), over the connection the client already has to it
-/// (`ClientConn.ofClrootConncheck`), which is then registered under the
-/// canonical root. Making the connection comes later in milestone 3.
+/// (`ClientConn.ofClrootConncheck`) or one it opens, which is then
+/// registered under the canonical root.
 pub async fn canonize_root(rpc: &Rpc, clroot: &Clroot) -> Result<Root, Error> {
     let path = match clroot {
         Clroot::ConnectLocal(s) => {
@@ -144,18 +144,29 @@ pub async fn canonize_root(rpc: &Rpc, clroot: &Clroot) -> Result<Root, Error> {
         }
         Clroot::ConnectByShell { path, .. } | Clroot::ConnectBySocket { path, .. } => path,
     };
-    let Some(conn) = rpc.connection_checked(clroot).await else {
-        return Err(Error::Fatal(format!(
-            "Remote roots are not supported yet: {clroot}"
-        )));
+    let (conn, opened) = match rpc.connection_checked(clroot).await {
+        Some(conn) => (conn, false),
+        None => (rpc.open_connection(clroot).await?, true),
     };
     let arg = (path.as_ref().map(|s| s.as_bytes().to_vec()), true);
-    let (host, fspath) = conn.call_host(&CANONIZE_ON_SERVER, arg).await?;
+    let (host, fspath) = match conn.call_host(&CANONIZE_ON_SERVER, arg).await {
+        Ok(r) => r,
+        Err(e) => {
+            if opened {
+                conn.close();
+            }
+            return Err(e);
+        }
+    };
     let root = Root {
         host: Host::Remote(host),
         fspath,
     };
-    rpc.name_connection(clroot.clone(), root.clone(), conn);
+    if opened {
+        rpc.register_connection(clroot.clone(), root.clone(), conn);
+    } else {
+        rpc.name_connection(clroot.clone(), root.clone(), conn);
+    }
     Ok(root)
 }
 
