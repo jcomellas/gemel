@@ -1032,6 +1032,15 @@ async fn process_transfer_instruction(
     .await
 }
 
+/// `rsyncReg`: the region rsync transfers share on a host.
+struct RsyncReg(std::rc::Rc<crate::region::Region>);
+
+impl Default for RsyncReg {
+    fn default() -> Self {
+        RsyncReg(std::rc::Rc::new(crate::region::Region::new(40 * 1024)))
+    }
+}
+
 /// `transferFileContents`, on the destination's host: receives a fork from
 /// the source over `conn_from`, as rsync deltas when both files are big
 /// enough and there is an old file to start from.
@@ -1052,57 +1061,69 @@ async fn transfer_file_contents(
     let use_rsync = *host.prefs().borrow().read(&RSYNC_ACTIVATED)
         && rsync::above_rsync_threshold(dest_size)
         && rsync::above_rsync_threshold(size_from);
-    let block_info = if use_rsync {
-        let (fspath, path) = (a.fspath_to.clone(), a.real_path_to.clone());
-        Some(
-            exclusive::now(move || {
-                let mut f = open_file_in(&fspath, &path, kind, "preprocessing file")?;
-                rsync::preprocess(&mut f, size_from, dest_size)
-            })
-            .await?,
-        )
+    // `rsyncThrottle`: rsync transfers share a region, each counting for
+    // the size of its block information.
+    let transfer = async {
+        let block_info = if use_rsync {
+            let (fspath, path) = (a.fspath_to.clone(), a.real_path_to.clone());
+            Some(
+                exclusive::now(move || {
+                    let mut f = open_file_in(&fspath, &path, kind, "preprocessing file")?;
+                    rsync::preprocess(&mut f, size_from, dest_size)
+                })
+                .await?,
+            )
+        } else {
+            None
+        };
+        // The transfer is aborted on error only if it hasn't started.
+        if kind != FileKind::Ress {
+            abort_check(&host, a.id)?;
+        }
+        let receiving = Receiving {
+            ctx,
+            fspath_to: a.fspath_to.clone(),
+            path_to: a.path_to.clone(),
+            real_path_to: a.real_path_to.clone(),
+            kind,
+            rsync: block_info
+                .as_ref()
+                .map(|b| rsync::Decompressor::new(b.block_size)),
+            out: None,
+            reference: None,
+            progress: Box::new(transfer_progress(&host, a.id, kind)),
+            done: false,
+        };
+        let file_id = conn_from.endpoint().new_msg_id();
+        let receiving = Arc::new(std::sync::Mutex::new(receiving));
+        host.state::<Transfers>()
+            .borrow_mut()
+            .0
+            .insert(file_id, receiving.clone());
+        let args = CompressArgs {
+            block_info,
+            fspath_from: a.fspath_from.clone(),
+            path_from: a.path_from.clone(),
+            kind,
+            size_from,
+            id: a.id,
+            file_id: i64::from(file_id),
+        };
+        let result = conn_from.call(&COMPRESS, args).await;
+        host.state::<Transfers>().borrow_mut().0.remove(&file_id);
+        let closed =
+            exclusive::now(move || receiving.lock().unwrap_or_else(|e| e.into_inner()).close())
+                .await;
+        result.and(closed)
+    };
+    if use_rsync {
+        let region = host.state::<RsyncReg>().borrow().0.clone();
+        region
+            .run(rsync::memory_footprint(size_from, dest_size), transfer)
+            .await
     } else {
-        None
-    };
-    // The transfer is aborted on error only if it hasn't started.
-    if kind != FileKind::Ress {
-        abort_check(&host, a.id)?;
+        transfer.await
     }
-    let receiving = Receiving {
-        ctx,
-        fspath_to: a.fspath_to.clone(),
-        path_to: a.path_to.clone(),
-        real_path_to: a.real_path_to.clone(),
-        kind,
-        rsync: block_info
-            .as_ref()
-            .map(|b| rsync::Decompressor::new(b.block_size)),
-        out: None,
-        reference: None,
-        progress: Box::new(transfer_progress(&host, a.id, kind)),
-        done: false,
-    };
-    let file_id = conn_from.endpoint().new_msg_id();
-    let receiving = Arc::new(std::sync::Mutex::new(receiving));
-    host.state::<Transfers>()
-        .borrow_mut()
-        .0
-        .insert(file_id, receiving.clone());
-    let args = CompressArgs {
-        block_info,
-        fspath_from: a.fspath_from.clone(),
-        path_from: a.path_from.clone(),
-        kind,
-        size_from,
-        id: a.id,
-        file_id: i64::from(file_id),
-    };
-    let result = conn_from.call(&COMPRESS, args).await;
-    host.state::<Transfers>().borrow_mut().0.remove(&file_id);
-    let closed =
-        exclusive::now(move || receiving.lock().unwrap_or_else(|e| e.into_inner()).close())
-            .await;
-    result.and(closed)
 }
 
 /// `transferFile`'s argument (`mfinishExternalTransfer`).
