@@ -355,14 +355,13 @@ fn moves_propagate_like_ocaml() {
     }
 }
 
-/// A merge runs the merge program. (Not yet with a remote root: phase 5
-/// of milestone 3.)
+/// A merge runs the merge program.
 #[cfg(unix)]
 #[test]
 fn merges_propagate_like_ocaml() {
     let prefs = ["merge = Name README -> cat CURRENT1 CURRENT2 > NEW"];
-    let local = [Via::Direct, Via::Loopback];
-    let failed = sync_like_ocaml_via(&local, "both changed", &prefs, build_tree, |a, b| {
+    let ways = Via::ALL;
+    let failed = sync_like_ocaml_via(&ways, "both changed", &prefs, build_tree, |a, b| {
         write(a, "README", "a's version\n", T0 + 20.0);
         write(b, "README", "b's version\n", T0 + 30.0);
         write(a, "new-a", "new in a", T0 + 20.0);
@@ -371,7 +370,7 @@ fn merges_propagate_like_ocaml() {
     assert_eq!(failed, Vec::<String>::new());
     // Reconciliation proposes no merge when a side is deleted (it is a
     // conflict, skipped), but the user may ask for one.
-    sync_like_ocaml_via(&local, "one deleted", &prefs, build_tree, |a, b| {
+    sync_like_ocaml_via(&ways, "one deleted", &prefs, build_tree, |a, b| {
         write(a, "README", "a's version\n", T0 + 20.0);
         std::fs::remove_file(b.join("README")).unwrap();
     })

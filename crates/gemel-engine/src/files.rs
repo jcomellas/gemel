@@ -1604,8 +1604,9 @@ fn quotes(f: &Fspath) -> String {
 }
 
 /// `Files.diff`: runs the `diff` command on the two versions of a file and
-/// shows the result (`show_diff`, with the command), if any. Only between
-/// local roots so far.
+/// shows the result (`show_diff`, with the command), if any. A remote
+/// root's version is first copied next to the local one, as a temporary
+/// file.
 #[allow(clippy::too_many_arguments)]
 pub async fn diff(
     rpc: &Rpc,
@@ -1616,40 +1617,110 @@ pub async fn diff(
     path2: &Path<Global>,
     ui2: &UpdateItem,
     show_diff: &mut dyn FnMut(&str, &str),
-    _id: FileId,
+    id: FileId,
 ) -> Result<(), Error> {
-    let ((desc1, _, _), (desc2, _, _)) = crate::common::file_infos(ui1, ui2)?;
-    if !(root1.is_local() && root2.is_local()) {
-        return Err(Error::Fatal(
-            "Diffing files on remote hosts is not supported yet".to_owned(),
-        ));
-    }
-    let host = rpc.local_host();
-    let p1 = update::translate_path_local(host, &root1.fspath, path1)?;
-    let p2 = update::translate_path_local(host, &root2.fspath, path2)?;
-    let (f1, f2) = (root1.fspath.concat(&p1), root2.fspath.concat(&p2));
+    let ((desc1, fp1, ress1), (desc2, fp2, ress2)) = crate::common::file_infos(ui1, ui2)?;
     let template = rpc.client_host().prefs().borrow().read(&DIFF_CMD).clone();
-    let cmd = if template.contains("NEWER") {
-        let (newer, older) = if desc1.time() > desc2.time() {
-            (&f1, &f2)
+    let mut display_diff = async |f1: &Fspath, f2: &Fspath| -> Result<(), Error> {
+        let cmd = if template.contains("NEWER") {
+            let (newer, older) = if desc1.time() > desc2.time() {
+                (f1, f2)
+            } else {
+                (f2, f1)
+            };
+            template
+                .replace("OLDER", &quotes(older))
+                .replace("NEWER", &quotes(newer))
+        } else if !template.contains("CURRENT1") {
+            format!("{template} {} {}", quotes(f1), quotes(f2))
         } else {
-            (&f2, &f1)
+            template
+                .replace("CURRENT1", &quotes(f1))
+                .replace("CURRENT2", &quotes(f2))
         };
-        template
-            .replace("OLDER", &quotes(older))
-            .replace("NEWER", &quotes(newer))
-    } else if !template.contains("CURRENT1") {
-        format!("{template} {} {}", quotes(&f1), quotes(&f2))
-    } else {
-        template
-            .replace("CURRENT1", &quotes(&f1))
-            .replace("CURRENT2", &quotes(&f2))
+        let (_, result) = crate::external::run_external_program(&cmd).await?;
+        if !result.is_empty() {
+            show_diff(&cmd, &result);
+        }
+        Ok(())
     };
-    let (_, result) = crate::external::run_external_program(&cmd).await?;
-    if !result.is_empty() {
-        show_diff(&cmd, &result);
+    let host = rpc.local_host();
+    // The local file, and where the remote one is copied next to it.
+    let diff_paths = |fspath: &Fspath, path: &Path<Global>| {
+        let ctx = Ctx::of(host)?;
+        let local = update::translate_path_local(host, fspath, path)?;
+        let (working_dir, real) =
+            fspath.find_working_dir(&local, ctx.follow.test(local.as_bytes()))?;
+        let temp = os::temp_path(
+            false,
+            &working_dir,
+            &real.add_suffix_to_final_name(b"-diff"),
+            &ctx.temp_names,
+            &ctx.fs,
+        )?;
+        Ok::<_, Error>((ctx, working_dir, real, temp))
+    };
+    match (root1.is_local(), root2.is_local()) {
+        (true, true) => {
+            let p1 = update::translate_path_local(host, &root1.fspath, path1)?;
+            let p2 = update::translate_path_local(host, &root2.fspath, path2)?;
+            display_diff(&root1.fspath.concat(&p1), &root2.fspath.concat(&p2)).await
+        }
+        (true, false) => {
+            let (ctx, working_dir, real, temp) = diff_paths(&root1.fspath, path1)?;
+            os::delete(&working_dir, &temp, &ctx.fs)?;
+            let p2 = rpc.call_root(&TRANSLATE_PATH, root2, path2.clone()).await?;
+            let source = Source {
+                desc: desc1.set_length(desc2.length()),
+                fp: fp2,
+                stamp: None,
+                ress: ress2,
+            };
+            copy::file(
+                rpc,
+                root2,
+                &p2,
+                root1,
+                &working_dir,
+                &temp,
+                &real,
+                Replacing::Copy,
+                &source,
+                id,
+            )
+            .await?;
+            display_diff(&working_dir.concat(&real), &working_dir.concat(&temp)).await?;
+            os::delete(&working_dir, &temp, &ctx.fs)
+        }
+        (false, true) => {
+            // Unlike the other way round, OCaml doesn't delete the
+            // temporary file first; the copy replaces it.
+            let (ctx, working_dir, real, temp) = diff_paths(&root2.fspath, path2)?;
+            let p1 = rpc.call_root(&TRANSLATE_PATH, root1, path1.clone()).await?;
+            let source = Source {
+                desc: desc2.set_length(desc1.length()),
+                fp: fp1,
+                stamp: None,
+                ress: ress1,
+            };
+            copy::file(
+                rpc,
+                root1,
+                &p1,
+                root2,
+                &working_dir,
+                &temp,
+                &real,
+                Replacing::Copy,
+                &source,
+                id,
+            )
+            .await?;
+            display_diff(&working_dir.concat(&temp), &working_dir.concat(&real)).await?;
+            os::delete(&working_dir, &temp, &ctx.fs)
+        }
+        (false, false) => Err(internal("diffing files on two remote roots")),
     }
-    Ok(())
 }
 
 // ---- Listing ----
@@ -1987,7 +2058,8 @@ fn show_status(s: crate::external::ProcessStatus) -> String {
 /// `Files.merge`: runs the `merge` program on the two versions of a file
 /// (and the last synchronised one, if a backup of it is found), shows the
 /// result (`show_merge` must agree, or the merge is cancelled), and copies
-/// what it made back to both replicas. Only between local roots so far.
+/// what it made back to both replicas. The merge happens next to the
+/// local root's version, so the roots are swapped if the first is remote.
 #[allow(clippy::too_many_arguments)]
 pub async fn merge(
     rpc: &Rpc,
@@ -2000,10 +2072,13 @@ pub async fn merge(
     id: FileId,
     show_merge: &mut ShowMerge<'_>,
 ) -> Result<(), Error> {
-    if !(root1.is_local() && root2.is_local()) {
-        return Err(Error::Fatal(
-            "Merging files on remote hosts is not supported yet".to_owned(),
-        ));
+    let (root1, path1, ui1, root2, path2, ui2) = if root1.is_local() {
+        (root1, path1, ui1, root2, path2, ui2)
+    } else {
+        (root2, path2, ui2, root1, path1, ui1)
+    };
+    if !root1.is_local() {
+        return Err(internal("merging files on two remote roots"));
     }
     let host = rpc.local_host();
     let ctx = Ctx::of(host)?;

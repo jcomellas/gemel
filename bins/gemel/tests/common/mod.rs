@@ -148,15 +148,43 @@ fn ocaml_banner() -> Option<String> {
     Some(format!("Unison {v}"))
 }
 
-/// A line with the pair's directory shown as `S`, the programs' names and
-/// versions as `NAME`, and times as `T`. The summary's time is kept apart
-/// (`clock`), to be compared within a few seconds.
+/// The archive hash in temporary files' names (`.unison.f.<hash>.unison.tmp`),
+/// which depends on the roots, as `H`.
+fn temp_hashes(l: &str) -> String {
+    const TMP: &str = ".unison.tmp";
+    let mut out = String::new();
+    let mut rest = l;
+    while let Some(i) = rest.find(TMP) {
+        let (before, after) = rest.split_at(i);
+        let hashed = before.len() > 33
+            && before.as_bytes()[before.len() - 33] == b'.'
+            && before[before.len() - 32..]
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit());
+        if hashed {
+            out.push_str(&before[..before.len() - 32]);
+            out.push('H');
+        } else {
+            out.push_str(before);
+        }
+        out.push_str(TMP);
+        rest = &after[TMP.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A line with the pair's directory shown as `S`, temporary files' hashes
+/// as `H`, the programs' names and versions as `NAME`, and times as `T`.
+/// The summary's time is kept apart (`clock`), to be compared within a few
+/// seconds.
 pub fn normalized(line: &str, pair: &Pair, banners: &[String]) -> (String, Option<u32>) {
     let canonical = std::fs::canonicalize(pair.base()).unwrap();
     let mut l = line.to_owned();
     for n in [canonical.to_str().unwrap(), pair.base().to_str().unwrap()] {
         l = l.replace(n, "S");
     }
+    l = temp_hashes(&l);
     for b in banners {
         if let Some(rest) = l.strip_prefix(b.as_str()) {
             l = format!("NAME{rest}");
