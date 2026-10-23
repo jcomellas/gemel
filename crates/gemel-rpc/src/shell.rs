@@ -18,19 +18,13 @@
 
 use std::process::Stdio;
 use std::rc::Rc;
-use std::time::Duration;
 
 use gemel_base::prefs::Prefs;
 use gemel_base::util::{self, Error, MY_MAJOR_VERSION, MY_NAME};
 use gemel_fs::system::SysError;
 
-use crate::connection::{
-    self, ADD_VERSION_NO, Connection, Endpoint, Output, SERVER_CMD, SSH_ARGS, SSH_CMD,
-};
+use crate::connection::{ADD_VERSION_NO, Connection, Endpoint, SERVER_CMD, SSH_ARGS, SSH_CMD};
 use crate::handshake::{self, RPC_SERVER_CMDLINE_OVERRIDE};
-
-/// How long the handshake may take (`initConnection`'s timeout).
-const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The server's command, as the shell runs it on the other host:
 /// `servercmd` (or `gemel`), with the major version if `addversionno`.
@@ -107,28 +101,9 @@ pub async fn connect(
     let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return Err(Error::Fatal("Internal error: the shell's pipes".into()));
     };
-    let mut input = handshake::reader(Box::new(stdout));
-    let mut output: Output = Box::new(stdin);
-    let version = tokio::time::timeout(
-        NEGOTIATION_TIMEOUT,
-        handshake::client_handshake(&mut input, &mut output, || {}),
-    )
-    .await
-    .unwrap_or_else(|_| {
-        Err(Error::Fatal(
-            "Timed out negotiating connection with the server".into(),
-        ))
-    });
-    let version = match version {
-        Ok(v) => v,
-        Err(e) => {
-            // Closing the pipes ends the shell.
-            drop((input, output, child));
-            return Err(e);
-        }
-    };
-    let conn = connection::start_client(endpoint, Box::new(input), output, half_duplex);
-    conn.set_version(version);
+    // If the handshake fails, closing the pipes ends the shell.
+    let conn = handshake::init_connection(endpoint, Box::new(stdout), Box::new(stdin), half_duplex)
+        .await?;
     // Kept until the connection closes. (Its handlers may run as the
     // engine thread ends, so this one starts nothing.)
     conn.at_close(move || drop(child));
@@ -138,6 +113,7 @@ pub async fn connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::connection;
 
     fn prefs(set: &[&str]) -> Prefs {
         let mut p = Prefs::new();

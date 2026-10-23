@@ -25,11 +25,13 @@
 //! start over with the handshake above (`checkServerUpgrade`).
 
 use std::pin::Pin;
+use std::rc::Rc;
+use std::time::Duration;
 
 use gemel_base::util::{self, Error, escaped};
 use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncWriteExt, BufReader};
 
-use crate::connection::{BUFFER_SIZE, Input, Output, lost};
+use crate::connection::{self, BUFFER_SIZE, Connection, Endpoint, Input, Output, lost};
 use crate::protocol::{self, INT_SIZE, RPC_SUPPORTED_VERSIONS};
 
 /// What the handshake, then the connection, reads from (OCaml's
@@ -448,6 +450,36 @@ pub async fn client_handshake(
     let header = check_header(r).await?;
     let header = check_server_upgrade(r, w, header).await?;
     check_server_version(r, w, header).await
+}
+
+/// How long the handshake may take (`initConnection`'s timeout).
+const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// `initConnection`: the client's side of the handshake on a transport's
+/// `input` and `output`, within OCaml's 120 seconds, then the client's
+/// side of a connection over them, served by `endpoint` (see
+/// [`connection::start_client`]). If the handshake fails, the transport is
+/// dropped, which closes it.
+pub async fn init_connection(
+    endpoint: Rc<Endpoint>,
+    input: Input,
+    mut output: Output,
+    half_duplex: bool,
+) -> Result<Connection, Error> {
+    let mut input = reader(input);
+    let version = tokio::time::timeout(
+        NEGOTIATION_TIMEOUT,
+        client_handshake(&mut input, &mut output, || {}),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(Error::Fatal(
+            "Timed out negotiating connection with the server".into(),
+        ))
+    })?;
+    let conn = connection::start_client(endpoint, Box::new(input), output, half_duplex);
+    conn.set_version(version);
+    Ok(conn)
 }
 
 #[cfg(test)]
