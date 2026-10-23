@@ -70,7 +70,10 @@ jobs:
       # is checked against itself. Then a gemel server, over ssh, with each
       # client: checked against the same client with the pinned source as
       # its server, with items one at a time, then concurrently, as clients
-      # run them by default.
+      # run them by default. Then a gemel client with each server (2.52 and
+      # 2.53 also in their compatibility mode), and gemel at both ends,
+      # against the pinned client with the same server. (A gemel client
+      # runs items one at a time until phase 5.)
       - id: ocaml
         run: echo "version=$(ocamlopt -version)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
@@ -114,6 +117,15 @@ jobs:
                 --candidate releases/unison-$v --candidate-server target/debug/gemel --count 20
             done
           done
+          oracle --remote ssh --reference unison-src/src/unison --candidate target/debug/gemel \
+            --candidate-server unison-src/src/unison --count 50
+          for v in 2.52.1 2.53.8; do
+            for old in "" --old-server; do
+              oracle --remote ssh $old --reference unison-src/src/unison --reference-server releases/unison-$v \
+                --candidate target/debug/gemel --candidate-server releases/unison-$v --count 20
+            done
+          done
+          oracle --remote ssh --reference unison-src/src/unison --candidate target/debug/gemel --count 50
         shell: bash
       # Outcomes on a socket for Windows, still the reference's.
       - run: cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-socket.txt --candidate unison-src/src/unison
@@ -128,12 +140,12 @@ jobs:
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
       # The gemel program, in batch and interactive mode, against `unison -ui text`,
-      # and as a server, against `unison -server`.
+      # as a server, against `unison -server`, and as a client of broken servers.
       # (Watch mode: gemel finds its watcher next to it, which `-p gemel`
       # doesn't build; OCaml its own on PATH, where the tests put it.)
       - run: |
           cargo build --locked -p gemel-fsmonitor
-          cargo test --locked -p gemel --test batch --test interactive --test terminal --test repeat --test watch --test server
+          cargo test --locked -p gemel --test batch --test interactive --test terminal --test repeat --test watch --test server --test client
         env:
           GEMEL_REFERENCE_UNISON: ${{ github.workspace }}/unison-src/src/unison
           GEMEL_REFERENCE_FSMONITOR: ${{ github.workspace }}/unison-src/fsmonitor-ocaml

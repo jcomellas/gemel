@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 3a, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 3b, 2026-10-22) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -276,7 +276,8 @@ It is split in two, since gemel's server can be tested against OCaml clients bef
   - spawned connections;
   - `canonizeRoot` opening them, and `isRootConnected`;
   - `copythreshold = -1` sent to servers (phase 2b's notes);
-  - tests: gemel clients against OCaml servers and against gemel's; the arguments the shim records compared with OCaml's; the user interface's suites with a remote root (phase 2c's notes).
+  - tests: gemel clients against OCaml servers and against gemel's; the arguments the shim records compared with OCaml's.
+- **3c, the user interface's suites with a remote root** (phase 2c's notes): `gemel-ui-api`'s `startup` and `session`, and `bins/gemel`'s, about 56 tests. They were part of 3b, which grew large enough without them.
 
 **Notes (phase 3a, 2026-10-22):**
 - **The server:** `gemel -server` (with `__new-rpc-mode`, an anonymous argument, ignored) creates the Unison directory, changes to `HOME`, and serves on standard input and output with a host of its own: every preference and command registered, the preferences at their defaults until the client sends its own (`installPrefs`), its trace marked as a server's.
@@ -299,6 +300,23 @@ It is split in two, since gemel's server can be tested against OCaml clients bef
   - whole syncs from the oracle harness, an OCaml client with a gemel server against the same client with `8772d26` as its server: on Linux, 50 of 50 scenarios with an `8772d26` client, and 30 of 30 with each of 2.53.8 and 2.52.1; on macOS, 40 of 40 with Homebrew's 2.54.0, and 60 of 60 with `--concurrent`. CI runs 50, then 20 for each release, each way;
   - a larger sync by hand, concurrently, with an OCaml client: 700 files, 3 to 5.5 MB files edited in the middle (rsync), moves, and contents in several places. Gemel's server and OCaml's leave the same trees, times and permissions, copy the same 20 files rather than send them, and OCaml's recheck of each result agrees.
 - **Left for phase 4:** `-socket`, and with it `-killserver`, which only socket servers read.
+
+**Notes (phase 3b, 2026-10-22):**
+- **The handshake's client side** (`gemel_rpc::handshake`): the header read a byte at a time against the current one and both old ones; a server in its compatibility mode upgraded (its magic packet read, its write token taken, the packet sent back, and the handshake started over); `VERSIONS` parsed as OCaml parses it, the newest common version sent, and `OK` or `NOK` read. The end of the input while the client waits for the server is a lost connection, as in OCaml.
+- **Spawned connections** (`gemel_rpc::shell`, `buildShellConnection` without a terminal):
+  - ssh's command line as OCaml builds it: `sshcmd` (not split), `-l user`, `-p port`, the host, `-e none`, `sshargs` and the server's command, each split into words, with backslash escapes;
+  - the server's command is `servercmd`, or `gemel`, with `-<major version>` if `addversionno` (`gemel-0.1`), then `-server __new-rpc-mode` (design decision 6);
+  - ssh starts with `SIGINT` blocked (`gemel_fs::signal::block_interrupt_in_child`, the one piece that needs `unsafe`), its standard error is the client's, and it is waited for once the connection closes;
+  - the handshake has OCaml's 120 seconds. The engine thread's runtime now has tokio's I/O and time drivers, for the process and the timeout.
+  - **Left for phase 4:** a pseudo-terminal for ssh's prompts, and killing ssh as the client exits while ssh talks to the terminal (OCaml's `at_exit` handler). Without a terminal, ssh ends when its input does.
+- **`canonizeRoot`** opens a connection when there is none for the root, and registers it under the canonical root; a socket root says sockets aren't supported yet. `connectRoots` counts a remote root as connected while its connection is up (`isRootConnected`), so a repeat or watch cycle reconnects only once it is lost.
+- **"Waiting for changes from server":** `findUpdates` runs the roots with OCaml's waiting action (`allRootsMapWithWaitingAction`), which shows that status once the client's own scan has ended and the server's hasn't.
+- **External copying:** a remote host gets the client's preferences with `copythreshold = -1`, so an OCaml server never hands a file to `copyprog`; a profile that turns it on gets the warning that it is ignored, once.
+- **The oracle:** ssh's arguments are compared (the server's path aside), and `--old-server` drops `__new-rpc-mode` in the shim, so that 2.52 and 2.53 start in their compatibility mode.
+- **Against OCaml:**
+  - every way a shell or a server can be wrong, with OCaml's client in the same place (`bins/gemel/tests/client.rs`): no shell, a shell that prints something else or dies, an old server with and without the upgrade, `NOK`, versions it doesn't speak, a refused version;
+  - whole syncs, a gemel client against `8772d26`'s client with the same server: on Linux, 30 of 30 scenarios with each of `8772d26`, 2.53.8 and 2.52.1 as the server, 10 of 10 with 2.53.8 and 2.52.1 in their compatibility mode, and 30 of 30 with gemel at both ends; on macOS, 20 of 20 against Homebrew's 2.54.0 and with gemel at both ends.
+  - With `--concurrent`, a gemel client agrees on trees and archives but not always on its output (18 of 20), since it runs items one at a time until phase 5; CI doesn't run that pairing.
 
 ### Phase 4: sockets, prompts and the session (`remote.ml`'s sockets, `terminal.ml`, `pty.c`, `uicommon`'s `openConnection*`, ~0.9k)
 

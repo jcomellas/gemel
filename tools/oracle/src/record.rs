@@ -222,6 +222,7 @@ pub fn parse(text: &str) -> Result<Recording, String> {
                 unison_dir,
                 server_dir,
                 recheck,
+                shell_args: String::new(),
             },
         ));
     }
@@ -338,6 +339,7 @@ pub fn portable(o: &Outcome, flavour: Flavour) -> Outcome {
         unison_dir: names(&o.unison_dir),
         server_dir: names(&o.server_dir),
         recheck: step(&o.recheck),
+        shell_args: o.shell_args.clone(),
     }
 }
 
@@ -363,6 +365,7 @@ mod tests {
             unison_dir: vec!["ar0123abcd".into(), "default.prf".into()],
             server_dir: Vec::new(),
             recheck: step(Some(1), "skipped: f"),
+            shell_args: String::new(),
         }
     }
 

@@ -69,6 +69,7 @@ scripts/oracle.sh /path/to/unison --count 30
 | `--remote ssh\|socket` | Reach replica `b` through a server (see below) |
 | `--reference-server PATH`, `--candidate-server PATH` | Each side's server (default: its client) |
 | `--concurrent` | Let items run concurrently, and compare the output without its order |
+| `--old-server` | Start ssh servers without `__new-rpc-mode` (their compatibility mode) |
 
 A scenario that differs prints its operations and the first difference in
 each compared item, and its `<seed>-reference` and `<seed>-candidate`
@@ -86,10 +87,13 @@ same machine, as milestone 3 needs (`docs/milestone-3-plan.md`):
 
 - **`ssh`:** the root is `ssh://server/b`, and `-sshcmd` is a shim that
   runs the server command here instead of on a host. It records its
-  arguments in `remote/argv` and drops what precedes the server command
+  arguments in `remote/argv`, which are compared too (with the server's
+  path as `<server>`), and drops what precedes the server command
   (`[-l user] [-p port] host -e none`). `-servercmd` names the server.
-  The shim is a shell script, so this is Unix only, and the paths must
-  have no spaces, since OCaml splits `servercmd` on them.
+  With `--old-server`, it also drops `__new-rpc-mode`, so that a 2.52 or
+  2.53 server starts in its compatibility mode, and the client has to
+  upgrade it. The shim is a shell script, so this is Unix only, and the
+  paths must have no spaces, since OCaml splits `servercmd` on them.
 - **`socket`:** the root is `socket://127.0.0.1:<port>/b`, served by a
   fresh `-socket` server for each sync. The harness waits for "server
   started" and kills the server afterwards: the client's preferences
