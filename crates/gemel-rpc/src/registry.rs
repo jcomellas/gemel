@@ -945,6 +945,9 @@ impl Rpc {
             RootHost::Remote(_) => {
                 let conn = self.conns.borrow().of_root(root);
                 if let Some(c) = conn {
+                    // Forgotten at once, as in OCaml (`clientConnClose`),
+                    // though what was queued still goes out.
+                    self.conns.borrow_mut().unregister(&c);
                     c.close();
                 }
             }
