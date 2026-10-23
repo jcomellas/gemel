@@ -19,6 +19,7 @@ pub mod name_map;
 pub mod negotiate;
 pub mod pred;
 pub mod recon;
+pub mod region;
 pub mod sortri;
 pub mod stasher;
 pub mod transfer;
