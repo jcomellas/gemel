@@ -12,12 +12,13 @@
 //! reaches the whole foreground process group, and would end the
 //! connection before the client has cleaned up.
 //!
-//! Not yet: a pseudo-terminal for ssh's password and passphrase prompts,
-//! and killing ssh when the client exits while it talks to the terminal
-//! (both phase 4). Without a terminal, ssh ends when its input does.
+//! Since ssh doesn't get Ctrl-C, the client ends it as it exits
+//! ([`end_shells`]), should it still run: ssh ends when its input does,
+//! but not while it waits at the terminal for a password.
 
 use std::process::Stdio;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use gemel_base::prefs::Prefs;
 use gemel_base::util::{self, Error, MY_MAJOR_VERSION, MY_NAME};
@@ -80,6 +81,18 @@ pub fn command(
     (program, args)
 }
 
+/// The shells started, by process id, for [`end_shells`].
+static SHELLS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// OCaml's `at_exit end_ssh`, for each shell started: ends those still
+/// running. For the program to call as it exits.
+pub fn end_shells() {
+    let shells = std::mem::take(&mut *SHELLS.lock().unwrap_or_else(|e| e.into_inner()));
+    for pid in shells {
+        gemel_fs::signal::end_child(pid);
+    }
+}
+
 /// `buildShellConnection`: starts the shell for `host` and, over its input
 /// and output, the client's side of a connection served by `endpoint`,
 /// once the handshake is done. When the connection closes, the shell goes
@@ -98,6 +111,9 @@ pub async fn connect(
     let mut child = tokio::process::Command::from(cmd).spawn().map_err(|e| {
         SysError::new("create_process", program.as_bytes(), e).to_fatal("starting shell connection")
     })?;
+    if let Some(pid) = child.id() {
+        SHELLS.lock().unwrap_or_else(|e| e.into_inner()).push(pid);
+    }
     let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return Err(Error::Fatal("Internal error: the shell's pipes".into()));
     };

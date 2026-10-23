@@ -27,7 +27,9 @@ use gemel_ui_api::exit_code::ExitCode;
 
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    std::process::ExitCode::from(run(args) as u8)
+    let code = run(args);
+    gemel_rpc::shell::end_shells();
+    std::process::ExitCode::from(code as u8)
 }
 
 /// `Main.init`, then the interface: the exit code.
