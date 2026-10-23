@@ -3,7 +3,7 @@
 //! With a remote root, replica `b` is reached as OCaml reaches another
 //! host, but on this one:
 //! - over ssh, through a shim given as `-sshcmd`, which runs the server
-//!   command itself instead of on a host;
+//!   command itself instead of on a host (see [`shim`]);
 //! - on a socket, from a server the harness starts for each sync.
 //!
 //! Either way the server has a Unison directory, a home (the work
@@ -21,6 +21,7 @@ use std::thread;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::scenario::{self, Scenario};
+use crate::shim;
 
 /// Preferences for every run: batch mode, no colours, log or big-delete
 /// prompts, and modification times synchronised (so they can be
@@ -61,7 +62,7 @@ pub struct How {
 /// The host names of the two ends (`UNISONLOCALHOSTNAME`) with a remote
 /// root, which archive names and the output depend on.
 const CLIENT_HOST: &str = "client";
-const SERVER_HOST: &str = "server";
+pub const SERVER_HOST: &str = "server";
 
 /// How replica `b` is reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,62 +231,19 @@ impl Drop for SocketServer {
     }
 }
 
-/// The `-sshcmd` shim: it records its arguments, skips what precedes the
-/// server command (`[-l user] [-p port] host -e none`), and runs that
-/// command as the server, with the server's environment and its standard
-/// error in a file of its own.
-///
-/// OCaml kills ssh as it exits (SIGTERM, then SIGKILL), and a server it
-/// reached through ssh then ends on the end of its input. So the server
-/// runs in a subshell, which the kill doesn't reach, and which writes the
-/// server's exit code to `remote/exit` once it has exited: the harness
-/// waits for that before it reads the server's standard error.
-///
-/// OCaml splits `servercmd` on spaces, so the paths it is given must have
-/// none.
-fn ssh_shim(work: &Path, old_server: bool) -> io::Result<PathBuf> {
-    let dir = work.join("remote");
-    let shim = dir.join("ssh");
-    let path = |p: PathBuf| -> io::Result<String> {
-        let s = p.to_str().map(str::to_owned);
-        s.filter(|s| !s.contains([' ', '\'', '"', '\\', '$']))
-            .ok_or_else(|| io::Error::other(format!("{}: not a plain path", p.display())))
-    };
-    let script = format!(
-        "#!/bin/sh\n\
-         # Stands in for ssh: runs the server command here (tools/oracle/src/run.rs).\n\
-         printf '%s\\n' \"$*\" >> {log}\n\
-         while [ $# -gt 0 ] && [ \"$1\" != -e ]; do shift; done\n\
-         shift 2\n\
-         {drop}\
-         # A background command's input is /dev/null, so it comes through fd 3.\n\
-         exec 3<&0\n\
-         (\n\
-         \x20   env UNISON={unison} HOME={home} UNISONLOCALHOSTNAME={SERVER_HOST} \"$@\" <&3 3<&- 2>> {stderr}\n\
-         \x20   code=$?\n\
-         \x20   echo $code > {exit}\n\
-         \x20   exit $code\n\
-         ) &\n\
-         wait $!\n",
-        log = path(dir.join("argv"))?,
-        exit = path(dir.join("exit"))?,
-        unison = path(work.join("unison-server"))?,
-        home = path(work.to_owned())?,
-        stderr = path(dir.join("stderr"))?,
-        drop = if old_server {
-            "n=$#; while [ $n -gt 0 ]; do a=$1; shift; n=$((n - 1)); \
-             [ \"$a\" = __new-rpc-mode ] || set -- \"$@\" \"$a\"; done\n"
+/// `server` as `-servercmd`, which clients split into words at spaces,
+/// a backslash escaping the next character: so it must have neither, and
+/// on Windows its separators are written `/`.
+fn server_cmd(server: &Path) -> io::Result<String> {
+    let s = server.to_str().map(|s| {
+        if cfg!(windows) {
+            s.replace('\\', "/")
         } else {
-            ""
-        },
-    );
-    fs::write(&shim, script)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o755))?;
-    }
-    Ok(shim)
+            s.to_owned()
+        }
+    });
+    s.filter(|s| !s.contains([' ', '\'', '"', '\\', '$']))
+        .ok_or_else(|| io::Error::other(format!("{}: not a plain path", server.display())))
 }
 
 /// The length of the ssh shim's record of the arguments it was given,
@@ -305,19 +263,14 @@ fn run(p: &Pairing, remote: Option<Remote>, how: &How, work: &Path) -> io::Resul
             cmd.arg(work.join("b"));
         }
         Some(Remote::Ssh) => {
-            if !cfg!(unix) {
-                return Err(io::Error::other(
-                    "the ssh shim is a shell script: Unix only",
-                ));
-            }
             fs::write(&server_stderr, "")?;
             let _ = fs::remove_file(work.join("remote").join("exit"));
             runs = shim_runs(work);
             cmd.arg(format!("ssh://{SERVER_HOST}/b"))
                 .arg("-sshcmd")
-                .arg(ssh_shim(work, how.old_server)?)
+                .arg(shim::install(work, how.old_server)?)
                 .arg("-servercmd")
-                .arg(&p.server);
+                .arg(server_cmd(&p.server)?);
         }
         Some(Remote::Socket) => {
             let s = SocketServer::start(&p.server, work)?;
@@ -423,7 +376,12 @@ pub fn outcome(
     let recheck = run(reference, remote, how, work)?;
     let mut shell_args = fs::read_to_string(work.join("remote").join("argv")).unwrap_or_default();
     for server in [&p.server, &reference.server] {
-        shell_args = shell_args.replace(&*server.to_string_lossy(), "<server>");
+        // (A replay has no reference.)
+        if let Ok(server) = server_cmd(server)
+            && !server.is_empty()
+        {
+            shell_args = shell_args.replace(&server, "<server>");
+        }
     }
     Ok(Outcome {
         first,
