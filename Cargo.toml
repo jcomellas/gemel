@@ -37,3 +37,13 @@ todo = "deny"
 # held across an await can panic when another task on the thread borrows.
 await_holding_refcell_ref = "deny"
 unimplemented = "deny"
+
+[profile.dev]
+# Line tables keep file:line in backtraces without the full variable debug info.
+debug = "line-tables-only"
+
+[profile.dev.build-override]
+debug = false
+
+[profile.dev.package."*"]
+debug = false
