@@ -9,8 +9,8 @@
 //! moving, each checking first that the target hasn't changed since update
 //! detection, and updating the archives last. Their parts on a root are
 //! root commands, with OCaml's names and encodings. The filesystem work
-//! runs off the engine thread, a host's one piece at a time (see
-//! [`exclusive`]), as OCaml does it synchronously.
+//! runs at once, without yielding, as OCaml's does (see [`exclusive`]),
+//! except a copy between local roots, on another thread.
 //!
 //! Copying a directory copies its children one at a time, in name order,
 //! which is the order OCaml's threads run in between local roots; running
@@ -289,7 +289,7 @@ impl Settings {
     }
 }
 
-/// `prepareCopy` off the engine thread.
+/// `prepareCopy`, with the host's settings.
 async fn prepare_copy_on(
     host: &Host,
     working_dir: &Fspath,
@@ -298,19 +298,16 @@ async fn prepare_copy_on(
 ) -> Result<Option<CopyInfo>, Error> {
     let s = Settings::of(host)?;
     let (wd, p) = (working_dir.clone(), path.clone());
-    exclusive::blocking(host, move || {
-        prepare_copy(&s.ctx, s.copy_on_conflict, &wd, &p, not_default)
-    })
-    .await
+    exclusive::now(move || prepare_copy(&s.ctx, s.copy_on_conflict, &wd, &p, not_default)).await
 }
 
-/// `finishCopy` off the engine thread.
+/// `finishCopy`, with the host's settings.
 async fn finish_copy_on(host: &Host, info: Option<CopyInfo>) -> Result<Option<Path<Local>>, Error> {
     if info.is_none() {
         return Ok(None);
     }
     let ctx = Ctx::of(host)?;
-    exclusive::blocking(host, move || finish_copy(&ctx, info)).await
+    exclusive::now(move || finish_copy(&ctx, info)).await
 }
 
 // ---- Deleting ----
@@ -391,7 +388,7 @@ async fn set_prop_local(
     let ctx = Ctx::of(host)?;
     {
         let (fspath, local, new_desc) = (fspath.clone(), local.clone(), new_desc.clone());
-        exclusive::blocking(host, move || {
+        exclusive::now(move || {
             let (working_dir, real) =
                 fspath.find_working_dir(&local, ctx.follow.test(local.as_bytes()))?;
             fileinfo::set(
@@ -539,7 +536,7 @@ pub static MKDIR: RootCmd<(Fspath, Path<Local>), (bool, Props)> = RootCmd::new(
     |host, _, (working_dir, path)| {
         Box::pin(async move {
             let ctx = Ctx::of(&host)?;
-            exclusive::blocking(&host, move || {
+            exclusive::now(move || {
                 let info = fileinfo::get_basic(false, &working_dir, &path, &|_| false, &ctx.fs)?;
                 if info.typ == Typ::Directory {
                     if !ctx.fs.dont_chmod {
@@ -606,7 +603,7 @@ pub static MAKE_SYMLINK: RootCmd<(Fspath, Path<Local>, Vec<u8>), ()> = RootCmd::
     |host, _, (working_dir, path, link)| {
         Box::pin(async move {
             let ctx = Ctx::of(&host)?;
-            exclusive::blocking(&host, move || {
+            exclusive::now(move || {
                 if os::exists(&working_dir, &path, &ctx.fs)? {
                     os::delete(&working_dir, &path, &ctx.fs)?;
                 }
@@ -646,7 +643,7 @@ async fn perform_rename(
     let plan = {
         let (ctx, source, target) = (ctx.clone(), source.clone(), target.clone());
         let (wd_to, p_to) = (working_dir_to.clone(), path_to.clone());
-        exclusive::blocking(host, move || -> Result<RenamePlan, Error> {
+        exclusive::now(move || -> Result<RenamePlan, Error> {
             let typ_from = fileinfo::get_type(false, &source, &Path::empty(), &|_| false, &ctx.fs)?;
             if typ_from == Typ::Absent {
                 return Err(Error::Transient(format!(
@@ -685,7 +682,7 @@ async fn perform_rename(
     .await?;
     let log = commit_log_name(host);
     let wd_to = working_dir_to.clone();
-    exclusive::blocking(host, move || -> Result<(), Error> {
+    exclusive::now(move || -> Result<(), Error> {
         let mut no_exdev = || Err(Error::Transient("EXDEV".to_owned()));
         let exdev_handler: Option<&mut dyn FnMut() -> Result<(), Error>> =
             if exdev { Some(&mut no_exdev) } else { None };
@@ -935,7 +932,7 @@ async fn setup_target_paths_and_create_parent_directory_local(
     let local = update::translate_path_local(host, fspath, &path)?;
     let ctx = Ctx::of(host)?;
     let (f, l) = (fspath.clone(), local.clone());
-    exclusive::blocking(host, move || create_directories(&ctx, &f, &l, &props)).await?;
+    exclusive::now(move || create_directories(&ctx, &f, &l, &props)).await?;
     setup_target_paths_local(host, fspath, &path)
 }
 
@@ -1056,10 +1053,8 @@ pub static DELETE_SPURIOUS_CHILDREN: RootCmd<(Fspath, Path<Local>, Vec<Name>), (
     |host, _, (fspath, path, names)| {
         Box::pin(async move {
             let s = Settings::of(&host)?;
-            exclusive::blocking(&host, move || {
-                delete_spurious_children(&s.ctx, s.mode, &fspath, &path, &names)
-            })
-            .await
+            exclusive::now(move || delete_spurious_children(&s.ctx, s.mode, &fspath, &path, &names))
+                .await
         })
     },
 );

@@ -185,7 +185,7 @@ pub fn startup_log(pair: &Pair) -> Vec<String> {
 /// A log without the order of its `[END]` lines, when root `b` is
 /// remote: OCaml's client then runs items concurrently, and interleaves
 /// them with the next items' `[BGN]`; gemel's runs them one at a time
-/// until phase 5 of milestone 3. Otherwise, the log as it is.
+/// until phase 5c of milestone 3. Otherwise, the log as it is.
 pub fn ends_unordered(pair: &Pair, log: Vec<String>) -> Vec<String> {
     if !pair.is_remote() {
         return log;

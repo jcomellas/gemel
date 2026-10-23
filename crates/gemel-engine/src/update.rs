@@ -2603,11 +2603,7 @@ pub async fn check_no_updates(
     let temp_names = host.state::<TempNames>().borrow().clone();
     let mut scan = Scan::new(host, fspath, info, temp_names, FpCache::disabled(c))?;
     let mut copy = expected.clone();
-    let (scan, ui_new) = runtime::blocking(move || {
-        let r = scan.build_update_rec(&mut copy, &local_path);
-        (scan, r)
-    })
-    .await;
+    let ui_new = scan.build_update_rec(&mut copy, &local_path);
     for h in scan.hints {
         xferhint::insert_entry(host, h);
     }
