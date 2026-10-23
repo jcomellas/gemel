@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 5c, 2026-10-23) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 6a, 2026-10-23) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -425,13 +425,29 @@ It is split in three, since concurrency changes how the engine yields and wants 
 
 ### Phase 6: Windows and the rest
 
-- **Windows:**
+Phase 6 splits in two (2026-10-23), so that the Windows work, which only CI can run, doesn't hold up the rest:
+
+- **6a, Windows:**
   - ssh with the Windows OpenSSH client, asking at the console, as with OCaml's text interface, which starts it as a plain process (`buildShellConnection` without `termInteract`); ConPTY (`terminal.ml`'s `win_openpty`) is the GUI's, in milestone 4;
-  - sockets.
-  - OCaml's Windows handling where it differs: `kill_noerr` with `SIGKILL`, and path forms on the server.
-- **Matrix:** the recorded outcomes for Windows cover remote scenarios.
-- **A real sshd** in one Linux CI cell (from phase 4).
-- **Odds and ends** found on the way, listed in the earlier phases' notes.
+  - ending ssh as the client exits, as OCaml's `end_ssh` does there: `Unix.kill` only takes `SIGKILL` on Windows (`TerminateProcess`), so the `SIGTERM` before it does nothing;
+  - sockets: service names for ports, as OCaml's `getaddrinfo` takes them. Unix-domain sockets, which OCaml 4.14's `Unix` has on Windows (`afunix.h`) and tokio doesn't, are left out (decided 2026-10-23);
+  - path forms on the server, checked against `fspath.ml`;
+  - the matrix: recorded outcomes over ssh, as over a socket since phase 4a. The ssh shim is a shell script, so a Windows client can't start it: it becomes a program.
+- **6b, the rest:**
+  - a real sshd in one Linux CI cell (from phase 4);
+  - odds and ends found on the way, listed in the earlier phases' notes.
+
+**Notes (phase 6a, 2026-10-23):**
+- **Only CI runs Windows,** where there is no OCaml: what Windows prints and the order it prints it in can't be compared live. Its code is ported from OCaml's sources where it differs, and checked by replays and by gemel against gemel.
+- **ssh as the client exits** (`end_ssh`): on Windows OCaml's `Unix.kill` only takes `SIGKILL`, as `TerminateProcess` with 0, so its `SIGTERM` raises and is ignored: if ssh still runs, it is terminated 10 ms later. The client keeps a handle on each shell it starts, from when it starts it, so that a process id used again by then isn't another's.
+- **Ports by service name** on Windows, through Winsock's `getaddrinfo`, as OCaml's does (it had taken numbers only). Winsock is started before its first use, as OCaml's `Unix` starts it as it loads.
+- **The home directory** on Windows, without `USERPROFILE` or `UNISON`, is `c:/`, as OCaml's `Util.homeDir`; it was the current directory.
+- **Connections on Windows** are made as OCaml's Windows Lwt makes them (`connect`, then waiting for the connection's event and its error), which is what tokio does.
+- **Unix-domain sockets on Windows are left out** (decided 2026-10-23): OCaml 4.14's `Unix` has them where it was built with `afunix.h`, and tokio has none there. A Windows gemel fails as an OCaml without them does ("Can't connect to Unix domain socket on path …").
+- **The server's path forms** on Windows are those of milestone 2's `Fspath` port, which canonizes roots the same way on either side; a Windows server's roots relative to its home are covered by the socket replays.
+- **The ssh shim is a program:** a copy of the harness, which records its arguments, runs the server under a keeper the client's kill doesn't reach, and records its exit code, as the shell script did. It runs on Windows too. A server's path is given to `servercmd` with `/` on Windows, since clients take a backslash there as an escape (`splitIntoWords`).
+- **Recorded outcomes over ssh:** `tools/oracle/recorded/windows-ssh.txt`, 100 Windows-flavour scenarios recorded on Linux with `8772d26` at both ends. Each scenario also has ssh's arguments, so a replay checks them. CI replays it with OCaml on Linux and with gemel on macOS and Windows. OCaml and gemel replay it 100 of 100 on Linux, and gemel on macOS.
+- **With the shim as a program,** the live pairings over ssh agree as before: on macOS, 20 of 20 with a gemel client, with a gemel server concurrently, and in order with a concurrent gemel client; on Linux, 10 of 10 with 2.52.1 and 2.53.8 servers in their compatibility mode, 10 of 10 with a 2.53.8 client, and 20 of 20 with gemel at both ends.
 
 ## Verification
 
