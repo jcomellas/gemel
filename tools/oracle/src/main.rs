@@ -29,6 +29,7 @@
 mod record;
 mod run;
 mod scenario;
+mod shim;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -449,6 +450,10 @@ fn plain(p: PathBuf) -> PathBuf {
 }
 
 fn main() -> ExitCode {
+    // Started by a client as ssh.
+    if let Some((dir, work)) = shim::running_as() {
+        return shim::main(&dir, &work);
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

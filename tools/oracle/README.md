@@ -106,8 +106,10 @@ same machine, as milestone 3 needs (`docs/milestone-3-plan.md`):
   (`[-l user] [-p port] host -e none`). `-servercmd` names the server.
   With `--old-server`, it also drops `__new-rpc-mode`, so that a 2.52 or
   2.53 server starts in its compatibility mode, and the client has to
-  upgrade it. The shim is a shell script, so this is Unix only, and the
-  paths must have no spaces, since OCaml splits `servercmd` on them.
+  upgrade it. The shim is a copy of the harness (`ssh-shim/ssh` beside
+  the work directory), so it runs on Windows too. The server's path must
+  have no spaces, since clients split `servercmd` on them; on Windows it
+  is given with `/`, since they take a backslash as an escape.
 - **`socket`:** the root is `socket://127.0.0.1:<port>/b`, served by a
   fresh `-socket` server for each sync. The harness waits for "server
   started" and kills the server afterwards: the client's preferences
