@@ -384,6 +384,18 @@ It is split in two, since concurrency changes how the engine yields and wants a 
 - **5a:** resuming transfers, and diff and merge with a remote root.
 - **5b:** concurrency, with `exclusive` revisited first.
 
+**Notes (phase 5a, 2026-10-23):**
+- **Resuming** (`validFilePrefix`): the destination keeps the temporary file an interrupted transfer left if it is a file of at least 1 MiB, shorter than the source, and the source starts with it. It asks the source for the digests of that much of its file (`fingerprintSubfile`, 1023 MiB at a time, the last chunk first, as OCaml lists them), and on any failure there transfers the whole file. Then it receives the rest (`` `DATA_APPEND ``), which the source and the destination already handled.
+  - **Gemel didn't answer `fingerprintSubfile` before.** An OCaml destination resuming a transfer from a gemel source got an error back, which it takes to mean nothing can be kept, so it transferred the whole file.
+  - **The tests can't see a resumed transfer in the trees,** which end the same either way. `bins/gemel/tests/transfer.rs` leaves the temporary file with a hard link to it outside the replicas: a resumed transfer completes the linked file, and one that starts again removes it. The file's name holds the destination root's archive hash, so the test leaves one under each root's.
+  - **Onto an old version too,** where the rest comes as rsync deltas against the old file from where the transfer resumes (`DATA_APPEND` moves where both ends read it). Nothing had run that before, since no transfer resumed.
+  - Against Homebrew's 2.54.0 on macOS and `8772d26` on Linux: gemel and OCaml in each role, to the server and to the client, onto a new file and onto an old version, with a prefix of the source, one that isn't, and one too short, all as OCaml at both ends does.
+  - Not tested past 1023 MiB, where the digests come in chunks and their order counts.
+- **Diff with a remote root** copies the remote version next to the local one as a temporary file (`-diff` added to its name), runs the command, and removes it. OCaml's two cases differ, and gemel follows each: with the remote root first, the temporary file isn't removed before the copy, and the arguments come the other way round, so the older version still comes first for `diff -u OLDER NEWER`.
+- **Merge with a remote root** swaps the roots if the first is remote, so the merge happens next to the local version, as OCaml does. Gemel's merge already copied the second root's version over whatever connection it had.
+- **The tests** (`files.rs`, `transport.rs`, `interactive.rs`) now run merges and diffs with a remote root, given first or second (through the command line), against OCaml. Gemel's test helpers now show temporary files' archive hashes as `H`, since the twin pairs' roots differ.
+- `checkForChangesToSource` was already called on the source's root, from phase 3a.
+
 ### Phase 6: Windows and the rest
 
 - **Windows:**
