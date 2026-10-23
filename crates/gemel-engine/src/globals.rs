@@ -23,6 +23,7 @@ use gemel_fs::fspath::Fspath;
 use gemel_rpc::registry::{HostCmd, Rpc};
 use gemel_rpc::root::{self, Host, Root};
 
+use crate::copy;
 use crate::negotiate;
 use crate::pred::{Compiled, Pred};
 
@@ -309,7 +310,9 @@ pub static INSTALL_PREFS: HostCmd<Vec<DumpedPref>, ()> = HostCmd::new(
 
 /// `Globals.propagatePrefs`: sends the client's preferences to the roots'
 /// hosts. Local roots share the client's, except in loopback mode, whose
-/// host would otherwise keep the preferences it was created with.
+/// host would otherwise keep the preferences it was created with. A
+/// remote root's host gets them with external copying off (see
+/// [`copy::without_external_copies`]).
 pub async fn propagate_prefs(rpc: &Rpc, roots: &Roots) -> Result<(), Error> {
     for r in roots.in_canonical_order() {
         if r.is_local() && !rpc.is_loopback() {
@@ -318,7 +321,11 @@ pub async fn propagate_prefs(rpc: &Rpc, roots: &Roots) -> Result<(), Error> {
         let dump = {
             let client = rpc.client_host();
             let features = client.features().borrow();
-            client.prefs().borrow().dump(1, &features)?
+            let mut dump = client.prefs().borrow().dump(1, &features)?;
+            if !r.is_local() {
+                copy::without_external_copies(client, &mut dump, &features)?;
+            }
+            dump
         };
         rpc.call_host(&INSTALL_PREFS, &r.host, dump).await?;
     }
