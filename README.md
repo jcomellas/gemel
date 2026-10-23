@@ -46,8 +46,10 @@ Remote roots work over ssh and on sockets: `gemel -server` serves OCaml
 clients (2.52 on) as an OCaml server does, `gemel -socket <port|path>`
 serves them on a TCP port or a Unix-domain socket, and a gemel client
 syncs with a root over ssh (`ssh://`) or on a socket (`socket://`),
-served by OCaml Unison (2.52 on) or by gemel. As with OCaml's text
-interface, ssh asks for passwords and passphrases at the terminal.
+served by OCaml Unison (2.52 on) or by gemel. A transfer that was
+interrupted resumes from what it left, and diff and merge work with a
+remote root. As with OCaml's text interface, ssh asks for passwords and
+passphrases at the terminal.
 Synchronising xattrs and ACLs, and the GUI (with its own password
 prompts), are still to come.
 
