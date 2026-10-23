@@ -76,9 +76,56 @@ pub type Input = Box<dyn AsyncRead + Unpin>;
 pub type Output = Box<dyn AsyncWrite + Unpin>;
 
 /// The process's standard input and output, for a server that ssh
-/// started.
+/// started: on Unix, pipes and sockets non-blocking, as OCaml's, so that
+/// reads and writes are tried at once (tokio's own standard input and
+/// output do them on other threads); anything else, or elsewhere, tokio's.
 pub fn stdio() -> (Input, Output) {
+    #[cfg(unix)]
+    if let (Some(input), Some(output)) = (nonblocking_input(), nonblocking_output()) {
+        return (input, output);
+    }
     (Box::new(tokio::io::stdin()), Box::new(tokio::io::stdout()))
+}
+
+/// What a duplicate of `fd` is: a pipe or a socket, or neither.
+#[cfg(unix)]
+enum Fd {
+    Pipe(std::fs::File),
+    Socket(std::os::unix::net::UnixStream),
+}
+
+#[cfg(unix)]
+fn duplicate(fd: impl std::os::fd::AsFd) -> Option<Fd> {
+    use std::os::unix::fs::FileTypeExt;
+    let file = std::fs::File::from(fd.as_fd().try_clone_to_owned().ok()?);
+    let kind = file.metadata().ok()?.file_type();
+    if kind.is_fifo() {
+        Some(Fd::Pipe(file))
+    } else if kind.is_socket() {
+        let s = std::os::unix::net::UnixStream::from(std::os::fd::OwnedFd::from(file));
+        s.set_nonblocking(true).ok()?;
+        Some(Fd::Socket(s))
+    } else {
+        None
+    }
+}
+
+/// Standard input, non-blocking.
+#[cfg(unix)]
+fn nonblocking_input() -> Option<Input> {
+    Some(match duplicate(std::io::stdin())? {
+        Fd::Pipe(f) => Box::new(tokio::net::unix::pipe::Receiver::from_file(f).ok()?),
+        Fd::Socket(s) => Box::new(tokio::net::UnixStream::from_std(s).ok()?),
+    })
+}
+
+/// Standard output, non-blocking.
+#[cfg(unix)]
+fn nonblocking_output() -> Option<Output> {
+    Some(match duplicate(std::io::stdout())? {
+        Fd::Pipe(f) => Box::new(tokio::net::unix::pipe::Sender::from_file(f).ok()?),
+        Fd::Socket(s) => Box::new(tokio::net::UnixStream::from_std(s).ok()?),
+    })
 }
 
 /// A lost connection's error.
