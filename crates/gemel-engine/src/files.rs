@@ -67,7 +67,7 @@ fn commit_log_name(host: &Host) -> Vec<u8> {
 }
 
 /// `writeCommitLog`: says what is being moved, in case the run stops
-/// halfway (a fatal error if it can't).
+/// halfway (a fatal error if it can't, worded as OCaml's channels' are).
 fn write_commit_log(log: &[u8], source: &Fspath, target: &Fspath, temp: &str) -> Result<(), Error> {
     use std::io::Write as _;
     let what = "writing commit log";
@@ -77,7 +77,7 @@ fn write_commit_log(log: &[u8], source: &Fspath, target: &Fspath, temp: &str) ->
     std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
     let mut c = opts
         .open(system::os_path(log))
-        .map_err(|e| system::SysError::new("open", log, e).to_fatal(what))?;
+        .map_err(|e| system::SysError::new("open", log, e).to_fatal_sys(what))?;
     let text = format!(
         "Warning: the last run of {} terminated abnormally while moving\n   {source}\nto\n   \
          {target}\nvia\n   {temp}\n\nPlease check the state of these files immediately\n(and \
@@ -85,7 +85,7 @@ fn write_commit_log(log: &[u8], source: &Fspath, target: &Fspath, temp: &str) ->
         archive::MY_NAME
     );
     c.write_all(text.as_bytes())
-        .map_err(|e| system::SysError::new("write", log, e).to_fatal(what))
+        .map_err(|e| system::SysError::new("write", log, e).to_fatal_sys(what))
 }
 
 /// `clearCommitLog`. (On Windows, where unlinking may not be immediate,
