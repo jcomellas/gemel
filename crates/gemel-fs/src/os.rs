@@ -394,13 +394,13 @@ pub fn safe_fingerprint(
 
 // ---- The Unison directory ----
 
-/// `Util.homeDir`: `HOME` on Unix, `USERPROFILE` (then `UNISON`, then the
-/// current directory) on Windows.
+/// `Util.homeDir`: `HOME` on Unix (the current directory if unset, where
+/// OCaml's fails), `USERPROFILE` (then `UNISON`, then `c:/`) on Windows.
 pub fn home_dir() -> std::path::PathBuf {
     if cfg!(windows) {
         std::env::var_os("USERPROFILE")
             .or_else(|| std::env::var_os("UNISON"))
-            .map_or_else(|| ".".into(), Into::into)
+            .map_or_else(|| "c:/".into(), Into::into)
     } else {
         std::env::var_os("HOME").map_or_else(|| ".".into(), Into::into)
     }
