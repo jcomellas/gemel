@@ -19,9 +19,12 @@
 //! instead (`tryCopyMovedFile`), and a transfer of contents another is
 //! bringing waits for it, so as to copy them (`registerFileTransfer`).
 //!
-//! Not ported yet: resuming a partial transfer (`validFilePrefix`), in
-//! phase 5 of milestone 3; external copy programs (`copyprog`), which are
-//! ignored with a warning. Their preferences are registered.
+//! A transfer that was interrupted resumes from the temporary file it
+//! left, if that is long enough and the source starts with it
+//! (`validFilePrefix`).
+//!
+//! Not ported: external copy programs (`copyprog`), which are ignored with
+//! a warning. Their preferences are registered.
 //! A copy reports its progress to the client's progress printer
 //! ([`crate::uutil`]), and stops when everything is aborted
 //! ([`crate::abort::AllFlag`]), as it runs.
@@ -38,6 +41,7 @@ use gemel_base::prefs::{Category, DumpedPref, PrefDef, Prefs, Topic};
 use gemel_base::util::{Error, FileId};
 use gemel_compat::umarshal::{self, Reader, Writer};
 use gemel_fs::fileinfo::{self, FsConfig, Info, SetAction, Stamp, Typ};
+use gemel_fs::fingerprint::Fingerprint;
 use gemel_fs::fs;
 use gemel_fs::fspath::Fspath;
 use gemel_fs::os::{self, FullFingerprint, TempNames};
@@ -1487,22 +1491,97 @@ async fn register_file_transfer<T>(
     result
 }
 
-/// `reallyTransferFile`: the data fork, then the resource fork and the
-/// props, then the check.
+/// `fingerprintLimit`: how many bytes `fingerprintPrefix` digests at once.
+const FINGERPRINT_LIMIT: Filesize = 1_072_693_248;
+
+/// `fingerprintPrefix`: the digests of the first `len` bytes of
+/// `fspath/path`, [`FINGERPRINT_LIMIT`] bytes at a time, the last first.
+fn fingerprint_prefix(
+    fspath: &Fspath,
+    path: &Path<Local>,
+    len: Filesize,
+) -> Result<Vec<Fingerprint>, Error> {
+    let full = fspath.concat(path);
+    let (mut offset, mut len, mut fps) = (0, len, Vec::new());
+    while len > 0 {
+        let l = len.min(FINGERPRINT_LIMIT);
+        fps.push(Fingerprint::subfile(&full, offset, l)?);
+        offset += l as u64;
+        len -= l;
+    }
+    fps.reverse();
+    Ok(fps)
+}
+
+/// `fingerprintSubfile` (`fingerprintPrefixRemotely`), on the source's
+/// host: [`fingerprint_prefix`].
+pub static FINGERPRINT_SUBFILE: ServerCmd<(Fspath, Path<Local>, Filesize), Vec<Fingerprint>> =
+    ServerCmd::new(
+        "fingerprintSubfile",
+        |(fspath, path, len), w, _| {
+            fspath.marshal(w);
+            path.marshal(w);
+            w.int64(*len);
+        },
+        |r, _| Ok((Fspath::unmarshal(r)?, Path::unmarshal(r)?, r.int64()?)),
+        |fps, w, _| w.list(fps, |w, fp| fp.marshal(w)),
+        |r, _| r.list(Fingerprint::unmarshal),
+        |conn, (fspath, path, len)| {
+            Box::pin(async move {
+                exclusive::blocking(conn.host(), move || fingerprint_prefix(&fspath, &path, len))
+                    .await
+            })
+        },
+    );
+
+/// `appendThreshold`: a temporary file left by an interrupted transfer is
+/// kept only from this length on.
+const APPEND_THRESHOLD: Filesize = 1024 * 1024;
+
+/// `validFilePrefix`: how much of the temporary file (`info`) an
+/// interrupted transfer left that the source starts with, if it is long
+/// enough to keep and shorter than the source. The source failing to
+/// digest its file means none.
+async fn valid_file_prefix(
+    conn_from: &Connection,
+    a: &TransferArgs,
+    info: &Info,
+) -> Result<Option<Filesize>, Error> {
+    let len = info.desc.length();
+    if !(info.typ == Typ::File && len >= APPEND_THRESHOLD && len < a.desc.length()) {
+        return Ok(None);
+    }
+    let from = conn_from
+        .call(
+            &FINGERPRINT_SUBFILE,
+            (a.fspath_from.clone(), a.path_from.clone(), len),
+        )
+        .await;
+    let Ok(from) = from else {
+        return Ok(None);
+    };
+    let (f, p) = (a.fspath_to.clone(), a.path_to.clone());
+    let to = exclusive::blocking(conn_from.host(), move || fingerprint_prefix(&f, &p, len)).await?;
+    Ok((from == to).then_some(len))
+}
+
+/// `reallyTransferFile`: the data fork, from where an interrupted transfer
+/// left it if it can, then the resource fork and the props, then the
+/// check.
 async fn really_transfer_file(
     conn_from: &Connection,
     ctx: &Ctx,
     a: &TransferArgs,
-    _temp_info: &Info,
+    temp_info: &Info,
 ) -> Result<TransferStatus, Error> {
     let host = conn_from.host().clone();
-    // Not ported yet (phase 5): resuming a partial transfer
-    // (`validFilePrefix`), so what was transferred before goes.
-    {
+    let prefix = valid_file_prefix(conn_from, a, temp_info).await?;
+    if prefix.is_none() {
         let (ctx, f, p) = (ctx.clone(), a.fspath_to.clone(), a.path_to.clone());
         exclusive::blocking(&host, move || remove_old_temp_file(&ctx, &f, &p)).await?;
     }
-    transfer_file_contents(conn_from, a, FileKind::Data, a.desc.length()).await?;
+    let kind = prefix.map_or(FileKind::Data, FileKind::DataAppend);
+    transfer_file_contents(conn_from, a, kind, a.desc.length()).await?;
     // `transferResourceForkAndSetFileinfo`.
     let ress_length = osx::ress_length(&a.ress);
     if ress_length > 0 {
@@ -1753,6 +1832,7 @@ pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
     r.register_root(&CHECK_FOR_CHANGES_TO_SOURCE)?;
     r.register_root(&SAVE_TEMP_FILE)?;
     r.register_stream(&PROCESS_TRANSFER_INSTRUCTION)?;
+    r.register_server(&FINGERPRINT_SUBFILE)?;
     r.register_server(&COMPRESS)?;
     r.register_server(&TRANSFER_FILE)
 }
