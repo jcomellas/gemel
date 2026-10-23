@@ -417,3 +417,32 @@ fn the_profile_manager_without_a_choice() {
         "{r:#?}"
     );
 }
+
+/// A fatal error during a sync stops it: the server finds the commit log
+/// of a run that ended in a dangerous state (made once the sync is under
+/// way) as it replaces a directory, with other items going on at once.
+#[cfg(unix)]
+#[test]
+fn a_fatal_error_during_a_sync_stops_it() {
+    for (g, o) in twins_each("int-fatal", &["times = true"], |r, _| {
+        write(r, "README", "readme\n", T0);
+        write(r, "src/main.c", "main\n", T0);
+    }) {
+        same(&g, &o, &["p", "-batch"], "");
+        for p in [&g, &o] {
+            write(&p.a(), "README", "a's readme\n", T0 + 10.0);
+            std::fs::remove_dir_all(p.a().join("src")).unwrap();
+            write(&p.a(), "src", "a file\n", T0 + 10.0);
+            for i in 0..10 {
+                write(&p.a(), &format!("t{i}"), &format!("t{i}\n"), T0 + 10.0);
+            }
+        }
+        let r = common::same_driven(&g, &o, &["p", "-auto", "-terse"], |p| {
+            p.wait_for("Proceed with propagating updates? ", 1);
+            let dir = p.dir.as_ref().unwrap();
+            std::fs::write(dir.join("u/DANGER.README"), "stopped").unwrap();
+            p.type_keys(b"y\n");
+        });
+        assert_eq!(r.code, Some(3), "{r:#?}");
+    }
+}

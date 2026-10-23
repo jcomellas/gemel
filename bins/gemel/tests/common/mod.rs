@@ -6,7 +6,7 @@
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
-use std::path::Path as StdPath;
+use std::path::{Path as StdPath, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -283,8 +283,15 @@ pub fn compare(g: &Pair, o: &Pair, what: &str, ours: &Run, theirs: &Run) {
     let (log1, _) = lines(&log(g), g, &b);
     let (log2, _) = lines(&log(o), o, &b);
     assert_eq!(log1, log2, "log: {what}");
-    assert_eq!(listing(&g.a()), listing(&o.a()), "{what}");
-    assert_eq!(listing(&g.b()), listing(&o.b()), "{what}");
+    // Temporary files left behind are named after the roots.
+    let listed = |r: &StdPath| -> Vec<(String, String)> {
+        listing(r)
+            .into_iter()
+            .map(|(n, c)| (temp_hashes(&n), c))
+            .collect()
+    };
+    assert_eq!(listed(&g.a()), listed(&o.a()), "{what}");
+    assert_eq!(listed(&g.b()), listed(&o.b()), "{what}");
 }
 
 /// Runs gemel on `g` and OCaml on `o` with `args`; with OCaml, they must
@@ -344,6 +351,8 @@ pub fn twins(tag: &str, lines: &[&str], build: fn(&StdPath, &str)) -> (Pair, Pai
 /// A program running, driven step by step: keys are typed once what it
 /// prints shows it is waiting for them, and signals sent at given points.
 pub struct Driven {
+    /// The pair's directory, for [`Driven::start`]'s.
+    pub dir: Option<PathBuf>,
     child: std::process::Child,
     stdin: Option<Box<dyn Write + Send>>,
     stdout: Arc<Mutex<Vec<u8>>>,
@@ -383,7 +392,10 @@ impl Driven {
             child.stdout.take().unwrap(),
             child.stderr.take().unwrap(),
         );
-        Driven::new(child, Box::new(stdin), Box::new(stdout), Box::new(stderr))
+        Driven {
+            dir: Some(pair.base().to_owned()),
+            ..Driven::new(child, Box::new(stdin), Box::new(stdout), Box::new(stderr))
+        }
     }
 
     /// `child`, written to with `stdin`, its output read from `stdout`
@@ -400,6 +412,7 @@ impl Driven {
             collect(stderr, Arc::clone(&err)),
         ];
         Driven {
+            dir: None,
             stdin: Some(stdin),
             child,
             stdout: out,

@@ -16,9 +16,9 @@
 //! which yields, so between local roots [`transport_items`] runs one item
 //! at a time: that keeps OCaml's order (of the log and of archive
 //! updates). The rest of a host's work runs at once, as OCaml's does (see
-//! [`crate::exclusive`]). OCaml runs items concurrently with a remote
-//! root; here they run one at a time with one too, until phase 5c of
-//! milestone 3.
+//! [`crate::exclusive`]). With a remote root, items run concurrently, up to
+//! `maxthreads`, as OCaml's do; a merge runs to the end before another
+//! starts, since OCaml's runs its own scheduler.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -90,16 +90,27 @@ pub fn max_threads(prefs: &Prefs) -> usize {
 }
 
 /// `Transport.run`: runs the tasks `dispense` hands out, up to `limit` at
-/// once, until it hands out no more.
-pub async fn run<'a>(limit: usize, mut dispense: impl FnMut() -> Option<Task<'a, ()>>) {
+/// once, until it hands out no more; each starts as it is handed out, and
+/// runs until it waits, before the next is (`runTask`). None is handed out
+/// while `held` (a merge runs: OCaml's runs its own scheduler, so the
+/// next item starts only once it is done), until a task ends.
+pub async fn run<'a>(
+    limit: usize,
+    held: impl Fn() -> bool,
+    mut dispense: impl FnMut() -> Option<Task<'a, ()>>,
+) {
     let limit = limit.max(1);
     let mut running: Vec<Task<'a, ()>> = Vec::new();
     let mut dispensed_all = false;
     std::future::poll_fn(|cx| {
         loop {
-            while !dispensed_all && running.len() < limit {
+            while !dispensed_all && running.len() < limit && !held() {
                 match dispense() {
-                    Some(t) => running.push(t),
+                    Some(mut t) => {
+                        if t.as_mut().poll(cx).is_pending() {
+                            running.push(t);
+                        }
+                    }
                     None => dispensed_all = true,
                 }
             }
@@ -117,15 +128,17 @@ pub async fn run<'a>(limit: usize, mut dispense: impl FnMut() -> Option<Task<'a,
 }
 
 /// `Uicommon.transportItems`: runs `make_action` on each item
-/// `this_round` selects, in order. Unless everything is aborted: then it
-/// starts nothing more. The first error stops the run: nothing more
-/// starts, everything is aborted, and the error is returned once the items
-/// already running have finished. (OCaml returns it at once, and gives the
-/// others a few chances to run; they stop at their abort checks.)
+/// `this_round` selects, in order, up to `maxthreads` at once with a
+/// remote root, else one at a time. Unless everything is aborted: then it
+/// starts nothing more. The first error stops the run
+/// (`doTransportFailCleanup`): nothing more starts, everything is aborted,
+/// and the connection to the other root is closed (for a local root, the
+/// client's close handlers run), so that items still running fail; the
+/// error is returned once they have. (OCaml returns it at once, and gives
+/// the others a few chances to run.)
 pub async fn transport_items<'a, T>(
     rpc: &Rpc,
-    // Phase 5 runs items concurrently when one of them is remote.
-    _roots: &Roots,
+    roots: &Roots,
     items: &'a [T],
     this_round: impl Fn(&T) -> bool,
     make_action: impl Fn(usize, &'a T) -> Task<'a, Result<(), Error>>,
@@ -134,31 +147,46 @@ pub async fn transport_items<'a, T>(
     if abort.borrow().is_all() {
         return Ok(());
     }
-    // One at a time with a remote root too, until items run concurrently
-    // (phase 5c of milestone 3).
-    let limit = 1;
+    let max = max_threads(&rpc.client_host().prefs().borrow());
+    let limit = if roots.list().iter().all(Root::is_local) {
+        1
+    } else {
+        max
+    };
+    // `Transport.run`: copies run as many at once as items may.
     let failure = RefCell::new(None);
     let mut next = 0;
-    run(limit, || {
-        loop {
-            if failure.borrow().is_some() || abort.borrow().is_all() || next >= items.len() {
-                return None;
-            }
-            let i = next;
-            next += 1;
-            if !this_round(&items[i]) {
-                continue;
-            }
-            let action = make_action(i, &items[i]);
-            let (failure, abort) = (&failure, abort.clone());
-            return Some(Box::pin(async move {
-                if let Err(e) = action.await {
-                    abort.borrow_mut().all();
-                    failure.borrow_mut().get_or_insert(e);
+    let merging = rpc.client_host().state::<Merging>();
+    run(
+        limit,
+        || merging.borrow().0 > 0,
+        || {
+            loop {
+                if failure.borrow().is_some() || abort.borrow().is_all() || next >= items.len() {
+                    return None;
                 }
-            }));
-        }
-    })
+                let i = next;
+                next += 1;
+                if !this_round(&items[i]) {
+                    continue;
+                }
+                let action = make_action(i, &items[i]);
+                let (failure, abort) = (&failure, abort.clone());
+                return Some(Box::pin(async move {
+                    if let Err(e) = action.await {
+                        if failure.borrow().is_some() {
+                            return;
+                        }
+                        *failure.borrow_mut() = Some(e);
+                        abort.borrow_mut().all();
+                        if let [_, other] = &roots.in_canonical_order()[..] {
+                            rpc.close_root_connection(other);
+                        }
+                    }
+                }));
+            }
+        },
+    )
     .await;
     failure.into_inner().map_or(Ok(()), Err)
 }
@@ -594,11 +622,32 @@ pub async fn transport_item(
                     "Can only merge two existing files".to_owned(),
                 ));
             }
+            let _merging = Merging::start(rpc);
             files::merge(
                 rpc, root1, &ri.path1, &d.rc1.ui, root2, &ri.path2, &d.rc2.ui, id, show_merge,
             )
             .await
         }
+    }
+}
+
+/// How many merges are running: OCaml's run to the end before another
+/// item starts.
+#[derive(Default)]
+struct Merging(usize);
+
+impl Merging {
+    /// Counts a merge until the guard goes.
+    fn start(rpc: &Rpc) -> impl Drop {
+        struct Guard(std::rc::Rc<RefCell<Merging>>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.borrow_mut().0 -= 1;
+            }
+        }
+        let m = rpc.client_host().state::<Merging>();
+        m.borrow_mut().0 += 1;
+        Guard(m)
     }
 }
 
@@ -689,24 +738,28 @@ mod tests {
             let events = RefCell::new(Vec::new());
             let running = RefCell::new(0usize);
             let mut n = 0;
-            block_on(run(limit, || {
-                if n == 6 {
-                    return None;
-                }
-                n += 1;
-                let i = n;
-                let (events, running) = (&events, &running);
-                Some(Box::pin(async move {
-                    *running.borrow_mut() += 1;
-                    assert!(*running.borrow() <= limit);
-                    events.borrow_mut().push(format!("start {i}"));
-                    for _ in 0..i % 3 {
-                        tokio::task::yield_now().await;
+            block_on(run(
+                limit,
+                || false,
+                || {
+                    if n == 6 {
+                        return None;
                     }
-                    events.borrow_mut().push(format!("end {i}"));
-                    *running.borrow_mut() -= 1;
-                }) as Task<'_, ()>)
-            }));
+                    n += 1;
+                    let i = n;
+                    let (events, running) = (&events, &running);
+                    Some(Box::pin(async move {
+                        *running.borrow_mut() += 1;
+                        assert!(*running.borrow() <= limit);
+                        events.borrow_mut().push(format!("start {i}"));
+                        for _ in 0..i % 3 {
+                            tokio::task::yield_now().await;
+                        }
+                        events.borrow_mut().push(format!("end {i}"));
+                        *running.borrow_mut() -= 1;
+                    }) as Task<'_, ()>)
+                },
+            ));
             let events = events.into_inner();
             let starts: Vec<_> = events.iter().filter(|e| e.starts_with("start")).collect();
             assert_eq!(starts.len(), 6, "{events:?}");
@@ -717,6 +770,44 @@ mod tests {
             }
         }
         // Nothing to run.
-        block_on(run(3, || None));
+        block_on(run(3, || false, || None));
+    }
+
+    /// While a task holds the others back, none starts until a task ends;
+    /// those running go on.
+    #[test]
+    fn run_holds_back_while_held() {
+        let events = RefCell::new(Vec::new());
+        let held = std::cell::Cell::new(false);
+        let mut n = 0;
+        block_on(run(
+            5,
+            || held.get(),
+            || {
+                if n == 3 {
+                    return None;
+                }
+                n += 1;
+                let i = n;
+                let (events, held) = (&events, &held);
+                Some(Box::pin(async move {
+                    events.borrow_mut().push(format!("start {i}"));
+                    if i == 2 {
+                        held.set(true);
+                    }
+                    tokio::task::yield_now().await;
+                    tokio::task::yield_now().await;
+                    if i == 2 {
+                        held.set(false);
+                    }
+                    events.borrow_mut().push(format!("end {i}"));
+                }) as Task<'_, ()>)
+            },
+        ));
+        let events = events.into_inner();
+        assert_eq!(
+            events,
+            ["start 1", "start 2", "end 1", "end 2", "start 3", "end 3"]
+        );
     }
 }
