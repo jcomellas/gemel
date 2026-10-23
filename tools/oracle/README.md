@@ -45,7 +45,11 @@ Every sync runs with `-batch -ui text -color false -log=false
 -confirmbigdel=false -contactquietly -times -maxthreads 1`
 (`src/run.rs`). With `--concurrent`, `-maxthreads 1` is left out, so that
 items run concurrently as clients run them by default, and what each
-sync prints is compared without its order.
+sync prints is compared without its order; `--ordered` keeps the order.
+OCaml's order is deterministic, and a gemel server keeps it in all but
+one case, copying contents another transfer brings (milestone 3's phase
+5b notes): CI compares a gemel server's output with its order with
+`-xferbycopying=false`, and without its order otherwise.
 
 ## Running it
 
@@ -69,11 +73,21 @@ scripts/oracle.sh /path/to/unison --count 30
 | `--remote ssh\|socket` | Reach replica `b` through a server (see below) |
 | `--reference-server PATH`, `--candidate-server PATH` | Each side's server (default: its client) |
 | `--concurrent` | Let items run concurrently, and compare the output without its order |
+| `--ordered` | With `--concurrent`, compare the output with its order |
 | `--old-server` | Start ssh servers without `__new-rpc-mode` (their compatibility mode) |
+| `--client-args ARGS` | More arguments for both clients, split at spaces (`-debug remote+`) |
+| `--dump` | Print what each sync printed, in full, where it differs |
 
 A scenario that differs prints its operations and the first difference in
 each compared item, and its `<seed>-reference` and `<seed>-candidate`
-directories are kept for inspection.
+directories are kept for inspection. To see why the order differs, trace
+both runs' messages from the client's side:
+
+```sh
+gemel-oracle --remote ssh --concurrent --ordered --reference "$(which unison)" \
+  --candidate-server target/debug/gemel --seed 3 --count 1 \
+  --client-args '-debug remote+' --dump
+```
 
 With the reference as its own candidate, every scenario must agree. A
 candidate that runs the same unison with `-perms 0` fails every scenario,

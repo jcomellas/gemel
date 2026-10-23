@@ -8,7 +8,7 @@
 //! gemel-oracle --reference PATH [--candidate PATH] [--seed N] [--count K]
 //!              [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]
 //!              [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH]
-//!              [--concurrent] [--old-server]
+//!              [--concurrent [--ordered]] [--old-server] [--client-args ARGS] [--dump]
 //! gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] [--work DIR] [--keep]
 //! ```
 //!
@@ -17,7 +17,10 @@
 //! server, which is each side's client unless `--*-server` says otherwise. Each implementation runs in the same
 //! work directory in turn, because archive names depend on the roots'
 //! absolute paths. `--concurrent` lets items run concurrently, and then
-//! what the syncs print is compared without its order. `--old-server`
+//! what the syncs print is compared without its order, unless `--ordered`
+//! says to keep it. `--client-args` gives the clients more arguments
+//! (split at spaces), and `--dump` prints what the syncs printed in full
+//! where it differs, for tracing (`--client-args '-debug remote+'`). `--old-server`
 //! starts ssh servers without `__new-rpc-mode`, so that a 2.52 or 2.53
 //! server starts in its compatibility mode. `--record` saves the reference's outcomes, and
 //! `--replay` compares a candidate with them where there is no reference
@@ -48,13 +51,17 @@ struct Args {
     reference_server: Option<PathBuf>,
     candidate_server: Option<PathBuf>,
     concurrent: bool,
+    ordered: bool,
     old_server: bool,
+    client_args: Vec<String>,
+    dump: bool,
 }
 
 impl Args {
     fn how(&self) -> run::How {
         run::How {
             concurrent: self.concurrent,
+            client_args: self.client_args.clone(),
             old_server: self.old_server,
         }
     }
@@ -90,7 +97,8 @@ impl Args {
 const USAGE: &str = "usage: gemel-oracle --reference PATH [--candidate PATH] [--seed N] \
                      [--count K] [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]\n                    \
                      [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH] \
-                     [--concurrent] [--old-server]\n   \
+                     [--concurrent [--ordered]] [--old-server]\n                    \
+                     [--client-args ARGS] [--dump]\n   \
                      or: gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] \
                      [--work DIR] [--keep]";
 
@@ -109,7 +117,10 @@ fn parse_args() -> Result<Args, String> {
         reference_server: None,
         candidate_server: None,
         concurrent: false,
+        ordered: false,
         old_server: false,
+        client_args: Vec::new(),
+        dump: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -139,6 +150,15 @@ fn parse_args() -> Result<Args, String> {
             "--reference-server" => args.reference_server = Some(value()?.into()),
             "--candidate-server" => args.candidate_server = Some(value()?.into()),
             "--concurrent" => args.concurrent = true,
+            "--ordered" => args.ordered = true,
+            "--client-args" => {
+                args.client_args = value()?
+                    .split(' ')
+                    .filter(|a| !a.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+            }
+            "--dump" => args.dump = true,
             "--old-server" => args.old_server = true,
             "--help" | "-h" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
@@ -153,8 +173,11 @@ fn parse_args() -> Result<Args, String> {
             && args.reference_server.is_none()
             && !args.concurrent
             && !args.old_server
+            && args.client_args.is_empty()
     } else {
-        !args.reference.as_os_str().is_empty() && !(args.concurrent && args.record.is_some())
+        !args.reference.as_os_str().is_empty()
+            && !(args.concurrent && args.record.is_some())
+            && !(args.ordered && !args.concurrent)
     };
     if !ok {
         return Err(USAGE.into());
@@ -206,8 +229,15 @@ fn sorted_lines(s: &str) -> Vec<&str> {
 }
 
 /// Compares two runs of a sync; with `unordered`, what they print is
-/// compared without its order (items ran concurrently).
-fn compare_step(name: &str, r: &Step, c: &Step, unordered: bool, out: &mut Vec<String>) {
+/// compared without its order (items ran concurrently); with `dump`, what
+/// differs is shown in full.
+fn compare_step(
+    name: &str,
+    r: &Step,
+    c: &Step,
+    (unordered, dump): (bool, bool),
+    out: &mut Vec<String>,
+) {
     if r.exit != c.exit {
         out.push(format!("{name}: exit code {:?} vs {:?}", r.exit, c.exit));
     }
@@ -226,14 +256,17 @@ fn compare_step(name: &str, r: &Step, c: &Step, unordered: bool, out: &mut Vec<S
                 "{name} {stream} differs at {}",
                 first_difference(x, y)
             ));
+            if dump {
+                out.push(format!("--- reference:\n{x}\n--- candidate:\n{y}"));
+            }
         }
     }
 }
 
-fn compare(r: &Outcome, c: &Outcome, unordered: bool) -> Vec<String> {
+fn compare(r: &Outcome, c: &Outcome, how: (bool, bool)) -> Vec<String> {
     let mut out = Vec::new();
-    compare_step("first sync", &r.first, &c.first, unordered, &mut out);
-    compare_step("second sync", &r.second, &c.second, unordered, &mut out);
+    compare_step("first sync", &r.first, &c.first, how, &mut out);
+    compare_step("second sync", &r.second, &c.second, how, &mut out);
     for (name, x, y) in [("replica a", &r.a, &c.a), ("replica b", &r.b, &c.b)] {
         for path in x
             .keys()
@@ -264,7 +297,7 @@ fn compare(r: &Outcome, c: &Outcome, unordered: bool) -> Vec<String> {
         "recheck by the reference",
         &r.recheck,
         &c.recheck,
-        unordered,
+        how,
         &mut out,
     );
     out
@@ -329,22 +362,33 @@ fn run_scenario(
         Some(o) => (o.clone(), candidate.clone()),
         None => {
             let r = args.reference();
-            let o = run::outcome(&r, &r, remote, args.how(), &scenario, &work).map_err(io)?;
+            let o = run::outcome(&r, &r, remote, &args.how(), &scenario, &work).map_err(io)?;
             std::fs::rename(&work, base.join(format!("{seed}-reference"))).map_err(io)?;
             (o, r)
         }
     };
-    let candidate =
-        run::outcome(&candidate, &rechecker, remote, args.how(), &scenario, &work).map_err(io)?;
+    let candidate = run::outcome(
+        &candidate,
+        &rechecker,
+        remote,
+        &args.how(),
+        &scenario,
+        &work,
+    )
+    .map_err(io)?;
     std::fs::rename(&work, base.join(format!("{seed}-candidate"))).map_err(io)?;
     let mut problems = if recorded.is_some() {
         compare(
             &record::portable(&reference, flavour),
             &record::portable(&candidate, flavour),
-            false,
+            (false, args.dump),
         )
     } else {
-        compare(&reference, &candidate, args.concurrent)
+        compare(
+            &reference,
+            &candidate,
+            (args.concurrent && !args.ordered, args.dump),
+        )
     };
     // A disagreement inside the reference itself is a harness problem; one
     // in the candidate's recheck is a real failure.

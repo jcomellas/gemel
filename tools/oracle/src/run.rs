@@ -47,10 +47,12 @@ const TIMEOUT: Duration = Duration::from_secs(120);
 const SERVER_START: Duration = Duration::from_secs(20);
 
 /// How syncs run, besides how replica `b` is reached.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct How {
     /// Items run concurrently (no `-maxthreads 1`).
     pub concurrent: bool,
+    /// More arguments for the clients (`-debug remote+`, say).
+    pub client_args: Vec<String>,
     /// The ssh shim drops `__new-rpc-mode` from the server's command, so
     /// that a 2.52 or 2.53 server starts in its compatibility mode.
     pub old_server: bool,
@@ -292,7 +294,7 @@ fn shim_runs(work: &Path) -> u64 {
     fs::metadata(work.join("remote").join("argv")).map_or(0, |m| m.len())
 }
 
-fn run(p: &Pairing, remote: Option<Remote>, how: How, work: &Path) -> io::Result<Step> {
+fn run(p: &Pairing, remote: Option<Remote>, how: &How, work: &Path) -> io::Result<Step> {
     let mut cmd = Command::new(&p.client);
     cmd.arg(work.join("a"));
     let mut server = None;
@@ -333,6 +335,7 @@ fn run(p: &Pairing, remote: Option<Remote>, how: How, work: &Path) -> io::Result
         } else {
             ONE_AT_A_TIME
         })
+        .args(&how.client_args)
         .env("UNISON", work.join("unison"))
         .env("HOME", work)
         .stdin(Stdio::null())
@@ -392,7 +395,7 @@ pub fn outcome(
     p: &Pairing,
     reference: &Pairing,
     remote: Option<Remote>,
-    how: How,
+    how: &How,
     scenario: &Scenario,
     work: &Path,
 ) -> io::Result<Outcome> {
