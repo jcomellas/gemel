@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 5a, 2026-10-23) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 5b, 2026-10-23) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -380,9 +380,10 @@ It was split in two:
   - remote diff and merge;
   - concurrent items, with the log order checked against OCaml's, for a gemel server too (phase 3a's notes).
 
-It is split in two, since concurrency changes how the engine yields and wants a review of its own:
-- **5a:** resuming transfers, and diff and merge with a remote root.
-- **5b:** concurrency, with `exclusive` revisited first.
+It is split in three, since concurrency changes how the engine yields and wants a review of its own:
+- **5a:** resuming transfers, and diff and merge with a remote root (PR #41).
+- **5b:** the server's side of concurrency, which OCaml clients already use: a host's work done at OCaml's yield points instead of `exclusive` locking pieces, OCaml's output queue, and `rsyncReg`.
+- **5c:** the client's side: items run concurrently with a remote root (`maxthreads`), after the abort bug of phase 3a's notes is fixed, with `copyReg` and `transferFileReg`, the rsync decompressor copying blocks with `copy_file_range` (phase 2c's notes), and the tests' and the oracle's comparisons without order dropped where gemel's client now runs items as OCaml's does.
 
 **Notes (phase 5a, 2026-10-23):**
 - **Resuming** (`validFilePrefix`): the destination keeps the temporary file an interrupted transfer left if it is a file of at least 1 MiB, shorter than the source, and the source starts with it. It asks the source for the digests of that much of its file (`fingerprintSubfile`, 1023 MiB at a time, the last chunk first, as OCaml lists them), and on any failure there transfers the whole file. Then it receives the rest (`` `DATA_APPEND ``), which the source and the destination already handled.
@@ -395,6 +396,21 @@ It is split in two, since concurrency changes how the engine yields and wants a 
 - **Merge with a remote root** swaps the roots if the first is remote, so the merge happens next to the local version, as OCaml does. Gemel's merge already copied the second root's version over whatever connection it had.
 - **The tests** (`files.rs`, `transport.rs`, `interactive.rs`) now run merges and diffs with a remote root, given first or second (through the command line), against OCaml. Gemel's test helpers now show temporary files' archive hashes as `H`, since the twin pairs' roots differ.
 - `checkForChangesToSource` was already called on the source's root, from phase 3a.
+
+**Notes (phase 5b, 2026-10-23):**
+- **The measure** is an OCaml client running items concurrently against a gemel server, compared with the same client against an OCaml server *with* the order of what it prints (the oracle's new `--ordered`). OCaml agrees with itself in that order, so a gemel server's must come out the same. Before this phase, 15 of 20 scenarios did on macOS; each difference below was found by tracing both runs' messages (`--client-args '-debug remote+' --dump`).
+- **A host's work runs at once** (`exclusive::now`), on the engine thread, where it ran on blocking threads under a host lock. OCaml's root commands run without yielding until their next request to the other side, so a command is atomic (milestone 2's phase 6c note) and replies go in the order the requests came. On threads, a symlink's reply overtook a copy's. This also covers the rescans that check a target hasn't changed (`checkNoUpdates`), which ran on a thread of their own.
+  - **A copy between local roots** still runs on a thread, so that an abort reaches it (the session sets the abort on the engine thread). Items between local roots run one at a time, so nothing else of the host's runs meanwhile.
+  - **The update scan** still runs on a thread, as before; it doesn't overlap transport.
+- **`compress` reads in step with its sends:** OCaml reads a chunk without yielding and yields only to send it. The reading runs on a thread, but the engine thread waits for each chunk and the reader for each send, which keeps OCaml's yield points without rewriting the rsync encoder as a coroutine.
+- **OCaml's output queue** (`performOutput`, `performOutputRec`, `popOutputQueues`, `maybeFlush`): a message goes into the output buffer at once, whatever its kind, if no write is under way and this side holds the token; the 16 KiB buffer is written out when full, at once if the output takes it (the bundled Lwt tries writes before waiting), and other messages wait meanwhile, to go urgent, then normal, then idle. Gemel had queued every message for a writer task, which picked by kind later, so a reply overtook a stream chunk sent before it. A write that has to wait is left to a task (`runtime::run_now`); one that finds the output in use (the token came while an urgent write waits, say) waits for it, as OCaml's goes on with the same buffer. A write that fails fails the connection from a task of its own, so that the close handlers don't run inside whatever was sending.
+  - **A client killed during a large transfer** (`SIGKILL`, 40 files of 8 MB) leaves a gemel server that ends quietly over ssh and goes on serving on a socket, with no lock left; the next sync resumes, and `-killserver` still stops it.
+- **A server's standard input and output are non-blocking** on Unix, as OCaml's: tokio's own do their reads and writes on other threads, so a write often couldn't go at once, and the order depended on timing (one scenario failed 4 runs in 5, and never with debugging on). Pipes become tokio's `pipe` ends and sockets its `UnixStream`, both safe; anything else keeps tokio's standard streams.
+  - **A socket** is what sshd gives a server unless OpenSSH was built with `USE_PIPES`, the same one as standard input and output. `server.rs` checks that the server answers on one as on pipes, against OCaml; by hand, a sync through a relay that gives the server a socket pair (31 files, 8.9 MiB, then changes both ways) ended as over pipes.
+- **`rsyncReg`** (`region.rs`, OCaml's `Lwt_util` regions): rsync transfers to a host share 40 KiB of block information; one that would overflow it waits. A test sends six 3 MiB files changed in the middle from an OCaml client, of which three fill the region; the client streams one file at a time anyway, so the region can't change the order it prints.
+- **What's left:** with their order, 119 of 120 scenarios agree on macOS over ssh (Homebrew's 2.54.0) and 59 of 60 on sockets; on Linux with `8772d26`, 119 of 120 over ssh and on sockets, and 19 of 20 with each of 2.52.1 and 2.53.8 as the client; with `xferbycopying` off, 80 of 80 on each system. The one that differs, scenario 3 each time, is `registerFileTransfer`: transfers of the same contents wait for the first, then copy it. When one finishes, OCaml's `Lwt.wakeup` runs the next at once, inside the first, which copies and replies before the first replies, and so on down the chain: with three files, the third's reply comes first. Gemel wakes the next to run after, so the replies come in the order the transfers started. Matching that needs a woken task to run inside the one waking it, which is emulating Lwt's scheduler on tokio; it was decided (2026-10-23) to leave it, and keep comparing a gemel server's output without its order when items run concurrently. The trees and archives agree. CI compares it with its order with `xferbycopying` off (30 scenarios over ssh and on sockets, which agreed 40 of 40 three times in a row on macOS).
+- **Regions wake their waiters the same way,** after the task leaving goes on, where OCaml runs the waiter at once; nothing observed depends on it.
+- **Unordered, as CI compares them,** every pairing agrees, over ssh and on sockets: on Linux, 50 of 50 with an `8772d26` client and a gemel server, concurrently and not, 20 of 20 concurrently with each of 2.52.1 and 2.53.8 as the client, 50 of 50 with a gemel client and an `8772d26` server, and 50 of 50 with gemel at both ends; on macOS the same pairings with Homebrew's 2.54.0.
 
 ### Phase 6: Windows and the rest
 
@@ -429,6 +445,6 @@ It is split in two, since concurrency changes how the engine yields and wants a 
 | 2.52.1 needs OCaml 4, which may age out of Debian, and of the CI runner's apt | Locally the bookworm image builds it. CI caches the binaries by tag and compiler version, so a runner whose apt moves to OCaml 5 fails to build them; then CI installs OCaml 4 through opam, or 2.52 is dropped from the matrix and the plan says so |
 | Prompts differ across ssh versions and platforms | ssh asks them itself at the terminal, so gemel matches none in this milestone; milestone 4 ports `terminal.ml`'s patterns as they are, and the real-sshd cell watches for drift |
 | ConPTY on Windows behaves differently from Unix pseudo-terminals | Milestone 4, with the GUI, after the Unix path is settled; OCaml's Windows code is the reference |
-| Concurrent transport exposes atomicity that milestone 2 relied on items running one at a time for | Revisit `exclusive` in phase 5 before turning `maxthreads` on |
+| Concurrent transport exposes atomicity that milestone 2 relied on items running one at a time for | A host's work runs at OCaml's yield points since phase 5b; phase 5c turns `maxthreads` on |
 | A server scanning (on blocking tasks) while it serves other requests | The scan already runs off the engine thread; requests that touch the same root wait on the host's turn, as local scans do |
 | The socket mode has no authentication | As in OCaml: documented; gemel prints no warning, since OCaml doesn't |
