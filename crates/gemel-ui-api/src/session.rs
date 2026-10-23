@@ -40,7 +40,8 @@
 //! The engine warns through a synchronous callback, which can't wait for
 //! the user. So warnings are kept, and the session asks about them at the
 //! end of the step that gave them (a sync's and a commit's too), before
-//! anything is committed. In batch
+//! anything is committed; and, while finding updates, once the archives
+//! are loaded, before the scan. In batch
 //! mode they are only shown ([`Event::Warning`]); otherwise the user
 //! decides whether to go on ([`Question::Warning`]), and if not, the
 //! archives are unlocked and the session ends ([`Event::Exit`]).
@@ -1035,12 +1036,23 @@ impl Session {
                 })),
             );
         }
-        let found = update::find_updates(rpc, roots, want_watcher, paths).await;
+        // The warnings loading the archives gives come before the scan.
+        let loaded = archive::load_archives_safely(rpc, roots).await;
+        let found = match loaded {
+            Ok(_) => match self.ask_warnings().await {
+                Ok(()) => {
+                    let (rpc, roots) = (self.ui.rpc(), self.roots()?);
+                    Ok(update::find_loaded_updates(rpc, roots, want_watcher, paths).await)
+                }
+                Err(stop) => Err(stop),
+            },
+            Err(e) => Ok(Err(e)),
+        };
         if self.scan_status {
             uutil::set_update_status_printer(client, None);
             self.send(Event::Scanning(String::new()));
         }
-        let found = found?;
+        let found = found??;
         self.ask_warnings().await?;
         let (rpc, roots) = (self.ui.rpc(), self.roots()?);
         let (items, any_equal_updates, dangerous) =
