@@ -1920,6 +1920,17 @@ pub async fn find_updates_on_paths(
     subpaths: Subpaths,
 ) -> Result<Vec<PathUpdates>, Error> {
     archive::load_archives_safely(rpc, roots).await?;
+    find_loaded_updates_on_paths(rpc, roots, want_watcher, path_list, subpaths).await
+}
+
+/// [`find_updates_on_paths`], once the archives are loaded.
+async fn find_loaded_updates_on_paths(
+    rpc: &Rpc,
+    roots: &Roots,
+    want_watcher: bool,
+    path_list: Vec<Path<Global>>,
+    subpaths: Subpaths,
+) -> Result<Vec<PathUpdates>, Error> {
     let timer = crate::start_timer(rpc, "Collecting changes")?;
     let args: FindArgs = (want_watcher, path_list, subpaths);
     let updates = roots
@@ -1971,9 +1982,24 @@ pub async fn find_updates_on_paths(
     Ok(u1.into_iter().zip(u2).collect())
 }
 
-/// `findUpdates`: finds the updates for the `path` preference's paths,
-/// leaving out those under another and those ignored.
+/// `findUpdates`: loads the archives, then finds the updates for the
+/// `path` preference's paths, leaving out those under another and those
+/// ignored.
 pub async fn find_updates(
+    rpc: &Rpc,
+    roots: &Roots,
+    want_watcher: bool,
+    subpaths: Subpaths,
+) -> Result<Vec<PathUpdates>, Error> {
+    archive::load_archives_safely(rpc, roots).await?;
+    find_loaded_updates(rpc, roots, want_watcher, subpaths).await
+}
+
+/// [`find_updates`], once the archives are loaded
+/// ([`archive::load_archives_safely`]): a frontend that asks about the
+/// warnings loading gives (no archives yet, say) does so before the scan,
+/// as OCaml's text interface does, its warnings being questions.
+pub async fn find_loaded_updates(
     rpc: &Rpc,
     roots: &Roots,
     want_watcher: bool,
@@ -1985,7 +2011,7 @@ pub async fn find_updates(
         let ignore = Ignore::new(&prefs, mode)?;
         filter_paths(prefs.read(&globals::PATHS).clone(), mode, &ignore)
     };
-    find_updates_on_paths(rpc, roots, want_watcher, paths, subpaths).await
+    find_loaded_updates_on_paths(rpc, roots, want_watcher, paths, subpaths).await
 }
 
 /// The paths to scan: in reverse order, without those under another, and
