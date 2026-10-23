@@ -413,6 +413,17 @@ pub struct Scan {
     watch_error: RefCell<Option<Error>>,
 }
 
+/// `Uutil.showUpdateStatus`, on the client: to its update-status printer,
+/// or as a status detail.
+fn show_update_status(rpc: &Rpc, path: &str) {
+    match crate::uutil::update_status_printer(rpc.client_host()) {
+        Some(p) => p(path),
+        None => crate::with_trace(rpc, |t, p| {
+            let _ = t.status_detail(p, path);
+        }),
+    }
+}
+
 /// `showStatus`: shows a path being scanned now and then, after about
 /// 10 KiB of files (a small file counts as 1 KiB) and 0.05 seconds. Each
 /// scan counts for itself, where OCaml's scans (one at a time) share the
@@ -1912,10 +1923,20 @@ pub async fn find_updates_on_paths(
     let timer = crate::start_timer(rpc, "Collecting changes")?;
     let args: FindArgs = (want_watcher, path_list, subpaths);
     let updates = roots
-        .map(|r| {
-            crate::debug(rpc.client_host(), "update", || format!("findOnRoot {r}\n"));
-            rpc.call_root(&FIND, r, args.clone())
-        })
+        .map_with_waiting_action(
+            |r| {
+                crate::debug(rpc.client_host(), "update", || format!("findOnRoot {r}\n"));
+                rpc.call_root(&FIND, r, args.clone())
+            },
+            |r| {
+                if !r.is_local() {
+                    show_update_status(rpc, "");
+                    crate::with_trace(rpc, |t, p| {
+                        let _ = t.status_detail(p, "Waiting for changes from server");
+                    });
+                }
+            },
+        )
         .await?;
     // Shared props data, with hosts other than the client's.
     let enabled = {
