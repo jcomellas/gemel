@@ -1633,9 +1633,71 @@ async fn really_transfer_file(
 }
 
 /// `transferFile`'s client side: transfers to `root_to` from `root_from`,
-/// one of which is remote.
+/// one of which is remote. Without streaming, transfers share a region
+/// (`transferFileReg`), each counting for its output buffers.
 #[allow(clippy::too_many_arguments)]
 async fn transfer_file(
+    rpc: &Rpc,
+    root_from: &Root,
+    path_from: &Path<Local>,
+    root_to: &Root,
+    fspath_to: &Fspath,
+    path_to: &Path<Local>,
+    real_path_to: &Path<Local>,
+    replacing: Replacing,
+    source: &Source,
+    id: FileId,
+) -> Result<TransferStatus, Error> {
+    let transfer = transfer_file_now(
+        rpc,
+        root_from,
+        path_from,
+        root_to,
+        fspath_to,
+        path_to,
+        real_path_to,
+        replacing,
+        source,
+        id,
+    );
+    // When streaming, one file's contents go each way at a time anyway.
+    if *rpc
+        .client_host()
+        .prefs()
+        .borrow()
+        .read(&STREAMING_ACTIVATED)
+    {
+        return transfer.await;
+    }
+    let size = source.desc.length().max(osx::ress_length(&source.ress));
+    let region = rpc
+        .client_host()
+        .state::<TransferFileReg>()
+        .borrow()
+        .0
+        .clone();
+    region.run(buffer_size(size), transfer).await
+}
+
+/// `transferFileReg`: the output buffers of a client's transfers, without
+/// streaming, about 512 KiB in all (in KiB).
+struct TransferFileReg(std::rc::Rc<crate::region::Region>);
+
+impl Default for TransferFileReg {
+    fn default() -> Self {
+        TransferFileReg(std::rc::Rc::new(crate::region::Region::new(440)))
+    }
+}
+
+/// `bufferSize`: a transfer's output buffers, in KiB: its token queue (up
+/// to 64), and its read buffer.
+fn buffer_size(size: Filesize) -> usize {
+    (((size as f64) as i64 + 1023) / 1024).clamp(0, 64) as usize + 8
+}
+
+/// [`transfer_file`], once it may run.
+#[allow(clippy::too_many_arguments)]
+async fn transfer_file_now(
     rpc: &Rpc,
     root_from: &Root,
     path_from: &Path<Local>,
