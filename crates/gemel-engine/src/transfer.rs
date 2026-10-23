@@ -519,6 +519,21 @@ pub mod rsync {
             progress: &mut Progress<'_>,
             chunk: &[u8],
         ) -> Result<bool, Error> {
+            self.chunk_with(reference, output, progress, chunk, &mut |_, _, _, _| 0)
+        }
+
+        /// [`Decompressor::chunk`], copying each run of blocks with
+        /// `copy_range` first (`copyFn`: `copy_file_range`, say), which
+        /// returns how much it copied of `length` bytes from `offset` to
+        /// where `output` is; the rest is read and written.
+        pub fn chunk_with<R: Read + Seek, W: Write + ?Sized>(
+            &mut self,
+            reference: &mut R,
+            output: &mut W,
+            progress: &mut Progress<'_>,
+            chunk: &[u8],
+            copy_range: &mut dyn FnMut(&mut R, &mut W, u64, usize) -> usize,
+        ) -> Result<bool, Error> {
             let mut done = 0;
             let mut pos = 0;
             let mut eof = false;
@@ -537,7 +552,11 @@ pub mod rsync {
                         let n = u32::from_le_bytes([t[0], t[1], t[2], 0]) as u64;
                         let k = usize::from(t[3]);
                         let length = k * self.block_size;
-                        self.copy(reference, output, n * self.block_size as u64, length)?;
+                        let offset = n * self.block_size as u64;
+                        let copied = copy_range(reference, output, offset, length).min(length);
+                        if copied < length {
+                            self.copy(reference, output, offset + copied as u64, length - copied)?;
+                        }
                         done += length;
                         pos += 5;
                     }
@@ -553,10 +572,10 @@ pub mod rsync {
         }
 
         /// Copies `length` bytes of the old file from `offset`.
-        fn copy<R: Read + Seek>(
+        fn copy<R: Read + Seek, W: Write + ?Sized>(
             &mut self,
             reference: &mut R,
-            output: &mut dyn Write,
+            output: &mut W,
             offset: u64,
             mut length: usize,
         ) -> Result<(), Error> {
