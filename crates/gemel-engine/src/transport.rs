@@ -154,6 +154,11 @@ pub async fn transport_items<'a, T>(
         max
     };
     // `Transport.run`: copies run as many at once as items may.
+    rpc.client_host()
+        .state::<crate::files::CopyReg>()
+        .borrow()
+        .0
+        .resize(max);
     let failure = RefCell::new(None);
     let mut next = 0;
     let merging = rpc.client_host().state::<Merging>();

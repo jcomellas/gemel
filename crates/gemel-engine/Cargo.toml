@@ -13,6 +13,7 @@ gemel-compat.workspace = true
 gemel-base.workspace = true
 gemel-fs.workspace = true
 gemel-rpc.workspace = true
+futures-util.workspace = true
 md-5.workspace = true
 tokio.workspace = true
 
