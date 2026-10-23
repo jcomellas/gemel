@@ -123,6 +123,11 @@ jobs:
                   --candidate releases/unison-$v --candidate-server target/debug/gemel --count $m
               done
             done
+            # What a gemel server sends, in OCaml's order, with items concurrent. Copying
+            # contents another transfer brings replies in another order (phase 5b's notes),
+            # so without that.
+            oracle --remote $remote --concurrent --ordered --client-args -xferbycopying=false \
+              --reference unison-src/src/unison --candidate-server target/debug/gemel --count 30
             oracle --remote $remote --reference unison-src/src/unison --candidate target/debug/gemel \
               --candidate-server unison-src/src/unison --count $n
             for v in 2.52.1 2.53.8; do
