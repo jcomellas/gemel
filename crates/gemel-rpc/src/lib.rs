@@ -11,8 +11,8 @@
 //! in-memory one for tests), [`host`] the state a host keeps for its roots,
 //! [`protocol`] the byte-exact pieces of messages, [`handshake`] the
 //! version handshake, [`server`] a server's command loop, [`shell`]
-//! connections through ssh, and [`runtime`] the engine thread. Sockets
-//! come later in milestone 3.
+//! connections through ssh, [`socket`] connections on sockets and a server
+//! waiting on one, and [`runtime`] the engine thread.
 
 pub mod connection;
 pub mod handshake;
@@ -23,4 +23,5 @@ pub mod root;
 pub mod runtime;
 pub mod server;
 pub mod shell;
+pub mod socket;
 pub mod terminal;

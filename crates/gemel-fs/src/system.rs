@@ -44,11 +44,7 @@ impl SysError {
 
     /// The OS's description of the error (`Unix.error_message`).
     pub fn message(&self) -> String {
-        let s = self.error.to_string();
-        match s.rfind(" (os error ") {
-            Some(i) => s[..i].to_owned(),
-            None => s,
-        }
+        error_message(&self.error)
     }
 
     /// Whether the path (or a parent) doesn't exist (`ENOENT`/`ENOTDIR`).
@@ -118,6 +114,16 @@ fn not_dir_errno() -> i32 {
 fn not_dir_errno() -> i32 {
     // ERROR_DIRECTORY: "The directory name is invalid."
     267
+}
+
+/// The OS's description of `e` (`Unix.error_message`), without Rust's
+/// ` (os error N)`.
+pub fn error_message(e: &io::Error) -> String {
+    let s = e.to_string();
+    match s.rfind(" (os error ") {
+        Some(i) => s[..i].to_owned(),
+        None => s,
+    }
 }
 
 /// Result of a system call.

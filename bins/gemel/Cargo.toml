@@ -13,12 +13,12 @@ gemel-base.workspace = true
 gemel-fs.workspace = true
 gemel-rpc.workspace = true
 gemel-ui-api.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 # For the engine's and the interface's test support, which these tests share.
 gemel-engine.workspace = true
 md-5.workspace = true
-tokio.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
 # For a pseudo-terminal, in tests/terminal.rs.

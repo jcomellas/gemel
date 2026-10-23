@@ -12,7 +12,11 @@ publish.workspace = true
 gemel-compat.workspace = true
 gemel-base.workspace = true
 gemel-fs.workspace = true
+socket2.workspace = true
 tokio.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [lints]
 workspace = true
