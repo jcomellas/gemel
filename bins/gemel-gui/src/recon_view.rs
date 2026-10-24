@@ -205,6 +205,11 @@ impl ReconTable {
         self.rows.len()
     }
 
+    /// Whether there are no rows.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
     /// The row shown at `view`.
     pub fn row_at(&self, view: usize) -> &Row {
         &self.rows[self.order[view] as usize]

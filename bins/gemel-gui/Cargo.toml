@@ -11,6 +11,13 @@ license.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+# The library is the program with its window, which the tests drive; the
+# binary is its `main`. Only the library is documented, so that the two
+# don't collide under `cargo doc`.
+[[bin]]
+name = "gemel-gui"
+doc = false
+
 [dependencies]
 # The program: the text interface and the server modes, as unison-gui
 # links them.
@@ -20,6 +27,8 @@ slint = { version = "=1.18.1", features = ["raw-window-handle-06"] }
 rfd = "0.17.2"
 
 [dev-dependencies]
+# The harness's scenarios, runs and comparisons (tests/support).
+gemel-oracle.workspace = true
 # Slint's headless testing backend: element queries by accessible role.
 # Must match the slint version exactly.
 i-slint-backend-testing = "=1.18.1"
