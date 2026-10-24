@@ -1,6 +1,6 @@
 # Milestone 3: remote roots
 
-*Status: in progress (phase 6a, 2026-10-23) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 6b, 2026-10-24) · Follows milestone 2 (local engine, text UI and watch mode, PRs #7–#29) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 3 is step 3 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): remote roots. It ends with gemel synchronising with a root on another host over ssh or a socket. It must work in both directions with OCaml Unison 2.52 to 2.54: a gemel client with an OCaml server, an OCaml client with a gemel server, and gemel at both ends. That is the Tier A promise (§3 of the analysis).
 
@@ -450,6 +450,17 @@ Phase 6 splits in two (2026-10-23), so that the Windows work, which only CI can 
 - **Recorded outcomes over ssh:** `tools/oracle/recorded/windows-ssh.txt`, 100 Windows-flavour scenarios recorded on Linux with `8772d26` at both ends. Each scenario also has ssh's arguments, so a replay checks them. CI replays it with OCaml on Linux and with gemel on macOS and Windows. OCaml and gemel replay it 100 of 100 on Linux, and gemel on macOS.
 - **With the shim as a program,** the live pairings over ssh agree as before: on macOS, 20 of 20 with a gemel client, with a gemel server concurrently, and in order with a concurrent gemel client; on Linux, 10 of 10 with 2.52.1 and 2.53.8 servers in their compatibility mode, 10 of 10 with a 2.53.8 client, and 20 of 20 with gemel at both ends.
 
+**Notes (phase 6b, 2026-10-24):**
+- **A real ssh and sshd** in CI's oracle job: `scripts/start-sshd.sh` starts an sshd of its own on 127.0.0.1, which lets in only the runner, with keys of its own, and writes a client configuration that reaches it as host `server` without asking anything. With `--ssh-config`, the oracle's shim records its arguments, then becomes the real `ssh -F` with them (so the client's kill reaches ssh), and sshd starts the keeper, which runs the server as before.
+- **CI checks that each sync went through sshd:** the step counts sshd's logins, three for each side of each scenario, so the shim can't have run the server itself.
+- **What sshd gives the server:** Debian trixie's gives pipes for a command's standard input and output, not a socket, so the socket case of phase 5b's notes is OpenSSH's default but not every build's. Both are covered: pipes here, sockets by `server.rs`.
+- **Through the real sshd,** in Docker with `8772d26`: 10 of 10 with a gemel client, with a gemel server one item at a time and concurrently, and with gemel at both ends, as root and as another user; every sync logged in.
+- **The prompts aren't watched:** with keys, ssh asks nothing. Matching ssh's prompts moves to milestone 4 with the prompts through the user interface; the risk table says so now.
+- **Odds and ends, each decided:**
+  - CI's oracle job said a gemel client runs items one at a time until phase 5; that comment is gone.
+  - **Left:** without `HOME` or `UNISON` on Unix, OCaml stops as it starts, with an uncaught `Util.Fatal("Environment variable HOME not found")`, even for `-version`, where gemel's Unison directory is then `./.unison`. Imitating an uncaught exception isn't worth it.
+  - **Left:** `copy.rs`'s `resource_forks_are_copied` failed once on macOS (phase 3c's notes) and hasn't since; it is looked at if it does again.
+
 ## Verification
 
 - **Protocol:**
@@ -471,7 +482,7 @@ Phase 6 splits in two (2026-10-23), so that the Windows work, which only CI can 
 | A deadlock between flow control and ssh's buffering | Port OCaml's write tokens exactly, and keep `halfduplex`; test with large transfers in both directions at once |
 | rsync's token stream or checksums drift by a bit, which OCaml rejects or silently mis-decodes | Golden vectors from OCaml before any end-to-end test; compare the files transferred, not only the outcome |
 | 2.52.1 needs OCaml 4, which may age out of Debian, and of the CI runner's apt | Locally the bookworm image builds it. CI caches the binaries by tag and compiler version, so a runner whose apt moves to OCaml 5 fails to build them; then CI installs OCaml 4 through opam, or 2.52 is dropped from the matrix and the plan says so |
-| Prompts differ across ssh versions and platforms | ssh asks them itself at the terminal, so gemel matches none in this milestone; milestone 4 ports `terminal.ml`'s patterns as they are, and the real-sshd cell watches for drift |
+| Prompts differ across ssh versions and platforms | ssh asks them itself at the terminal, so gemel matches none in this milestone; milestone 4 ports `terminal.ml`'s patterns as they are, with the prompts through the user interface. The real-sshd cell logs in with keys, so it asks nothing and can't watch prompts |
 | ConPTY on Windows behaves differently from Unix pseudo-terminals | Milestone 4, with the GUI, after the Unix path is settled; OCaml's Windows code is the reference |
 | Concurrent transport exposes atomicity that milestone 2 relied on items running one at a time for | A host's work runs at OCaml's yield points since phase 5b; phase 5c turns `maxthreads` on |
 | A server scanning (on blocking tasks) while it serves other requests | The scan already runs off the engine thread; requests that touch the same root wait on the host's turn, as local scans do |
