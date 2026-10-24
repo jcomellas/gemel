@@ -42,9 +42,10 @@ works too: `-repeat watch` syncs whenever `gemel-fsmonitor`, the file
 watcher, reports changes, and scans only what changed. The watcher runs on
 Linux, macOS (FSEvents, which OCaml has no watcher for) and Windows, and
 OCaml Unison uses it as its `unison-fsmonitor` on Linux and macOS.
-Remote roots work over ssh and on sockets: `gemel -server` serves OCaml
+Milestone 3 is done ([plan](docs/milestone-3-plan.md)). Remote roots
+work over ssh and on sockets: `gemel -server` serves OCaml
 clients (2.52 on) as an OCaml server does, `gemel -socket <port|path>`
-serves them on a TCP port or a Unix-domain socket, and a gemel client
+serves them on a TCP port or a Unix-domain socket (on Unix), and a gemel client
 syncs with a root over ssh (`ssh://`) or on a socket (`socket://`),
 served by OCaml Unison (2.52 on) or by gemel. A transfer that was
 interrupted resumes from what it left, and diff and merge work with a
