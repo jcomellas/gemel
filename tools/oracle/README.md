@@ -76,6 +76,7 @@ scripts/oracle.sh /path/to/unison --count 30
 | `--ordered` | With `--concurrent`, compare the output with its order |
 | `--old-server` | Start ssh servers without `__new-rpc-mode` (their compatibility mode) |
 | `--client-args ARGS` | More arguments for both clients, split at spaces (`-debug remote+`) |
+| `--ssh-config FILE` | With `--remote ssh`, go through a real ssh and sshd with this client configuration (Unix) |
 | `--dump` | Print what each sync printed, in full, where it differs |
 
 A scenario that differs prints its operations and the first difference in
@@ -110,6 +111,20 @@ same machine, as milestone 3 needs (`docs/milestone-3-plan.md`):
   the work directory), so it runs on Windows too. The server's path must
   have no spaces, since clients split `servercmd` on them; on Windows it
   is given with `/`, since they take a backslash as an escape.
+
+  With `--ssh-config`, the shim records its arguments, then becomes the
+  real `ssh -F FILE` with them, so that the client's kill reaches ssh.
+  The configuration must reach this host as `server` without asking
+  anything; sshd starts the keeper there, which runs the server as
+  before. `scripts/start-sshd.sh DIR` starts an sshd of its own on
+  127.0.0.1 and writes such a configuration, `DIR/ssh_config`:
+
+  ```sh
+  scripts/start-sshd.sh /tmp/sshd
+  cargo run -p gemel-oracle -- --remote ssh --ssh-config /tmp/sshd/ssh_config \
+      --reference /path/to/unison --candidate target/debug/gemel
+  kill "$(cat /tmp/sshd/sshd.pid)"
+  ```
 - **`socket`:** the root is `socket://127.0.0.1:<port>/b`, served by a
   fresh `-socket` server for each sync. The harness waits for "server
   started" and kills the server afterwards: the client's preferences

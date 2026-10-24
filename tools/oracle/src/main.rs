@@ -9,6 +9,7 @@
 //!              [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]
 //!              [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH]
 //!              [--concurrent [--ordered]] [--old-server] [--client-args ARGS] [--dump]
+//!              [--ssh-config FILE]
 //! gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] [--work DIR] [--keep]
 //! ```
 //!
@@ -22,7 +23,9 @@
 //! (split at spaces), and `--dump` prints what the syncs printed in full
 //! where it differs, for tracing (`--client-args '-debug remote+'`). `--old-server`
 //! starts ssh servers without `__new-rpc-mode`, so that a 2.52 or 2.53
-//! server starts in its compatibility mode. `--record` saves the reference's outcomes, and
+//! server starts in its compatibility mode. `--ssh-config` goes through a
+//! real ssh and sshd with that client configuration, for host `server`
+//! (`scripts/start-sshd.sh`). `--record` saves the reference's outcomes, and
 //! `--replay` compares a candidate with them where there is no reference
 //! (Windows). See `tools/oracle/README.md`.
 
@@ -56,6 +59,7 @@ struct Args {
     old_server: bool,
     client_args: Vec<String>,
     dump: bool,
+    ssh_config: Option<PathBuf>,
 }
 
 impl Args {
@@ -64,6 +68,7 @@ impl Args {
             concurrent: self.concurrent,
             client_args: self.client_args.clone(),
             old_server: self.old_server,
+            ssh_config: self.ssh_config.clone(),
         }
     }
 
@@ -99,7 +104,7 @@ const USAGE: &str = "usage: gemel-oracle --reference PATH [--candidate PATH] [--
                      [--count K] [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]\n                    \
                      [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH] \
                      [--concurrent [--ordered]] [--old-server]\n                    \
-                     [--client-args ARGS] [--dump]\n   \
+                     [--client-args ARGS] [--dump] [--ssh-config FILE]\n   \
                      or: gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] \
                      [--work DIR] [--keep]";
 
@@ -122,6 +127,7 @@ fn parse_args() -> Result<Args, String> {
         old_server: false,
         client_args: Vec::new(),
         dump: false,
+        ssh_config: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -161,6 +167,7 @@ fn parse_args() -> Result<Args, String> {
             }
             "--dump" => args.dump = true,
             "--old-server" => args.old_server = true,
+            "--ssh-config" => args.ssh_config = Some(value()?.into()),
             "--help" | "-h" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
@@ -175,10 +182,13 @@ fn parse_args() -> Result<Args, String> {
             && !args.concurrent
             && !args.old_server
             && args.client_args.is_empty()
+            && args.ssh_config.is_none()
     } else {
         !args.reference.as_os_str().is_empty()
             && !(args.concurrent && args.record.is_some())
             && !(args.ordered && !args.concurrent)
+            && (args.ssh_config.is_none()
+                || (args.remote == Some(Remote::Ssh) && args.record.is_none() && cfg!(unix)))
     };
     if !ok {
         return Err(USAGE.into());
@@ -196,6 +206,7 @@ fn parse_args() -> Result<Args, String> {
         &mut args.candidate,
         &mut args.reference_server,
         &mut args.candidate_server,
+        &mut args.ssh_config,
     ]
     .into_iter()
     .flatten()
