@@ -19,6 +19,7 @@ gemel-rpc = { path = "crates/gemel-rpc" }
 gemel-engine = { path = "crates/gemel-engine" }
 gemel-ui-api = { path = "crates/gemel-ui-api" }
 gemel = { path = "bins/gemel" }
+gemel-oracle = { path = "tools/oracle" }
 md-5 = "0.11"
 libc = "0.2"
 notify = "8.2"
