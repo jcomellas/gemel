@@ -16,6 +16,12 @@
 //! the shim that the kill doesn't reach, which writes the server's exit
 //! code to `remote/exit` once it has exited: the harness waits for that
 //! before it reads the server's standard error.
+//!
+//! With an ssh client configuration beside it (`ssh-config`, from
+//! `--ssh-config`), it goes through a real ssh and sshd instead, on Unix:
+//! it records its arguments, then becomes `ssh -F <configuration>` with
+//! them, the keeper put before the server's command, so that the client's
+//! kill reaches ssh, and sshd starts the keeper on this host as `server`.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -33,9 +39,14 @@ const KEEPER: &str = "__oracle-keeper";
 /// The file beside the shim that names the work directory.
 const WORK: &str = "work-directory";
 
+/// The file beside the shim that names the ssh client's configuration,
+/// to go through a real ssh.
+const SSH_CONFIG: &str = "ssh-config";
+
 /// The shim for `work`, as `-sshcmd`, copied there first if need be;
-/// `old_server` says to drop `__new-rpc-mode`.
-pub fn install(work: &Path, old_server: bool) -> io::Result<PathBuf> {
+/// `old_server` says to drop `__new-rpc-mode`, and `ssh_config` to go
+/// through a real ssh with that configuration.
+pub fn install(work: &Path, old_server: bool, ssh_config: Option<&Path>) -> io::Result<PathBuf> {
     let dir = work.with_file_name("ssh-shim");
     let shim = dir
         .join(NAME)
@@ -50,6 +61,12 @@ pub fn install(work: &Path, old_server: bool) -> io::Result<PathBuf> {
         fs::write(marker, "")?;
     } else if marker.exists() {
         fs::remove_file(marker)?;
+    }
+    let config = dir.join(SSH_CONFIG);
+    match ssh_config {
+        Some(c) => fs::write(config, c.as_os_str().as_encoded_bytes())?,
+        None if config.exists() => fs::remove_file(config)?,
+        None => {}
     }
     Ok(shim)
 }
@@ -101,11 +118,37 @@ fn shim(dir: &Path, work: &Path, args: &[String]) -> io::Result<i32> {
         .iter()
         .filter(|a| !(old_server && *a == "__new-rpc-mode"))
         .collect();
-    let status = Command::new(std::env::current_exe()?)
-        .arg(KEEPER)
-        .args(server)
-        .status()?;
+    let me = std::env::current_exe()?;
+    if let Ok(config) = fs::read_to_string(dir.join(SSH_CONFIG)) {
+        return real_ssh(&config, &me, &args[..start.min(args.len())], &server);
+    }
+    let status = Command::new(me).arg(KEEPER).args(server).status()?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Becomes the real ssh, with the client's configuration `config`, the
+/// shell's arguments `pre` (`... host -e none`), and the keeper `me`
+/// running `server` on the other side. sshd hands the command to a
+/// shell, so the shim's path must be plain, as the server's must.
+#[cfg(unix)]
+fn real_ssh(config: &str, me: &Path, pre: &[String], server: &[&String]) -> io::Result<i32> {
+    use std::os::unix::process::CommandExt;
+    let me = me
+        .to_str()
+        .filter(|s| !s.contains([' ', '\'', '"', '\\', '$']))
+        .ok_or_else(|| io::Error::other(format!("{}: not a plain path", me.display())))?;
+    let e = Command::new("ssh")
+        .args(["-F", config])
+        .args(pre)
+        .args([me, KEEPER])
+        .args(server)
+        .exec();
+    Err(io::Error::new(e.kind(), format!("ssh: {e}")))
+}
+
+#[cfg(not(unix))]
+fn real_ssh(_: &str, _: &Path, _: &[String], _: &[&String]) -> io::Result<i32> {
+    Err(io::Error::other("a real ssh is Unix only"))
 }
 
 /// Runs `server` with the server's environment, then writes its exit code

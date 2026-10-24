@@ -57,6 +57,8 @@ pub struct How {
     /// The ssh shim drops `__new-rpc-mode` from the server's command, so
     /// that a 2.52 or 2.53 server starts in its compatibility mode.
     pub old_server: bool,
+    /// The ssh shim goes through a real ssh with this configuration.
+    pub ssh_config: Option<PathBuf>,
 }
 
 /// The host names of the two ends (`UNISONLOCALHOSTNAME`) with a remote
@@ -268,7 +270,11 @@ fn run(p: &Pairing, remote: Option<Remote>, how: &How, work: &Path) -> io::Resul
             runs = shim_runs(work);
             cmd.arg(format!("ssh://{SERVER_HOST}/b"))
                 .arg("-sshcmd")
-                .arg(shim::install(work, how.old_server)?)
+                .arg(shim::install(
+                    work,
+                    how.old_server,
+                    how.ssh_config.as_deref(),
+                )?)
                 .arg("-servercmd")
                 .arg(server_cmd(&p.server)?);
         }
