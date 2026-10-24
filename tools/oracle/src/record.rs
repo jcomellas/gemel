@@ -38,9 +38,13 @@ use std::fmt::Write as _;
 use crate::run::{Outcome, Remote, Snapshot, Step};
 use crate::scenario::Flavour;
 
+/// Outcomes recorded from the reference, to replay where there is none.
 pub struct Recording {
+    /// The scenarios' flavour.
     pub flavour: Flavour,
+    /// How replica `b` was reached.
     pub remote: Option<Remote>,
+    /// Each scenario's seed and outcome.
     pub outcomes: Vec<(u64, Outcome)>,
 }
 
@@ -75,6 +79,7 @@ fn write_names(out: &mut String, name: &str, names: &[String]) {
     }
 }
 
+/// A recording as text.
 pub fn write(r: &Recording) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "flavour {}", r.flavour.name());
@@ -179,6 +184,7 @@ impl<'a> Lines<'a> {
     }
 }
 
+/// A recording from its text.
 pub fn parse(text: &str) -> Result<Recording, String> {
     let mut lines = Lines {
         it: text.split('\n').enumerate(),

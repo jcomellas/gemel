@@ -43,17 +43,24 @@ const WORK: &str = "work-directory";
 /// to go through a real ssh.
 const SSH_CONFIG: &str = "ssh-config";
 
-/// The shim for `work`, as `-sshcmd`, copied there first if need be;
-/// `old_server` says to drop `__new-rpc-mode`, and `ssh_config` to go
-/// through a real ssh with that configuration.
-pub fn install(work: &Path, old_server: bool, ssh_config: Option<&Path>) -> io::Result<PathBuf> {
+/// The shim for `work`, as `-sshcmd`, copied there first from `harness`
+/// (the `gemel-oracle` program) if need be; `old_server` says to drop
+/// `__new-rpc-mode`, and `ssh_config` to go through a real ssh with that
+/// configuration.
+pub fn install(
+    work: &Path,
+    harness: &Path,
+    old_server: bool,
+    ssh_config: Option<&Path>,
+) -> io::Result<PathBuf> {
     let dir = work.with_file_name("ssh-shim");
     let shim = dir
         .join(NAME)
         .with_extension(std::env::consts::EXE_EXTENSION);
     if !shim.exists() {
         fs::create_dir_all(&dir)?;
-        fs::copy(std::env::current_exe()?, &shim)?;
+        fs::copy(harness, &shim)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", harness.display())))?;
     }
     fs::write(dir.join(WORK), work.as_os_str().as_encoded_bytes())?;
     let marker = dir.join("old-server");

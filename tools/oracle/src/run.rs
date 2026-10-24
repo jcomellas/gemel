@@ -59,21 +59,27 @@ pub struct How {
     pub old_server: bool,
     /// The ssh shim goes through a real ssh with this configuration.
     pub ssh_config: Option<PathBuf>,
+    /// The `gemel-oracle` program, copied as the ssh shim.
+    pub harness: PathBuf,
 }
 
 /// The host names of the two ends (`UNISONLOCALHOSTNAME`) with a remote
 /// root, which archive names and the output depend on.
 const CLIENT_HOST: &str = "client";
+/// The server's host name.
 pub const SERVER_HOST: &str = "server";
 
 /// How replica `b` is reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Remote {
+    /// Over ssh, through the shim.
     Ssh,
+    /// On a socket, from a server started for each sync.
     Socket,
 }
 
 impl Remote {
+    /// Its name on the command line and in recordings.
     pub fn name(self) -> &'static str {
         match self {
             Remote::Ssh => "ssh",
@@ -81,6 +87,7 @@ impl Remote {
         }
     }
 
+    /// The way named `s`.
     pub fn parse(s: &str) -> Option<Remote> {
         match s {
             "ssh" => Some(Remote::Ssh),
@@ -94,15 +101,20 @@ impl Remote {
 /// `b` is remote.
 #[derive(Debug, Clone)]
 pub struct Pairing {
+    /// The client.
     pub client: PathBuf,
+    /// The server, when replica `b` is remote.
     pub server: PathBuf,
 }
 
 /// One invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
+    /// The exit code; none if it was killed.
     pub exit: Option<i32>,
+    /// Its standard output, normalised.
     pub stdout: String,
+    /// Its standard error, normalised.
     pub stderr: String,
     /// The server's standard error, with a remote root.
     pub server: String,
@@ -115,9 +127,13 @@ pub type Snapshot = BTreeMap<String, String>;
 /// Everything collected from one implementation on one scenario.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
+    /// The first sync.
     pub first: Step,
+    /// The second sync.
     pub second: Step,
+    /// Replica `a` in the end.
     pub a: Snapshot,
+    /// Replica `b` in the end.
     pub b: Snapshot,
     /// Files in the Unison directory (archives, fingerprint caches, ...).
     pub unison_dir: Vec<String>,
@@ -272,6 +288,7 @@ fn run(p: &Pairing, remote: Option<Remote>, how: &How, work: &Path) -> io::Resul
                 .arg("-sshcmd")
                 .arg(shim::install(
                     work,
+                    &how.harness,
                     how.old_server,
                     how.ssh_config.as_deref(),
                 )?)

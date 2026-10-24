@@ -13,11 +13,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub struct Rng(u64);
 
 impl Rng {
+    /// The generator for `seed`.
     pub fn new(seed: u64) -> Self {
         Rng(seed ^ 0x9E37_79B9_7F4A_7C15)
     }
 
-    pub fn next(&mut self) -> u64 {
+    /// The next number.
+    pub fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -27,13 +29,15 @@ impl Rng {
 
     /// A number in `0..n`.
     pub fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
+        (self.next_u64() % n as u64) as usize
     }
 
+    /// True `percent` times in a hundred.
     pub fn chance(&mut self, percent: usize) -> bool {
         self.below(100) < percent
     }
 
+    /// One of `items`.
     pub fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
         &items[self.below(items.len())]
     }
@@ -64,7 +68,9 @@ enum Kind {
 
 /// One change to a replica. Paths are relative, with `/` separators.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(missing_docs)] // The fields say what they are.
 pub enum Op {
+    /// Makes a directory.
     Mkdir(String),
     /// Creates or overwrites a file and sets its modification time.
     Write {
@@ -74,20 +80,12 @@ pub enum Op {
     },
     /// Deletes a file, link or whole directory.
     Delete(String),
-    Rename {
-        from: String,
-        to: String,
-    },
-    /// Unix only.
-    Chmod {
-        path: String,
-        mode: u32,
-    },
-    /// Unix only.
-    Symlink {
-        path: String,
-        target: String,
-    },
+    /// Renames a file, link or directory.
+    Rename { from: String, to: String },
+    /// Sets permissions; Unix only.
+    Chmod { path: String, mode: u32 },
+    /// Makes a symbolic link; Unix only.
+    Symlink { path: String, target: String },
 }
 
 impl fmt::Display for Op {
@@ -182,11 +180,14 @@ impl Tree {
 /// permission changes or symbolic links.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flavour {
+    /// With permission changes and symbolic links.
     Unix,
+    /// Without them.
     Windows,
 }
 
 impl Flavour {
+    /// This system's flavour.
     pub fn host() -> Flavour {
         if cfg!(unix) {
             Flavour::Unix
@@ -195,6 +196,7 @@ impl Flavour {
         }
     }
 
+    /// Its name on the command line and in recordings.
     pub fn name(self) -> &'static str {
         match self {
             Flavour::Unix => "unix",
@@ -202,6 +204,7 @@ impl Flavour {
         }
     }
 
+    /// The flavour named `s`.
     pub fn parse(s: &str) -> Option<Flavour> {
         match s {
             "unix" => Some(Flavour::Unix),
@@ -349,14 +352,20 @@ impl Gen<'_> {
 /// A complete scenario.
 #[derive(Debug, Clone)]
 pub struct Scenario {
+    /// The seed it was generated from.
     pub seed: u64,
+    /// Replica `a` before the first sync.
     pub initial_a: Vec<Op>,
+    /// Replica `b` before the first sync.
     pub initial_b: Vec<Op>,
+    /// What changes on `a` between the two syncs.
     pub changes_a: Vec<Op>,
+    /// What changes on `b` between the two syncs.
     pub changes_b: Vec<Op>,
 }
 
 impl Scenario {
+    /// The scenario for `seed`, for a filesystem of `flavour`.
     pub fn generate(seed: u64, flavour: Flavour) -> Scenario {
         let mut rng = Rng::new(seed);
         // Start well in the past, so no time is within a second of the syncs.
