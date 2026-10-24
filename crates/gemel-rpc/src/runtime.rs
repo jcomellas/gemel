@@ -27,7 +27,10 @@ pub struct EngineThread<C, E> {
 
 impl<C: Send + 'static, E: Send + 'static> EngineThread<C, E> {
     /// Starts the engine thread running `engine(commands, events)`. The
-    /// thread ends when the future does.
+    /// thread ends when the future does. Blocking work still under way
+    /// then is left to end with the process: on Windows, tokio reads a
+    /// shell's output there, and the read ends only once the server does,
+    /// which may wait for the client to exit.
     pub fn spawn<F, Fut>(engine: F) -> std::io::Result<Self>
     where
         F: FnOnce(Commands<C>, Events<E>) -> Fut + Send + 'static,
@@ -43,6 +46,8 @@ impl<C: Send + 'static, E: Send + 'static> EngineThread<C, E> {
             .spawn(move || {
                 let local = tokio::task::LocalSet::new();
                 local.block_on(&runtime, engine(cmd_rx, ev_tx));
+                drop(local);
+                runtime.shutdown_background();
             })?;
         Ok(EngineThread {
             commands: cmd_tx,
