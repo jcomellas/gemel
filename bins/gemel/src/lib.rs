@@ -12,8 +12,11 @@
 //!
 //! `main.ml`'s options handled before any profile is loaded: `-version`,
 //! `-prefsman short`, `-server`, `-socket` (with `-listen`), and (not
-//! supported yet) `-doc`, `-prefsdocs` and `-prefsman full`; then the text
-//! interface, whatever `-ui` asks for.
+//! supported yet) `-doc`, `-prefsdocs` and `-prefsman full`; then the
+//! interface `-ui` asks for. Without a graphical interface ([`main`]'s
+//! `gui`), that is the text interface, whatever `-ui` asks for, as with
+//! OCaml's text-only build; with one, as `gemel-gui` runs it, the
+//! graphical interface by default, as `uigtk3`'s `Body.start` chooses.
 
 mod infos;
 mod input;
@@ -25,17 +28,21 @@ use gemel_base::util::{MY_NAME, MY_VERSION};
 use gemel_ui_api::cli::{self, Interface};
 use gemel_ui_api::exit_code::ExitCode;
 
-/// Runs the program on its command line, and ends the shells it started
-/// (`end_ssh`) as it exits.
-pub fn main() -> std::process::ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let code = run(args);
+/// A graphical interface: runs on the command line's arguments, and
+/// returns the exit code.
+pub type Gui<'a> = &'a dyn Fn(Vec<String>) -> i32;
+
+/// Runs the program on `args` (the command line without the program's
+/// name), with the graphical interface `gui` if there is one, and ends
+/// the shells it started (`end_ssh`) as it exits.
+pub fn main(args: Vec<String>, gui: Option<Gui>) -> std::process::ExitCode {
+    let code = run(args, gui);
     gemel_rpc::shell::end_shells();
     std::process::ExitCode::from(code as u8)
 }
 
 /// `Main.init`, then the interface: the exit code.
-fn run(args: Vec<String>) -> i32 {
+fn run(args: Vec<String>, gui: Option<Gui>) -> i32 {
     let prefs = match gemel_ui_api::new_prefs() {
         Ok(p) => p,
         Err(e) => {
@@ -84,6 +91,7 @@ fn run(args: Vec<String>) -> i32 {
         return server::run_socket(&hosts, port);
     }
     let interface = match argv.get(cli::UI.name()).and_then(|v| v.first()) {
+        None if gui.is_some() => Interface::Graphic,
         None => Interface::Text,
         Some(s) if s == "text" => Interface::Text,
         Some(s) if s == "graphic" => Interface::Graphic,
@@ -92,7 +100,30 @@ fn run(args: Vec<String>) -> i32 {
             return 1;
         }
     };
-    text::start(args, interface)
+    match (interface, gui) {
+        (Interface::Graphic, Some(gui)) if display_available() => gui(args),
+        (Interface::Graphic, Some(_)) => {
+            eprintln!(
+                "Warning: DISPLAY and WAYLAND_DISPLAY not set or empty; starting the Text UI"
+            );
+            text::start(args, Interface::Text)
+        }
+        (interface, _) => text::start(args, interface),
+    }
+}
+
+/// Whether a graphical interface can show a window, as `uigtk3`'s
+/// `Body.start` decides: on X11 and Wayland systems, `DISPLAY` or
+/// `WAYLAND_DISPLAY` must be set and not empty. `uigtk3` checks them
+/// everywhere but on Windows; macOS, which has neither without XQuartz,
+/// always has a display here.
+fn display_available() -> bool {
+    if cfg!(any(windows, target_os = "macos")) {
+        return true;
+    }
+    ["DISPLAY", "WAYLAND_DISPLAY"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some_and(|s| !s.is_empty()))
 }
 
 /// `Uarg.parse`'s `stop`: the error, then the usage; exits with 2. For

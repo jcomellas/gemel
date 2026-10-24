@@ -2,5 +2,5 @@
 //! remote hosts (`-server` and `-socket`). See the library's documentation.
 
 fn main() -> std::process::ExitCode {
-    gemel::main()
+    gemel::main(std::env::args().skip(1).collect(), None)
 }

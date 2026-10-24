@@ -6,12 +6,19 @@
 //! [`Model`], drains engine events on a timer and wires the callbacks (menu
 //! bar, `rfd` directory picker, SSH-password prompt).
 //!
-//! There is no engine yet: [`fake_engine`] supplies the rows and progress.
+//! It is a whole gemel, as `unison-gui` is a whole unison: the command
+//! line is Unison's, and `gemel`'s library runs it. `-ui text` runs the
+//! text interface, and so does a system without a display; `-server` and
+//! `-socket` serve.
+//!
+//! There is no engine yet: [`fake_engine`] supplies the rows and progress,
+//! and the window takes no roots or profile from the command line.
 //! Whatever replaces it, this crate talks to the engine only through
 //! `gemel-ui-api`.
 //!
-//! Development flags: `--rows N` (fake items) and `--rate N` (fake progress
-//! updates per second).
+//! Development flags, taken out of the command line before Unison reads
+//! it: `--rows N` (fake items) and `--rate N` (fake progress updates per
+//! second).
 
 mod fake_engine;
 mod recon_view;
@@ -53,8 +60,10 @@ impl Default for Args {
 }
 
 impl Args {
-    fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Self, String> {
+    /// Takes the development flags out of `args`: them, and the rest.
+    fn split<I: IntoIterator<Item = String>>(args: I) -> Result<(Self, Vec<String>), String> {
         let mut out = Args::default();
+        let mut rest = Vec::new();
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
             let mut value = |name: &str| {
@@ -65,10 +74,10 @@ impl Args {
             match arg.as_str() {
                 "--rows" => out.rows = value("--rows")? as usize,
                 "--rate" => out.rate = value("--rate")?,
-                other => return Err(format!("unknown argument {other:?}")),
+                _ => rest.push(arg),
             }
         }
-        Ok(out)
+        Ok((out, rest))
     }
 }
 
@@ -362,19 +371,23 @@ fn run(args: &Args) -> Result<(), slint::PlatformError> {
 }
 
 fn main() -> std::process::ExitCode {
-    let args = match Args::parse(std::env::args().skip(1)) {
-        Ok(args) => args,
+    let (dev, args) = match Args::split(std::env::args().skip(1)) {
+        Ok(split) => split,
         Err(e) => {
             eprintln!("gemel-gui: {e}");
-            eprintln!("usage: gemel-gui [--rows N] [--rate UPDATES_PER_SEC]");
             return ExitCode::Fatal.into();
         }
     };
-    match run(&args) {
-        Ok(()) => ExitCode::Perfect.into(),
+    gemel::main(args, Some(&|_| graphical(&dev)))
+}
+
+/// The graphical interface: the exit code.
+fn graphical(dev: &Args) -> i32 {
+    match run(dev) {
+        Ok(()) => ExitCode::Perfect as i32,
         Err(e) => {
             eprintln!("gemel-gui: {e}");
-            ExitCode::Fatal.into()
+            ExitCode::Fatal as i32
         }
     }
 }
@@ -450,8 +463,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_flags() {
-        let args = Args::parse(["--rows", "10", "--rate", "5000"].map(String::from)).unwrap();
+    fn development_flags_are_taken_out() {
+        let (args, rest) =
+            Args::split(["-batch", "--rows", "10", "a", "--rate", "5000"].map(String::from))
+                .unwrap();
         assert_eq!(
             args,
             Args {
@@ -459,8 +474,9 @@ mod tests {
                 rate: 5000
             }
         );
-        assert!(Args::parse(["--nope".to_string()]).is_err());
-        assert!(Args::parse(["--rows".to_string()]).is_err());
+        assert_eq!(rest, ["-batch", "a"]);
+        assert!(Args::split(["--rows".to_string()]).is_err());
+        assert!(Args::split(["--rate".to_string(), "x".to_string()]).is_err());
     }
 
     #[test]
