@@ -75,8 +75,7 @@ jobs:
       # its server, with items one at a time, then concurrently, as clients
       # run them by default. Then a gemel client with each server (2.52 and
       # 2.53 also in their compatibility mode), and gemel at both ends,
-      # against the pinned client with the same server. (A gemel client
-      # runs items one at a time until phase 5.)
+      # against the pinned client with the same server.
       - id: ocaml
         run: echo "version=$(ocamlopt -version)" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
@@ -150,6 +149,30 @@ jobs:
             oracle --remote ssh --old-server --reference unison-src/src/unison --reference-server releases/unison-$v \
               --candidate target/debug/gemel --candidate-server releases/unison-$v --count 20
           done
+        shell: bash
+      # The same over a real ssh and sshd, with keys of their own, on this
+      # host (scripts/start-sshd.sh): a gemel client, a gemel server (one
+      # item at a time, then concurrently) and gemel at both ends. Each
+      # sync must have logged in, so that the shim can't have run the
+      # server itself.
+      - timeout-minutes: 20
+        run: |
+          sudo apt-get install -y --no-install-recommends openssh-server
+          d=$RUNNER_TEMP/sshd
+          scripts/start-sshd.sh $d
+          oracle() {
+            cargo run --locked -q -p gemel-oracle -- --remote ssh --ssh-config $d/ssh_config \
+              --reference unison-src/src/unison --count 10 "$@"
+          }
+          logins() { grep -c "Accepted publickey" $d/sshd.log; }
+          before=$(logins)
+          oracle --candidate target/debug/gemel --candidate-server unison-src/src/unison
+          oracle --candidate-server target/debug/gemel
+          oracle --concurrent --candidate-server target/debug/gemel
+          oracle --candidate target/debug/gemel
+          # Three syncs for each side of each of 40 scenarios.
+          test $(($(logins) - before)) -eq 240
+          kill "$(cat $d/sshd.pid)"
         shell: bash
       # Outcomes on a socket and over ssh for Windows, still the reference's.
       - run: cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-socket.txt --candidate unison-src/src/unison
