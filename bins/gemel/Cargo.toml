@@ -8,6 +8,13 @@ license.workspace = true
 authors.workspace = true
 publish.workspace = true
 
+# The library is the program, which `gemel-gui` runs too; the binary is
+# its `main`. Only the library is documented, so that the two don't
+# collide under `cargo doc`.
+[[bin]]
+name = "gemel"
+doc = false
+
 [dependencies]
 gemel-base.workspace = true
 gemel-fs.workspace = true
