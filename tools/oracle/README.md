@@ -7,6 +7,12 @@ its agreement on all three operating systems is the milestone's definition
 of done. With remote roots, it is phase 0 of
 [milestone 3](../../docs/milestone-3-plan.md) too.
 
+The harness is also a library (`src/lib.rs`): `gemel-gui`'s tests use its
+scenarios, runs and comparisons, with the graphical interface as one side
+([milestone 4](../../docs/milestone-4-plan.md), phase 0). A library caller
+that runs scenarios over ssh passes the built `gemel-oracle` program as
+`How::harness`, since the shim is a copy of it.
+
 ## What a scenario is
 
 Each scenario is generated from a seed (`src/scenario.rs`):
