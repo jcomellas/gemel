@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: proposed (2026-10-24) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 0, 2026-10-24) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -114,6 +114,28 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - the oracle's scenario generator (`tools/oracle/src/scenario.rs`) becomes usable from tests;
   - the harness runs a scenario through the GUI with the default actions, then through `gemel -batch`, one after the other in the same work directory, as the oracle runs its reference and candidate (archive names hash the roots' absolute paths), and compares trees and archives. It is the base for the definition of done's item 2, from phase 1 on.
 - **CI** runs the GUI's tests headless on all three systems, as the spike's test does now.
+
+**Notes (phase 0, 2026-10-24):**
+- **A whole gemel:** `bins/gemel` is a library, the program, and a binary that calls it. `gemel::main` takes the graphical interface as an argument.
+  - `gemel-gui` passes its window, which is then the default interface.
+  - `-ui text` runs the text interface.
+  - On X11 and Wayland systems without `DISPLAY` or `WAYLAND_DISPLAY`, the text interface runs, after `uigtk3`'s warning on standard error (`Util.warn`'s default printer).
+  - `-server` and `-socket` serve.
+  - `gemel` itself is unchanged, `-ui graphic` included.
+  - `bins/gemel-gui/tests/program.rs` checks each of these.
+- **The development flags** `--rows` and `--rate` are taken out of the command line before Unison reads it. The window takes no roots or profile yet.
+- **`gemel-gui` is a library too:** the program with its window, so that integration tests can drive the window. The tests need the built program (`CARGO_BIN_EXE_gemel-gui`), which only a package's own integration tests get.
+- **The oracle's harness is a library:**
+  - it holds the scenarios, runs, recordings, the ssh shim and the comparisons, which move out of the program into `compare.rs`;
+  - the shim is copied from the program the caller names (`How::harness`), not from the running one, which in a test would be the test;
+  - scenarios through the GUI with a remote root will need the built `gemel-oracle` passed in, as `GEMEL_REFERENCE_UNISON` passes OCaml.
+- **Driving the window** (`bins/gemel-gui/tests/support`):
+  - Slint's testing backend has a platform per thread, so window tests run in parallel, and on one thread one after the other.
+  - Its clock is a mock one that only the harness moves. `wait_until` moves it a frame at a time, against a deadline in real time, since what the timers wait for (another thread, a process) takes real time. A test checks that the window's timer applies what another thread sends.
+  - The spike's window test moved onto the harness.
+- **Scenarios through the harness:** each runs through one side, then through `gemel-gui -ui text`, in the same work directory. They are compared as the oracle compares them: output, trees, the Unison directory's files, and a recheck by the text interface. With no session in the window yet, both sides are the text interface, as a self-test (5 of 5). The window becomes one side in phase 1a.
+- **The Linux image** (`docker/linux/Dockerfile`) gains netbase: `gemel-fs`'s test of ports by service name needs `/etc/services`, which CI's Ubuntu runner has. The image's CI checks had failed there since milestone 3's phase 6a.
+- **ConPTY needs no new windows-sys feature:** `CreatePseudoConsole` is in `Win32_System_Console`, which the console modes already enable.
 
 ### Phase 1: the main window on the session (`uigtk3.ml`'s `createToplevelWindow`, ~1.7k)
 
