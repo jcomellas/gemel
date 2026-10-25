@@ -11,9 +11,8 @@
 //! text interface, and so does a system without a display; `-server` and
 //! `-socket` serve.
 //!
-//! What `uigtk3` does that isn't here yet (milestone 4's plan): the
-//! profile manager, so a profile must be named on the command line (or
-//! roots given); the Help menu.
+//! What `uigtk3` does that isn't here yet (milestone 4's plan): editing
+//! profiles and their preferences, and the Help menu.
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 
@@ -21,6 +20,7 @@ pub mod recon_view;
 pub mod stats;
 pub mod summary;
 mod task;
+pub mod wizard;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -32,9 +32,10 @@ use std::time::{Duration, Instant};
 use gemel_ui_api::clroot::{self, Clroot};
 use gemel_ui_api::exit_code::ExitCode;
 use gemel_ui_api::session::{
-    self, Command, Config, Event, Favor, IgnoreKind, ItemView, LogKind, Overrides, Progress,
-    Question, Reply, RootNames, SetAction, Settings, SortKind, Summary, Traffic, Updates,
+    self, Command, Config, Event, Favor, IgnoreKind, ItemView, LogKind, NewProfile, Overrides,
+    Progress, Question, Reply, RootNames, SetAction, Settings, SortKind, Summary, Traffic, Updates,
 };
+use gemel_ui_api::uicommon::startup::ProfileInfo;
 use gemel_ui_api::{MY_NAME, Subpaths, Trace, padto};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
@@ -48,7 +49,9 @@ pub mod ui {
     slint::include_modules!();
 }
 
-use ui::{AppWindow, DiffLine, DiffWindow, ProfileKey, RowData, StatsWindow, SummaryEntry};
+use ui::{
+    AppWindow, DiffLine, DiffWindow, ProfileKey, ProfileRow, RowData, StatsWindow, SummaryEntry,
+};
 
 /// How the window starts its session.
 pub struct Startup {
@@ -175,10 +178,20 @@ enum OnAnswer {
     WarnHere,
     /// Keeps a merge's result (Yes), or not.
     Merge(Reply<bool>),
-    /// Quit ends the program, Close goes on (`fatalError`).
+    /// Quit ends the program, Close goes on, to the profile manager if no
+    /// profile is loaded (`fatalErrorHandler`).
     Error,
-    /// Ends the program (`fatalError ~quit:true`).
-    Fatal,
+    /// An error before the first items: Quit ends the program, Close goes
+    /// to the profile manager, the command line's roots forgotten
+    /// (`start`'s `initLoop`).
+    StartError,
+    /// The profile manager (`getProfile`), whose buttons have callbacks of
+    /// their own.
+    Manager,
+    /// The profile creation assistant (`createProfile`), the same.
+    Wizard,
+    /// Deletes the profile (Delete), or not.
+    DeleteProfile(String),
     /// Ends the program while it works (Yes), or not (`safeExit`).
     PrematureExit,
     /// The first root, typed or picked (`getFirstRoot`).
@@ -232,6 +245,21 @@ impl Dialog {
 
 // ---- The window ----
 
+/// What a profile command's reply is for.
+enum ProfileOp {
+    /// Starting: then the profile the command line names is loaded, or
+    /// without one, the profile manager opens (Quit ends with 0).
+    Startup(Option<String>),
+    /// The profile manager opens, with this exit code on Quit (none: it
+    /// has Cancel), with this profile selected.
+    Manager(Option<i32>, Option<String>),
+    /// A profile was created: selected in the manager; an error saving it
+    /// is shown.
+    Created(String),
+    /// A profile was deleted (an error doing so is dropped).
+    Deleted,
+}
+
 /// What happens once [`Command::Configure`] has been applied.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum AfterConfigure {
@@ -263,10 +291,15 @@ struct State {
     /// and nothing else may be done meanwhile (the items' indices may be
     /// about to change).
     locked: bool,
-    /// The profile to load once the profiles have been scanned.
-    pending_profile: Option<String>,
     /// The profiles bound to the keys 0 to 9 (`profileKeymap`).
     keymap: [Option<String>; 10],
+    /// The profiles found, in order (`profilesAndRoots`, sorted).
+    profiles: Vec<(String, ProfileInfo)>,
+    /// What the profile commands sent are for, in order: each reply
+    /// (`Event::Profiles`, or an error) answers the first.
+    profile_ops: VecDeque<ProfileOp>,
+    /// The profile manager's exit code on Quit; none: Cancel.
+    manager_quit: Option<i32>,
     /// The profile is being loaded again: no "contacting server" message
     /// (`loadProfile`'s `reload`).
     reloading: bool,
@@ -480,10 +513,17 @@ impl App {
     }
 
     fn send(&self, c: Command) {
+        self.try_send(c);
+    }
+
+    /// Sends `c`: whether the session took it (without a session, it is
+    /// kept).
+    fn try_send(&self, c: Command) -> bool {
         if self.detached {
             self.state.borrow_mut().sent.push(c);
-        } else if let Some(s) = self.session.borrow().as_ref() {
-            s.send(c);
+            true
+        } else {
+            self.session.borrow().as_ref().is_some_and(|s| s.send(c))
         }
     }
 
@@ -601,6 +641,26 @@ impl App {
         }
     }
 
+    /// Shows `d` before the dialogs waiting: one opened from the dialog
+    /// shown, over it.
+    fn push_dialog_front(&self, d: Dialog) {
+        self.state.borrow_mut().dialogs.push_front(d);
+        self.show_dialog();
+    }
+
+    /// Closes the dialog shown, if it is of `kind`, and shows the next.
+    fn pop_dialog(&self, kind: i32) {
+        let popped = {
+            let mut s = self.state.borrow_mut();
+            match s.dialogs.front() {
+                Some(d) if d.kind == kind => s.dialogs.pop_front(),
+                _ => None,
+            }
+        };
+        drop(popped);
+        self.show_dialog();
+    }
+
     /// Shows the first dialog waiting, if any.
     fn show_dialog(&self) {
         let s = self.state.borrow();
@@ -681,11 +741,34 @@ impl App {
                 }
             }
             OnAnswer::Error => {
-                if ok {
+                if !ok {
+                    self.quit(1);
+                } else if self.state.borrow().settings.is_none() {
+                    // No profile: `getProfile true`, whose Quit ends with 1.
+                    self.scan_profiles(ProfileOp::Manager(Some(1), None));
+                }
+            }
+            OnAnswer::StartError => {
+                self.state
+                    .borrow_mut()
+                    .profile_ops
+                    .push_back(ProfileOp::Manager(Some(0), None));
+                // Without a session (it couldn't start), there is no
+                // manager to go to.
+                if !ok || !self.try_send(Command::ForgetClRoots) {
                     self.quit(1);
                 }
             }
-            OnAnswer::Fatal => self.quit(1),
+            OnAnswer::Manager | OnAnswer::Wizard => {}
+            OnAnswer::DeleteProfile(name) => {
+                if ok {
+                    self.state
+                        .borrow_mut()
+                        .profile_ops
+                        .push_back(ProfileOp::Deleted);
+                    self.send(Command::DeleteProfile(name));
+                }
+            }
             OnAnswer::PrematureExit => {
                 if ok {
                     self.quit(0);
@@ -773,15 +856,8 @@ impl App {
     pub fn handle(&self, e: Event) {
         match e {
             // `startGUI`: `updateProfileKeyMenu`, then `loadAndRunProfile`.
-            Event::Started(Some(profile)) => {
-                self.state.borrow_mut().pending_profile = Some(profile);
-                self.send(Command::ScanProfiles);
-            }
-            Event::Profiles(profiles) => self.profiles(&profiles),
-            Event::Started(None) => self.error(
-                "Profiles can't be chosen in the window yet: \
-                 name a profile, or two roots, on the command line.",
-            ),
+            Event::Started(profile) => self.scan_profiles(ProfileOp::Startup(profile)),
+            Event::Profiles(profiles) => self.profiles(profiles),
             Event::ProfileLoaded(settings) => {
                 let after = {
                     let mut s = self.state.borrow_mut();
@@ -868,7 +944,21 @@ impl App {
             Event::Diff { shown, errors } => self.diffs_shown(shown, &errors),
             Event::InputEnded(root) => self.input_ended(&root),
             Event::Changed | Event::Interrupted => {}
-            Event::Error(msg) => self.error(&msg),
+            Event::Error(msg) => {
+                let op = self.state.borrow_mut().profile_ops.pop_front();
+                match op {
+                    // `saveProfile`'s error.
+                    Some(ProfileOp::Created(_)) => self.push_dialog_front(Dialog::message(
+                        "Could not save profile",
+                        &format!("Error when saving profile: {msg}"),
+                        "OK",
+                        "",
+                        OnAnswer::Close,
+                    )),
+                    Some(ProfileOp::Deleted) => {}
+                    _ => self.error(&msg),
+                }
+            }
             // The user chose to stop at a warning (`doExit`).
             Event::Exit(_) => self.quit(0),
         }
@@ -967,11 +1057,11 @@ impl App {
     }
 
     /// `fatalErrorHandler`, or before the first items are shown, `start`'s
-    /// `fatalError`: there is no profile manager to go back to yet, so the
-    /// program ends.
+    /// `initLoop`: `fatalError`, whose Close goes back to the profile
+    /// manager if there is no profile to go on with.
     fn error(&self, msg: &str) {
         let started = self.state.borrow().started;
-        let title = if started { "Error" } else { "Fatal error" };
+        let title = "Error";
         self.send(Command::Log(LogKind::Log, format!("{title}: {msg}\n")));
         {
             let mut s = self.state.borrow_mut();
@@ -999,7 +1089,13 @@ impl App {
                 OnAnswer::Error,
             ));
         } else {
-            self.push_dialog(Dialog::message(title, msg, "Quit", "", OnAnswer::Fatal));
+            self.push_dialog(Dialog::message(
+                title,
+                msg,
+                "Close",
+                "Quit",
+                OnAnswer::StartError,
+            ));
         }
     }
 
@@ -1178,9 +1274,9 @@ impl App {
 
     /// `updateProfileKeyMenu`: the profiles bound to keys; then the
     /// profile the command line names is loaded.
-    fn profiles(&self, profiles: &[(String, gemel_ui_api::uicommon::startup::ProfileInfo)]) {
+    fn profiles(&self, mut profiles: Vec<(String, ProfileInfo)>) {
         let mut keymap: [Option<String>; 10] = Default::default();
-        for (name, info) in profiles {
+        for (name, info) in &profiles {
             // The session has checked that keys are single digits, and
             // each bound once.
             if let Some(k) = info.key.as_deref().and_then(|k| k.parse::<usize>().ok())
@@ -1198,14 +1294,280 @@ impl App {
             })
             .collect();
         self.ui.set_profile_keys(ModelRc::new(VecModel::from(keys)));
-        let pending = {
+        // `fillLst`'s order.
+        profiles.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        let op = {
             let mut s = self.state.borrow_mut();
             s.keymap = keymap;
-            s.pending_profile.take()
+            s.profiles = profiles;
+            s.profile_ops.pop_front()
         };
-        if let Some(p) = pending {
-            self.load_profile(&p);
+        match op {
+            Some(ProfileOp::Startup(Some(p))) => self.load_profile(&p),
+            Some(ProfileOp::Startup(None)) => self.open_manager(Some(0), None),
+            Some(ProfileOp::Manager(quit, select)) => self.open_manager(quit, select),
+            Some(ProfileOp::Created(name)) => self.refresh_manager(Some(&name)),
+            Some(ProfileOp::Deleted) | None => self.refresh_manager(None),
         }
+    }
+
+    /// Scans the profiles, for `op`.
+    fn scan_profiles(&self, op: ProfileOp) {
+        self.state.borrow_mut().profile_ops.push_back(op);
+        self.send(Command::ScanProfiles);
+    }
+
+    // ---- The profile manager ----
+
+    /// `getProfile`: the profile manager, Quit ending the program with
+    /// `quit` (none: Cancel), with `select` selected.
+    fn open_manager(&self, quit: Option<i32>, select: Option<String>) {
+        self.state.borrow_mut().manager_quit = quit;
+        self.ui.set_manager_quit(quit.is_some());
+        let open = self.state.borrow().dialogs.iter().any(|d| d.kind == 6);
+        if !open {
+            self.push_dialog_front(Dialog {
+                kind: 6,
+                title: "Profile Selection".to_owned(),
+                message: String::new(),
+                ok: "Open",
+                cancel: "",
+                on: OnAnswer::Manager,
+                entries: Vec::new(),
+            });
+        }
+        self.refresh_manager(select.as_deref());
+    }
+
+    /// `fillLst`: the manager's list, with `select` selected.
+    fn refresh_manager(&self, select: Option<&str>) {
+        let (rows, selected) = {
+            let s = self.state.borrow();
+            let rows: Vec<ProfileRow> = (s.profiles.iter())
+                .map(|(name, info)| ProfileRow {
+                    name: name.as_str().into(),
+                    label: info.label.clone().unwrap_or_default().into(),
+                })
+                .collect();
+            let selected = select
+                .and_then(|n| s.profiles.iter().position(|(name, _)| name == n))
+                .map_or(-1, |i| i as i32);
+            (rows, selected)
+        };
+        self.ui.set_profiles(ModelRc::new(VecModel::from(rows)));
+        self.select_in_manager(selected);
+    }
+
+    /// Selects row `i` (-1: none), and shows its roots if it has two.
+    fn select_in_manager(&self, i: i32) {
+        self.ui.set_profile_selected(i);
+        let roots = usize::try_from(i).ok().and_then(|i| {
+            self.state
+                .borrow()
+                .profiles
+                .get(i)
+                .map(|(_, info)| info.roots.clone())
+        });
+        let (r1, r2) = match roots.as_deref() {
+            Some([r1, r2]) => (r1.clone(), r2.clone()),
+            _ => (String::new(), String::new()),
+        };
+        self.ui.set_profile_root1(r1.into());
+        self.ui.set_profile_root2(r2.into());
+    }
+
+    /// The profile selected in the manager.
+    fn manager_selection(&self) -> Option<String> {
+        let i = usize::try_from(self.ui.get_profile_selected()).ok()?;
+        self.state.borrow().profiles.get(i).map(|(n, _)| n.clone())
+    }
+
+    /// Open (`loadAndRunProfile`): the profile selected.
+    fn manager_open(&self) {
+        let Some(name) = self.manager_selection() else {
+            return;
+        };
+        self.pop_dialog(6);
+        self.clear_main_window();
+        self.load_profile(&name);
+    }
+
+    /// Quit or Cancel.
+    fn manager_close(&self) {
+        let quit = self.state.borrow().manager_quit;
+        self.pop_dialog(6);
+        if let Some(code) = quit {
+            self.quit(code);
+        }
+    }
+
+    /// Delete: asks first (`deleteProfile`).
+    fn manager_delete(&self) {
+        let Some(name) = self.manager_selection() else {
+            return;
+        };
+        self.push_dialog_front(Dialog::message(
+            "Profile Deletion",
+            &format!("Do you really want to delete profile {name}?"),
+            "Delete",
+            "Cancel",
+            OnAnswer::DeleteProfile(name),
+        ));
+    }
+
+    /// Change Profile (`profileChange`): the manager, with Cancel.
+    fn change_profile(&self) {
+        if self.busy() {
+            return self.status("Synchronizer is busy, please wait..");
+        }
+        self.scan_profiles(ProfileOp::Manager(None, None));
+    }
+
+    // ---- The profile creation assistant ----
+
+    /// `createProfile`: the assistant, from its first page.
+    fn open_wizard(&self) {
+        let ui = &self.ui;
+        ui.set_wiz_page(0);
+        for set in [
+            AppWindow::set_wiz_name,
+            AppWindow::set_wiz_label,
+            AppWindow::set_wiz_host,
+            AppWindow::set_wiz_user,
+            AppWindow::set_wiz_port,
+            AppWindow::set_wiz_first,
+            AppWindow::set_wiz_second,
+            AppWindow::set_wiz_remote,
+        ] {
+            set(ui, SharedString::new());
+        }
+        ui.set_wiz_kind(0);
+        ui.set_wiz_dir_kind(0);
+        ui.set_wiz_compress(false);
+        ui.set_wiz_fat(false);
+        // Under Windows, the options are all set properly.
+        ui.set_wiz_fat_shown(!cfg!(windows));
+        self.push_dialog_front(Dialog {
+            kind: 7,
+            title: "Profile Creation".to_owned(),
+            message: String::new(),
+            ok: "",
+            cancel: "",
+            on: OnAnswer::Wizard,
+            entries: Vec::new(),
+        });
+        self.wizard_changed();
+    }
+
+    /// Whether the profile `name` exists (`Prefs.profilePathname`).
+    fn profile_exists(&self, name: &str) -> bool {
+        !name.is_empty()
+            && self.unison_dir.as_ref().is_some_and(|dir| {
+                dir.join(name).exists() || dir.join(format!("{name}.prf")).exists()
+            })
+    }
+
+    /// The assistant's state, from what is entered: whether its page is
+    /// complete, and what its pages say.
+    fn wizard_changed(&self) {
+        use wizard::{DirKind, Kind};
+        let ui = &self.ui;
+        let kind = Kind::of(ui.get_wiz_kind());
+        let dir_kind = DirKind::of(ui.get_wiz_dir_kind());
+        let name = ui.get_wiz_name().to_string();
+        let exists = self.profile_exists(&name);
+        ui.set_wiz_exists(exists);
+        ui.set_wiz_kind_text(kind.description().into());
+        ui.set_wiz_requirement(kind.requirement().into());
+        ui.set_wiz_connection(kind.connection().into());
+        ui.set_wiz_first_label(dir_kind.first_label(kind).into());
+        ui.set_wiz_second_label(dir_kind.second_label(kind).into());
+        ui.set_wiz_remote_note(dir_kind.remote_note(kind).into());
+        let page = ui.get_wiz_page();
+        ui.set_wiz_title(
+            [
+                "Profile Creation",
+                "Profile Description",
+                "Connection Setup",
+                "Directory Selection",
+                "Specific Options",
+                "Done",
+            ]
+            .get(page as usize)
+            .copied()
+            .unwrap_or("")
+            .into(),
+        );
+        let complete = match page {
+            1 => wizard::description_complete(&name, exists),
+            2 => wizard::connection_complete(kind, &ui.get_wiz_host(), &ui.get_wiz_port()),
+            3 => wizard::directories_complete(kind, &ui.get_wiz_first(), &ui.get_wiz_second()),
+            5 => self.wizard_root().is_ok(),
+            _ => true,
+        };
+        ui.set_wiz_complete(complete);
+    }
+
+    /// The second root entered (`makeRemoteRoot`).
+    fn wizard_root(&self) -> Result<String, String> {
+        let ui = &self.ui;
+        let kind = wizard::Kind::of(ui.get_wiz_kind());
+        let second = if kind == wizard::Kind::Local {
+            ui.get_wiz_second()
+        } else {
+            ui.get_wiz_remote()
+        };
+        wizard::second_root(
+            kind,
+            &second,
+            &ui.get_wiz_host(),
+            &ui.get_wiz_user(),
+            &ui.get_wiz_port(),
+        )
+    }
+
+    /// Next and Back: the page after or before, the options' page skipped
+    /// under Windows. On the last, whether the profile can be made, and if
+    /// not, why.
+    fn wizard_turn(&self, by: i32) {
+        let ui = &self.ui;
+        let mut page = (ui.get_wiz_page() + by).clamp(0, 5);
+        if page == 4 && cfg!(windows) {
+            page += by;
+        }
+        ui.set_wiz_page(page);
+        if page == 5 {
+            let root = self.wizard_root();
+            ui.set_wiz_conclusion(wizard::conclusion(root.is_ok()).into());
+            if let Err(e) = root {
+                self.push_dialog_front(Dialog::message("Error", &e, "OK", "", OnAnswer::Close));
+            }
+        }
+        self.wizard_changed();
+    }
+
+    /// Apply (`saveProfile`): the profile is written, and the assistant
+    /// closes.
+    fn wizard_apply(&self) {
+        let ui = &self.ui;
+        let Ok(root2) = self.wizard_root() else {
+            return;
+        };
+        let kind = wizard::Kind::of(ui.get_wiz_kind());
+        let p = NewProfile {
+            name: ui.get_wiz_name().to_string(),
+            label: ui.get_wiz_label().to_string(),
+            root1: ui.get_wiz_first().to_string(),
+            root2,
+            compress: ui.get_wiz_compress() && kind == wizard::Kind::Ssh,
+            fat: ui.get_wiz_fat() && !cfg!(windows),
+        };
+        self.pop_dialog(7);
+        self.state
+            .borrow_mut()
+            .profile_ops
+            .push_back(ProfileOp::Created(p.name.clone()));
+        self.send(Command::CreateProfile(p));
     }
 
     /// A profile key (`fastProf`): loads the profile bound to it, if its
@@ -1951,6 +2313,62 @@ impl App {
                 let _ = s.stats_window.hide();
             });
             slint::CloseRequestResponse::HideWindow
+        });
+        let w = with.clone();
+        ui.on_change_profile(move || {
+            w(&|s| {
+                if s.ui.get_dialog() == 0 && s.ui.get_rescan_enabled() {
+                    s.change_profile();
+                }
+            })
+        });
+        let w = with.clone();
+        ui.on_profile_clicked(move |i| w(&|s| s.select_in_manager(i)));
+        let w = with.clone();
+        ui.on_profile_open(move || w(&|s| s.manager_open()));
+        let w = with.clone();
+        ui.on_profile_close(move || w(&|s| s.manager_close()));
+        let w = with.clone();
+        ui.on_profile_add(move || w(&|s| s.open_wizard()));
+        let w = with.clone();
+        ui.on_profile_delete(move || w(&|s| s.manager_delete()));
+        let w = with.clone();
+        ui.on_wizard_changed(move || w(&|s| s.wizard_changed()));
+        let w = with.clone();
+        ui.on_wizard_next(move || w(&|s| s.wizard_turn(1)));
+        let w = with.clone();
+        ui.on_wizard_back(move || w(&|s| s.wizard_turn(-1)));
+        let w = with.clone();
+        ui.on_wizard_cancel(move || w(&|s| s.pop_dialog(7)));
+        let w = with.clone();
+        ui.on_wizard_apply(move || w(&|s| s.wizard_apply()));
+        let w = with.clone();
+        ui.on_wizard_browse(move |which| {
+            w(&|s| {
+                // With a parent window this is a sheet on macOS, so the
+                // event loop keeps running.
+                let files = wizard::DirKind::of(s.ui.get_wiz_dir_kind()) == wizard::DirKind::File;
+                let dialog = rfd::AsyncFileDialog::new().set_parent(&s.ui.window().window_handle());
+                let ui = s.ui.as_weak();
+                let picked = move |path: Option<String>| {
+                    if let Some(path) = path {
+                        let _ = ui.upgrade_in_event_loop(move |ui| {
+                            if which == 0 {
+                                ui.set_wiz_first(path.into());
+                            } else {
+                                ui.set_wiz_second(path.into());
+                            }
+                            ui.invoke_wizard_changed();
+                        });
+                    }
+                };
+                let path = |h: Option<rfd::FileHandle>| h.map(|h| h.path().display().to_string());
+                if files {
+                    task::spawn(dialog.pick_file(), move |h| picked(path(h)));
+                } else {
+                    task::spawn(dialog.pick_folder(), move |h| picked(path(h)));
+                }
+            })
         });
         let w = with.clone();
         ui.on_quit(move || w(&|s| s.safe_exit()));

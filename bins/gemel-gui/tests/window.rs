@@ -16,7 +16,9 @@ use i_slint_backend_testing::{AccessibleRole, ElementQuery};
 use slint::platform::Key;
 use slint::{ComponentHandle, LogicalSize, Model};
 
-use support::{click, fake_item, fake_updates, init, items, press, type_text, wait_until};
+use support::{
+    can_press, click, fake_item, fake_updates, init, items, press, type_text, wait_until,
+};
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -227,17 +229,257 @@ fn roots_are_asked_for() {
     app.quit(0);
 }
 
-/// Without a profile or roots, the window says it can't choose one yet,
-/// and Quit ends the program.
+/// Profiles `names` in `dir/unison`, each with replicas of its own (and
+/// a file in the first), and the label `Label of NAME`.
+fn profiles(dir: &Path, names: &[&str]) {
+    std::fs::create_dir_all(dir.join("unison")).unwrap();
+    for n in names {
+        let (a, b) = (dir.join(format!("{n}-a")), dir.join(format!("{n}-b")));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join(format!("{n}-file")), n).unwrap();
+        std::fs::write(
+            dir.join("unison").join(format!("{n}.prf")),
+            format!(
+                "label = Label of {n}\nroot = {}\nroot = {}\nlog = false\n",
+                a.display(),
+                b.display()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+/// The profile manager's rows, as a screen reader names them.
+fn manager_rows(ui: &gemel_gui::ui::AppWindow) -> Vec<String> {
+    ui.get_profiles()
+        .iter()
+        .map(|r| r.name.to_string())
+        .collect()
+}
+
+/// Without a profile or roots, the profile manager opens (`getProfile`):
+/// the profiles in order, a profile's roots once it is selected, and Quit,
+/// which ends the program.
 #[test]
-fn without_a_profile_the_window_ends() {
+fn without_a_profile_the_profile_manager_opens() {
     let work = support::Work::new("window-none");
-    std::fs::create_dir_all(work.0.join("unison")).unwrap();
-    let (app, _) = support::window(&work.0.join("unison"), Vec::new());
+    profiles(&work.0, &["b", "a"]);
+    let (app, out) = support::window(&work.0.join("unison"), Vec::new());
     let ui = app.ui();
     let _ticks = app.start_ticks();
-    assert!(wait_until(WAIT, || ui.get_dialog() == 1));
-    assert_eq!(ui.get_dialog_title(), "Fatal error");
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
+    assert_eq!(manager_rows(ui), ["a", "b"]);
+    assert_eq!(ui.get_profiles().row_data(0).unwrap().label, "Label of a");
+    assert!(!can_press(ui, "Open") && !can_press(ui, "Delete"));
+    ui.invoke_profile_clicked(1);
+    assert!(can_press(ui, "Open"));
+    assert!(ui.get_profile_root1().ends_with("b-a"));
+    assert!(ui.get_profile_root2().ends_with("b-b"));
+    assert!(press(ui, "Quit"));
+    assert_eq!(app.exit_code(), Some(0));
+}
+
+/// The assistant (`createProfile`) makes a local profile, which the
+/// manager selects, and which opens and syncs.
+#[test]
+fn the_assistant_makes_a_profile_that_syncs() {
+    let work = support::Work::new("window-assistant");
+    let dir = &work.0;
+    profiles(dir, &[]);
+    for r in ["a", "b"] {
+        std::fs::create_dir_all(dir.join(r)).unwrap();
+    }
+    std::fs::write(dir.join("a/f"), "f").unwrap();
+    let (app, out) = support::window(&dir.join("unison"), Vec::new());
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
+    assert!(press(ui, "Add"));
+    assert_eq!(
+        (ui.get_dialog(), ui.get_wiz_title()),
+        (7, "Profile Creation".into())
+    );
+    assert!(press(ui, "Next"));
+    // A name is needed.
+    assert!(!can_press(ui, "Next"));
+    ui.set_wiz_name("new".into());
+    ui.set_wiz_label("A new one".into());
+    ui.invoke_wizard_changed();
+    assert!(press(ui, "Next"));
+    assert_eq!(ui.get_wiz_title(), "Connection Setup");
+    assert!(press(ui, "Next"));
+    // Two directories, not the same.
+    let (a, b) = (
+        dir.join("a").display().to_string(),
+        dir.join("b").display().to_string(),
+    );
+    ui.set_wiz_first(a.as_str().into());
+    ui.set_wiz_second(a.as_str().into());
+    ui.invoke_wizard_changed();
+    assert!(!can_press(ui, "Next"));
+    ui.set_wiz_second(b.as_str().into());
+    ui.invoke_wizard_changed();
+    while ui.get_wiz_page() < 5 {
+        assert!(press(ui, "Next"));
+    }
+    assert!(ui.get_wiz_conclusion().contains("Apply"));
+    assert!(press(ui, "Apply"));
+    assert!(
+        wait_until(WAIT, || ui.get_dialog() == 6 && manager_rows(ui) == ["new"]),
+        "{}",
+        out.text()
+    );
+    assert_eq!(ui.get_profile_selected(), 0);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("unison/new.prf")).unwrap(),
+        format!("# Unison preferences\nlabel = A new one\nroot = {a}\nroot = {b}\n")
+    );
+    assert!(press(ui, "Open"));
+    // No archives yet: a warning, then the items.
+    assert!(wait_until(WAIT, || ui.get_dialog() == 1), "{}", out.text());
+    assert!(press(ui, "OK"));
+    assert!(
+        wait_until(WAIT, || app.started() && !app.busy()),
+        "{}",
+        out.text()
+    );
+    assert_eq!(app.table().len(), 1);
+    assert_eq!(ui.get_profile_text(), "Profile: new (A new one)");
+    app.quit(0);
+}
+
+/// Delete asks first, then removes the profile.
+#[test]
+fn profiles_are_deleted() {
+    let work = support::Work::new("window-delete");
+    profiles(&work.0, &["a", "b"]);
+    let (app, out) = support::window(&work.0.join("unison"), Vec::new());
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
+    ui.invoke_profile_clicked(1);
+    assert!(press(ui, "Delete"));
+    assert_eq!(
+        (ui.get_dialog(), ui.get_dialog_message()),
+        (1, "Do you really want to delete profile b?".into())
+    );
+    assert!(press(ui, "Delete"));
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6 && manager_rows(ui) == ["a"]));
+    assert!(!work.0.join("unison/b.prf").exists());
+    app.quit(0);
+}
+
+/// Change Profile opens the manager, with Cancel, and another profile.
+#[test]
+fn another_profile_can_be_chosen() {
+    let work = support::Work::new("window-change");
+    profiles(&work.0, &["p", "q"]);
+    let (app, out) = support::window(&work.0.join("unison"), vec!["p".to_owned()]);
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    let ready = || app.started() && !app.busy();
+    let warned = |app: &App| {
+        if app.ui().get_dialog() == 1 {
+            press(app.ui(), "OK");
+        }
+    };
+    assert!(
+        wait_until(WAIT, || {
+            warned(&app);
+            ready()
+        }),
+        "{}",
+        out.text()
+    );
+    assert_eq!(app.table().row(0).item.path_string, "p-file");
+    ui.invoke_change_profile();
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
+    assert!(can_press(ui, "Cancel") && !can_press(ui, "Quit"));
+    ui.invoke_profile_clicked(1);
+    assert!(press(ui, "Open"));
+    assert!(
+        wait_until(WAIT, || {
+            warned(&app);
+            ready() && ui.get_profile_text() == "Profile: q (Label of q)"
+        }),
+        "{}",
+        out.text()
+    );
+    assert_eq!(app.table().row(0).item.path_string, "q-file");
+    app.quit(0);
+}
+
+/// An error starting is shown, and Close goes to the profile manager
+/// (`initLoop`).
+#[test]
+fn an_error_starting_leads_to_the_profile_manager() {
+    let work = support::Work::new("window-start-error");
+    profiles(&work.0, &["a"]);
+    let (app, out) = support::window(&work.0.join("unison"), vec!["missing".to_owned()]);
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(wait_until(WAIT, || ui.get_dialog() == 1), "{}", out.text());
+    assert_eq!(ui.get_dialog_title(), "Error");
+    assert!(press(ui, "Close"));
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
+    assert_eq!(manager_rows(ui), ["a"]);
+    assert!(can_press(ui, "Quit"));
+    assert_eq!(app.exit_code(), None);
+    app.quit(0);
+}
+
+/// A profile that can't be saved is said so, over the manager, and isn't
+/// a fatal error; nor is closing an error once the items are shown.
+#[test]
+fn errors_are_answered_by_what_they_are_about() {
+    init();
+    let app = App::detached().unwrap();
+    let ui = app.ui();
+    ui.show().unwrap();
+    app.handle(Event::Started(None));
+    assert!(format!("{:?}", app.sent()).ends_with("ScanProfiles]"));
+    app.handle(Event::Profiles(Vec::new()));
+    assert_eq!(ui.get_dialog(), 6);
+    assert!(press(ui, "Add"));
+    ui.set_wiz_name("p".into());
+    ui.set_wiz_first("/a".into());
+    ui.set_wiz_second("/b".into());
+    ui.invoke_wizard_changed();
+    while ui.get_wiz_page() < 5 {
+        assert!(press(ui, "Next"));
+    }
+    assert!(press(ui, "Apply"));
+    assert!(format!("{:?}", app.sent()).contains("CreateProfile"));
+    app.handle(Event::Error("/u/p.prf: File exists".to_owned()));
+    assert_eq!(ui.get_dialog_title(), "Could not save profile");
+    assert_eq!(
+        ui.get_dialog_message(),
+        "Error when saving profile: /u/p.prf: File exists"
+    );
+    assert!(press(ui, "OK"));
+    assert_eq!(ui.get_dialog(), 6);
+    assert!(press(ui, "Quit"));
+    assert_eq!(app.exit_code(), Some(0));
+
+    // Once the items are shown, Close goes on, and Quit ends with 1.
+    let app = App::detached().unwrap();
+    let ui = app.ui();
+    app.handle(Event::Started(Some("p".to_owned())));
+    app.handle(Event::Updates(fake_updates(vec![fake_item(
+        "f",
+        Action::LtoR(false),
+    )])));
+    app.handle(Event::Error("boom".to_owned()));
+    assert_eq!(
+        (ui.get_dialog(), ui.get_dialog_title()),
+        (1, "Error".into())
+    );
+    assert!(press(ui, "Close"));
+    assert_eq!(app.exit_code(), None);
+    app.handle(Event::Error("boom".to_owned()));
+    assert!(wait_until(WAIT, || ui.get_dialog() == 1
+        && ui.get_dialog_title() == "Error"));
     assert!(press(ui, "Quit"));
     assert_eq!(app.exit_code(), Some(1));
 }

@@ -8,7 +8,7 @@
 // and what is enabled are worked out in Rust (src/lib.rs and
 // src/recon_view.rs); this file renders them and forwards input.
 
-import { Button, ComboBox, LineEdit, ListView, Palette, ProgressIndicator, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, ProgressIndicator, ScrollView } from "std-widgets.slint";
 
 export struct RowData {
     // The replicas' statuses (`reconItem2stringList`).
@@ -26,6 +26,12 @@ export struct RowData {
     path: string,
     selected: bool,
     spoken: string,
+}
+
+// A profile, as the profile manager lists it.
+export struct ProfileRow {
+    name: string,
+    label: string,
 }
 
 // A profile with a key (`profileKeymap`).
@@ -158,7 +164,8 @@ export component AppWindow inherits Window {
     in property <[SummaryEntry]> summary-entries;
 
     // The dialog shown, if any: 0 none, 1 a message, 2 the first root,
-    // 3 the second root, 4 the summary, 5 ssh's password.
+    // 3 the second root, 4 the summary, 5 ssh's password, 6 the profile
+    // manager, 7 the profile creation assistant.
     in property <int> dialog;
     in property <string> dialog-title;
     in property <string> dialog-message;
@@ -178,6 +185,39 @@ export component AppWindow inherits Window {
     in property <string> password-root;
     in-out property <string> password-text;
     in property <bool> password-editable;
+    // The profile manager (`getProfile`): the profiles, the one selected
+    // (-1 for none), its roots if it has two, and whether closing it quits.
+    in property <[ProfileRow]> profiles;
+    in property <int> profile-selected: -1;
+    in property <string> profile-root1;
+    in property <string> profile-root2;
+    in property <bool> manager-quit;
+    // The assistant (`createProfile`): its page, what is entered, and
+    // what the pages say, which Rust works out on each change.
+    in property <int> wiz-page;
+    in property <string> wiz-title;
+    in-out property <string> wiz-name;
+    in-out property <string> wiz-label;
+    in property <bool> wiz-exists;
+    in-out property <int> wiz-kind;
+    in-out property <string> wiz-host;
+    in-out property <string> wiz-user;
+    in-out property <string> wiz-port;
+    in-out property <bool> wiz-compress;
+    in-out property <int> wiz-dir-kind;
+    in-out property <string> wiz-first;
+    in-out property <string> wiz-second;
+    in-out property <string> wiz-remote;
+    in-out property <bool> wiz-fat;
+    in property <bool> wiz-fat-shown: true;
+    in property <bool> wiz-complete;
+    in property <string> wiz-kind-text;
+    in property <string> wiz-requirement;
+    in property <string> wiz-connection;
+    in property <string> wiz-first-label;
+    in property <string> wiz-second-label;
+    in property <string> wiz-remote-note;
+    in property <string> wiz-conclusion;
 
     callback row-clicked(index: int, shift: bool, command: bool);
     callback move-cursor(delta: int, extend: bool);
@@ -203,6 +243,19 @@ export component AppWindow inherits Window {
     // "Recheck Unsynchronized Items".
     callback recheck();
     callback show-statistics();
+    callback change-profile();
+    callback profile-clicked(index: int);
+    callback profile-open();
+    callback profile-close();
+    callback profile-add();
+    callback profile-delete();
+    callback wizard-changed();
+    callback wizard-back();
+    callback wizard-next();
+    callback wizard-cancel();
+    callback wizard-apply();
+    // 0 the first replica, 1 the second.
+    callback wizard-browse(which: int);
     callback quit();
     callback dialog-done(ok: bool);
     callback browse-root();
@@ -247,6 +300,11 @@ export component AppWindow inherits Window {
                 activated => { root.recheck(); }
             }
             MenuSeparator { }
+            MenuItem {
+                title: "Change Profile...";
+                enabled: root.rescan-enabled;
+                activated => { root.change-profile(); }
+            }
             for p in root.profile-keys: MenuItem {
                 title: "Select profile " + p.name + "  (" + p.key + ")";
                 enabled: root.rescan-enabled;
@@ -471,6 +529,12 @@ export component AppWindow inherits Window {
                 enabled: root.rescan-enabled;
                 clicked => { root.rescan(); table-scope.focus(); }
             }
+            Rectangle { width: 8px; }
+            Button {
+                text: "Change Profile";
+                enabled: root.rescan-enabled;
+                clicked => { root.change-profile(); }
+            }
             Text {
                 text: root.profile-text;
                 horizontal-alignment: right;
@@ -576,6 +640,10 @@ export component AppWindow inherits Window {
                 }
                 if event.text == "f" {
                     root.recheck();
+                    return accept;
+                }
+                if event.text == "p" {
+                    root.change-profile();
                     return accept;
                 }
                 if event.text == "q" {
@@ -867,6 +935,306 @@ export component AppWindow inherits Window {
                 text: "OK";
                 primary: true;
                 clicked => { root.dialog-done(true); }
+            }
+        }
+    }
+
+    // The profile manager (`getProfile`).
+    if root.dialog == 6: Card {
+        title: "Profile Selection";
+        card-width: 600px;
+        escape => { root.profile-close(); }
+        Text { text: "Select a profile:"; }
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                height: 220px;
+                border-width: 1px;
+                border-color: Palette.border;
+                ListView {
+                    accessible-label: "Profiles";
+                    for p[i] in root.profiles: Rectangle {
+                        height: 22px;
+                        background: i == root.profile-selected ? Palette.selection-background : transparent;
+                        accessible-role: list-item;
+                        accessible-label: p.name;
+                        accessible-item-selectable: true;
+                        accessible-item-selected: i == root.profile-selected;
+                        accessible-item-index: i;
+                        accessible-action-default => { root.profile-clicked(i); }
+                        TouchArea {
+                            clicked => { root.profile-clicked(i); }
+                            double-clicked => { root.profile-clicked(i); root.profile-open(); }
+                        }
+                        HorizontalLayout {
+                            padding-left: 6px;
+                            spacing: 12px;
+                            Text {
+                                width: 160px;
+                                text: p.name;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                color: i == root.profile-selected ? Palette.selection-foreground : Palette.foreground;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: p.label;
+                                vertical-alignment: center;
+                                overflow: elide;
+                                color: i == root.profile-selected ? Palette.selection-foreground : Palette.foreground;
+                                accessible-role: none;
+                            }
+                        }
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: start;
+                spacing: 6px;
+                Button {
+                    text: "Add";
+                    clicked => { root.profile-add(); }
+                }
+                Button {
+                    text: "Delete";
+                    enabled: root.profile-selected >= 0;
+                    clicked => { root.profile-delete(); }
+                }
+            }
+        }
+        Text {
+            text: "Summary";
+            font-weight: 700;
+        }
+        GridLayout {
+            spacing: 6px;
+            Row {
+                Text { text: "First root:"; }
+                Text {
+                    text: root.profile-root1;
+                    overflow: elide;
+                    accessible-label: "First root";
+                }
+            }
+            Row {
+                Text { text: "Second root:"; }
+                Text {
+                    text: root.profile-root2;
+                    overflow: elide;
+                    accessible-label: "Second root";
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: root.manager-quit ? "Quit" : "Cancel";
+                clicked => { root.profile-close(); }
+            }
+            Button {
+                text: "Open";
+                primary: true;
+                enabled: root.profile-selected >= 0;
+                clicked => { root.profile-open(); }
+            }
+        }
+    }
+
+    // The profile creation assistant (`createProfile`), a page at a time.
+    if root.dialog == 7: Card {
+        title: root.wiz-title;
+        card-width: 600px;
+        escape => { root.wizard-cancel(); }
+        if root.wiz-page == 0: Text {
+            text: "Welcome to the Gemel Profile Creation Assistant.\n\nClick \"Next\" to begin.";
+            wrap: word-wrap;
+        }
+        if root.wiz-page == 1: VerticalLayout {
+            spacing: 6px;
+            Text {
+                text: "Please enter the name of the profile and possibly a short description.";
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: "Profile name:"; vertical-alignment: center; width: 110px; }
+                LineEdit {
+                    text <=> root.wiz-name;
+                    accessible-label: "Profile name";
+                    edited => { root.wizard-changed(); }
+                    accepted => { if root.wiz-complete { root.wizard-next(); } }
+                    init => { self.focus(); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: "Description:"; vertical-alignment: center; width: 110px; }
+                LineEdit {
+                    text <=> root.wiz-label;
+                    accessible-label: "Description";
+                    edited => { root.wizard-changed(); }
+                    accepted => { if root.wiz-complete { root.wizard-next(); } }
+                }
+            }
+            if root.wiz-exists: Text {
+                text: "Profile " + root.wiz-name + " already exists.";
+                font-italic: true;
+                horizontal-alignment: right;
+            }
+        }
+        if root.wiz-page == 2: VerticalLayout {
+            spacing: 6px;
+            Text {
+                text: "You can use Gemel to synchronize a local directory with another local directory, or with a remote directory.";
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Please select the kind of synchronization you want to perform.";
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: "Synchronization kind:"; vertical-alignment: center; }
+                ComboBox {
+                    model: ["Local", "Using SSH", "Through a plain TCP connection"];
+                    current-index <=> root.wiz-kind;
+                    accessible-label: "Synchronization kind";
+                    selected => { root.wizard-changed(); }
+                }
+            }
+            Text {
+                text: root.wiz-kind-text;
+                wrap: word-wrap;
+            }
+            if root.wiz-kind != 0: VerticalLayout {
+                spacing: 6px;
+                Text { text: "Configuration"; font-weight: 700; }
+                Text { text: root.wiz-requirement; wrap: word-wrap; }
+                Text { text: root.wiz-connection; wrap: word-wrap; }
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text { text: "Host:"; vertical-alignment: center; width: 60px; }
+                    LineEdit {
+                        text <=> root.wiz-host;
+                        accessible-label: "Host";
+                        edited => { root.wizard-changed(); }
+                    }
+                }
+                if root.wiz-kind == 1: HorizontalLayout {
+                    spacing: 6px;
+                    Text { text: "User:"; vertical-alignment: center; width: 60px; }
+                    LineEdit {
+                        text <=> root.wiz-user;
+                        accessible-label: "User";
+                        edited => { root.wizard-changed(); }
+                    }
+                }
+                if root.wiz-kind == 2: HorizontalLayout {
+                    spacing: 6px;
+                    Text { text: "Port:"; vertical-alignment: center; width: 60px; }
+                    LineEdit {
+                        text <=> root.wiz-port;
+                        accessible-label: "Port";
+                        edited => { root.wizard-changed(); }
+                    }
+                }
+                if root.wiz-kind == 1: Text {
+                    text: "Data compression can greatly improve performance on slow connections.  However, it may slow down things on (fast) local networks.";
+                    wrap: word-wrap;
+                }
+                if root.wiz-kind == 1: CheckBox {
+                    text: "Enable compression";
+                    checked <=> root.wiz-compress;
+                }
+            }
+        }
+        if root.wiz-page == 3: VerticalLayout {
+            spacing: 6px;
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: "Please select the two"; vertical-alignment: center; }
+                ComboBox {
+                    model: ["directories", "files"];
+                    current-index <=> root.wiz-dir-kind;
+                    accessible-label: "Directories or files";
+                    selected => { root.wizard-changed(); }
+                }
+                Text { text: "that you want to synchronize."; vertical-alignment: center; }
+            }
+            if root.wiz-remote-note != "": Text {
+                text: root.wiz-remote-note;
+                wrap: word-wrap;
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: root.wiz-first-label; vertical-alignment: center; width: 130px; }
+                LineEdit {
+                    text <=> root.wiz-first;
+                    accessible-label: "First root";
+                    edited => { root.wizard-changed(); }
+                }
+                Button {
+                    text: "Browse…";
+                    clicked => { root.wizard-browse(0); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 6px;
+                Text { text: root.wiz-second-label; vertical-alignment: center; width: 130px; }
+                if root.wiz-kind == 0: LineEdit {
+                    text <=> root.wiz-second;
+                    accessible-label: "Second root";
+                    edited => { root.wizard-changed(); }
+                }
+                if root.wiz-kind == 0: Button {
+                    text: "Browse…";
+                    clicked => { root.wizard-browse(1); }
+                }
+                if root.wiz-kind != 0: LineEdit {
+                    text <=> root.wiz-remote;
+                    accessible-label: "Remote root";
+                    edited => { root.wizard-changed(); }
+                }
+            }
+        }
+        if root.wiz-page == 4: VerticalLayout {
+            spacing: 6px;
+            if root.wiz-fat-shown: Text {
+                text: "Select the following option if one of your directory is on a FAT partition.  This is typically the case for a USB stick.";
+                wrap: word-wrap;
+            }
+            if root.wiz-fat-shown: CheckBox {
+                text: "Synchronization involving a FAT partition";
+                checked <=> root.wiz-fat;
+            }
+        }
+        if root.wiz-page == 5: Text {
+            text: root.wiz-conclusion;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "Cancel";
+                clicked => { root.wizard-cancel(); }
+            }
+            if root.wiz-page > 0: Button {
+                text: "Back";
+                clicked => { root.wizard-back(); }
+            }
+            if root.wiz-page < 5: Button {
+                text: "Next";
+                primary: true;
+                enabled: root.wiz-complete;
+                clicked => { root.wizard-next(); }
+            }
+            if root.wiz-page == 5: Button {
+                text: "Apply";
+                primary: true;
+                enabled: root.wiz-complete;
+                clicked => { root.wizard-apply(); }
             }
         }
     }
