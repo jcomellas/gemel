@@ -1240,6 +1240,7 @@ impl Text {
             allow_partial: true,
             want_watcher,
             paths,
+            only: None,
         })? {
             Event::Updates(u) => u,
             e => return Err(Stop::Error(format!("unexpected {e:?}"))),
