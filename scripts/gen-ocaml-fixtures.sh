@@ -24,6 +24,9 @@
 # - gen_transfer.ml (checksum.ml and transfer.ml, with Unison's Lwt and
 #   stand-ins for Trace and Uutil) writes the vectors for gemel-engine's
 #   transfer;
+# - gen_terminal.ml (the patterns for OpenSSH's messages and the parser of
+#   control sequences, copied out of terminal.ml, with rx.ml) writes the
+#   vectors for gemel-rpc's terminal;
 # - gen_unicode.ml also writes Unison's Unicode tables as Rust source, to
 #   crates/gemel-compat/src/unicode/tables.rs.
 # With an output directory, everything goes there instead (for comparing
@@ -54,7 +57,7 @@ docker run --rm \
            /unison/clroot.mli /unison/clroot.ml /unison/pred.ml \
            /unison/bytearray.mli /unison/bytearray.ml /unison/checksum.ml \
            /unison/transfer.ml /unison/lwt/lwt.mli /unison/lwt/lwt.ml \
-           /gen/gen_transfer.ml \
+           /gen/gen_transfer.ml /unison/terminal.ml \
            /gen/gen_fixtures.ml /gen/gen_unicode.ml /gen/gen_names.ml \
            /gen/gen_base.ml /gen/gen_rx.ml /gen/gen_pred.ml /gen/stubs/*.ml . &&
         { cat /gen/uicommon_prelude.ml &&
@@ -65,6 +68,9 @@ docker run --rm \
               sed "\$d" &&
           sed -n "/^module Stats = struct/,/^end/p" /unison/uicommon.ml &&
           cat /gen/gen_uicommon.ml; } > gen_uicommon.ml &&
+        { sed -n "/^let passwordRx/,/^let authenticity s/p" terminal.ml &&
+          sed -n "/^type controlSt/,/^  parseCtrlSeq s\$/p" terminal.ml &&
+          cat /gen/gen_terminal.ml; } > gen_terminal.ml &&
         ocamlopt -o gen_fixtures bytearray_stubs.c hash_compat.c \
             umarshal.mli umarshal.ml gen_fixtures.ml &&
         ocamlopt -o gen_unicode hash_compat.c \
@@ -89,6 +95,8 @@ docker run --rm \
         ./gen_names /out &&
         ./gen_pred /out &&
         ./gen_uicommon /out &&
+        ocamlopt -o gen_terminal rx.mli rx.ml gen_terminal.ml &&
         ./gen_transfer /out &&
+        ./gen_terminal /out &&
         ./gen_unicode /out /tables'
 echo "wrote $out and $tables"
