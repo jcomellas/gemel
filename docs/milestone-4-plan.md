@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 0, 2026-10-24) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 1a, 2026-10-24) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -155,6 +155,55 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - 1b: syncing, progress, statistics and dialogs;
   - 1c: diff, ignoring, sorting, the Expert menu and the profile keys.
 
+**Notes (phase 1a, 2026-10-24):**
+- **The split, as done:** the scenarios need the window to sync, so 1a also has Go: `Synchronize`, then `Commit`, as `synchronize` commits. It has the dialogs that starting and syncing need as well. That leaves 1b with:
+  - the progress bar, with rate and time left;
+  - the statistics window and the summary;
+  - Stop, Rescan, "Detect Updates and Proceed" and "Recheck Unsynchronized Items";
+  - the busy cursor.
+- **The session's gaps:** `uigtk3` sets directions directly in three ways the session couldn't, now `SetAction`s:
+  - `Prefer` lets one version win only where the default is a conflict ("Resolve Conflicts in Favor of …");
+  - `MergeDefault` merges only a path that `merge` names ("Revert to the Merging Default, if Available");
+  - `Conflict` skips with no reason given (`questionAction`), which the log shows.
+
+  `RootNames::narrow` is `roots2niceStrings 15`, for the column headings. `session::Handle` names a running session, and `gemel-ui-api` re-exports what a frontend needs of the crates below (`Trace`, `Path`, `Subpaths`, `clroot`, `unison_dir`), so `gemel-gui` depends on it alone.
+- **Starting:**
+  - The window sends `Start`, `LoadProfile`, `Connect`, then `Update`: with `allow_partial`, `want_watcher`, and the paths left unsynchronised.
+  - A profile without roots gets `getFirstRoot`'s and `getSecondRoot`'s dialogs. Both have a text field and `rfd`'s directory picker; the second one's Help button isn't ported yet.
+  - Without a profile or roots named, the window says it can't choose a profile yet, and Quit ends the program (the profile manager is phase 3).
+  - Before the first items are shown, an error ends the program once its dialog is closed, since there is no profile manager to go back to. After that, it is `fatalErrorHandler`'s dialog, with Quit and Close.
+  - With `-batch`, the window syncs once after detecting, as `detectCmd` does.
+- **The items:**
+  - `uigtk3`'s columns and multiple selection; `nextInteresting`, which with `auto` goes to conflicts only; the details pane; Detailed Information.
+  - The action column draws the text interface's arrows (`action2niceString`) in `getArrow`'s colours, not GTK's pixmaps: green, orange when partial, red for a skip or an error, light blue when the action isn't the default.
+  - The status column has a tick or a cross once an item is done, and its progress until then. A failed item's path has `uigtk3`'s note.
+- **Actions:**
+  - The Actions menu has all of `uigtk3`'s items but Show Diffs (1c); the toolbar has Left to Right, Skip, Right to Left, Merge, Details and Go.
+  - Keys: `>` and `.` propagate left to right, `<`, `,` and the arrow keys as `uigtk3`'s, `/` skips, and `m`, `i`, `g` and `q` merge, show details, go and quit. Ctrl-A, Shift-Ctrl-A and Ctrl-Q are in the menus, with ⌘ on macOS.
+  - The keys without modifiers are taken by the item list, not by native menu accelerators, which would take them from text fields too.
+- **Dialogs** are cards over the window (see Risks):
+  - `warnBox`: Close in batch mode; otherwise OK, or Quit, which unlocks the archives and ends the program with 0;
+  - `fatalError` and `messageBox`;
+  - confirming a merge (`twoBoxAdvanced`, without its "View details" button);
+  - confirming big deletions (`confirmbigdeletes`);
+  - `safeExit`'s "Premature exit" while working.
+- **The harness drives the window as a user would:** OK at each warning, then Go if there is anything to propagate.
+  - The window gets the oracle's flags, but not `-batch` or `-ui text`.
+  - Its exit code is the text interface's for the same summary (`Summary::exit_code`).
+  - The oracle runs it in the test's process (`run::outcome_with`) and compares only what it leaves (`compare::compare_state`): the trees, the Unison directory, the reference's recheck, and the exit codes. The reference's output is checked as before (`check_recheck`).
+  - 8 of 8 scenarios agree with local roots. Remote roots through the window wait for phase 2: archive names depend on `UNISONLOCALHOSTNAME`, which the window in the test's process would need set, and tests run in parallel.
+- **The window's tests** (`tests/window.rs`):
+  - a sync through the session: the items, the details, an action, then Go;
+  - `-batch`, which syncs without Go;
+  - big deletions confirmed, in batch mode too: Quit ends the program, and OK leaves Go to press;
+  - a merge confirmed (on Unix, where the merge command is `cat`);
+  - roots asked for;
+  - no profile;
+  - the spike's check of 50,000 items: virtualised, selectable, and accessible. It runs without a session (`App::detached`), fed events (`App::handle`). The commands it would send are kept (`App::sent`).
+- **The fake engine** and its flags, `--rows` and `--rate`, are gone. Phase 4's development flag will feed fake session events, for the check of 500 updates a second.
+- **The real backend** started under Xvfb in the Linux image, on two roots, and was still running after 15 seconds, with nothing on standard error but Slint's note that the container has no D-Bus session. The testing backend never runs the event loop, the native menu bar or closing the window, so that is all this checks; looking at the window is phase 4's.
+- **The file watcher** is asked for on every detection. No test runs with one yet: none is found next to the tests' programs or on CI's `PATH`. Rescans that use it come with 1b's Rescan.
+
 ### Phase 2: ssh's prompts in the GUI (`terminal.ml`, `pty.c`, ~0.6k; `uigtk3`'s password dialogs)
 
 - **Pseudo-terminals** (design decision 4):
@@ -168,6 +217,7 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - `handlePasswordRequests`.
 - **The session:** prompts as questions (design decision 4); the connection goes on once ssh stops asking.
 - **The dialog** (`createPasswordDialog`, `getPassword`, `disablePassword`, `waitForPasswordWindowClosing`): text appended as ssh prints it, the field disabled once input has ended, and Quit ending the GUI (`safeExit`).
+- **The harness with remote roots:** scenarios through the window over ssh and on a socket, as the definition of done's item 2 asks; phase 1a's are local only. The window runs in the test's process, and archive names depend on the client's host name, which only `UNISONLOCALHOSTNAME` overrides today. So the session takes the host name in its `Config` (a gap), and tests running in parallel needn't set the environment.
 - **Tests:**
   - golden vectors for the patterns and the escape handling, generated from `terminal.ml` with milestone 1's fixture scripts (`gen_terminal.ml`);
   - a shim standing in for ssh asks for a password on its terminal, as `bins/gemel/tests/terminal.rs` does, and the GUI's dialog answers it, on Unix;
