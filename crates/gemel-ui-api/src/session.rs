@@ -403,6 +403,8 @@ pub struct Overrides {
     pub auto: Option<bool>,
     /// Log entries also go to stderr (`Trace.sendLogMsgsToStderr`).
     pub log_to_stderr: Option<bool>,
+    /// The modules debugged (`debug`), as `Trace.enable` changes them.
+    pub debug: Option<Vec<String>>,
 }
 
 /// The roots' names, for display.
@@ -876,6 +878,9 @@ impl Session {
                     }
                     if let Some(b) = o.auto {
                         prefs.set(&uicommon::AUTO, b);
+                    }
+                    if let Some(d) = o.debug {
+                        prefs.set(&trace::DEBUG, d);
                     }
                 }
                 if let Some(b) = o.log_to_stderr {

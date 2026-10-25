@@ -1000,6 +1000,7 @@ impl Text {
                 terse: Some(true),
                 log_to_stderr: Some(false),
                 auto: None,
+                debug: None,
             };
             if let Event::ProfileLoaded(mut s) = self.call(Command::Configure(o))? {
                 s.dumbtty = true;
