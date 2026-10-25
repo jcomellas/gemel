@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 2a, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 2b, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -297,6 +297,25 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - with a shim standing in for ssh: a password asked for until the answer is right; a banner after the connection is up not shown; ssh's last words kept when it fails; nothing written once input has ended;
   - in `gemel`'s tests, a session with prompts against a shim that asks twice, then runs the server: `gemel`, or OCaml's with `GEMEL_REFERENCE_UNISON`.
 - **Generating the vectors** on OCaml 4.13 fails at `gen_transfer.ml`, which needs `Digest.MD5` (OCaml 5.2). That failure predates this phase: the terminal vectors were checked on 4.13 on their own.
+
+**Notes (phase 2b, 2026-10-25):**
+- **The password dialog** (`createPasswordDialog`):
+  - the window's session runs ssh with `prompts`;
+  - the dialog shows "Connecting to 'ROOT'...", what ssh printed, and a hidden entry;
+  - OK sends the password, if it is still asked for. Quit ends the program, as `safeExit` does while the roots are being connected (and Escape, as closing the dialog does);
+  - more of what ssh prints for the same root goes to the dialog already open (`getPassword`), whose answer is the one that counts;
+  - once input has ended, the entry goes (`disablePassword`).
+
+  `waitForPasswordWindowClosing` belongs to the profile manager (phase 3).
+- **Remote roots in the harness:**
+  - `Config::host_name` names the client's host for archives, instead of `UNISONLOCALHOSTNAME`, which a test can't set for one window while other tests run.
+  - The oracle sets a client's run up for a client that isn't a program (`run::client_run`, `ClientRun::finish`).
+  - The oracle's program has a test of its own, so that the workspace's tests build it: `gemel-gui`'s tests copy it as their ssh shim.
+  - Over ssh, the window runs the shim under a terminal of its own, as it runs ssh.
+  - 4 scenarios agree over ssh and 4 on a socket, besides the 8 with local roots: the definition of done's item 2 is met.
+- **A leak the harness found:** a registered connection's close handler held the connection, which holds its handlers. When a session ended in a process that goes on, the connection and its transport were never freed, and an ssh server never saw its input end. The handler holds a `WeakConnection` now, and a test checks that a client lets go of its connections.
+- **Window tests on Unix:** a shim asks for a password at its terminal, then runs `gemel-gui -server`. A wrong password is asked again, then the right one connects; and Quit.
+- **Left for 2c:** ConPTY on Windows.
 
 ### Phase 3: profiles (`uigtk3.ml`'s profile manager, wizard and editor, ~1.7k; `strings.ml` as data)
 
