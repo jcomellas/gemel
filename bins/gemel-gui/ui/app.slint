@@ -8,7 +8,7 @@
 // and what is enabled are worked out in Rust (src/lib.rs and
 // src/recon_view.rs); this file renders them and forwards input.
 
-import { Button, ComboBox, LineEdit, ListView, Palette, ScrollView } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, ListView, Palette, ProgressIndicator, ScrollView } from "std-widgets.slint";
 
 export struct RowData {
     // The replicas' statuses (`reconItem2stringList`).
@@ -26,6 +26,13 @@ export struct RowData {
     path: string,
     selected: bool,
     spoken: string,
+}
+
+// An item the summary box lists (`summaryBox`).
+export struct SummaryEntry {
+    path: string,
+    description: string,
+    errors: [string],
 }
 
 global Theme {
@@ -119,10 +126,18 @@ export component AppWindow inherits Window {
     in property <bool> actions-enabled;
     in property <bool> go-enabled;
     in property <bool> detail-enabled;
-    in property <bool> select-enabled;
+    in property <bool> rescan-enabled;
+    in property <bool> stop-enabled;
+    // The overall progress (`displayGlobalProgress`), pulsing while
+    // updates are detected.
+    in property <float> progress-fraction;
+    in property <string> progress-text;
+    in property <bool> progress-pulse;
+    // The summary box's items.
+    in property <[SummaryEntry]> summary-entries;
 
     // The dialog shown, if any: 0 none, 1 a message, 2 the first root,
-    // 3 the second root.
+    // 3 the second root, 4 the summary.
     in property <int> dialog;
     in property <string> dialog-title;
     in property <string> dialog-message;
@@ -148,6 +163,13 @@ export component AppWindow inherits Window {
     callback deselect-all();
     callback details();
     callback go();
+    callback stop();
+    callback rescan();
+    // "Detect Updates and Proceed (Without Waiting)".
+    callback proceed();
+    // "Recheck Unsynchronized Items".
+    callback recheck();
+    callback show-statistics();
     callback quit();
     callback dialog-done(ok: bool);
     callback browse-root();
@@ -177,6 +199,27 @@ export component AppWindow inherits Window {
                 activated => { root.go(); }
             }
             MenuItem {
+                title: "Rescan";
+                enabled: root.rescan-enabled;
+                activated => { root.rescan(); }
+            }
+            MenuItem {
+                title: "Detect Updates and Proceed (Without Waiting)";
+                enabled: root.rescan-enabled;
+                activated => { root.proceed(); }
+            }
+            MenuItem {
+                title: "Recheck Unsynchronized Items";
+                enabled: root.rescan-enabled;
+                activated => { root.recheck(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Show Statistics";
+                activated => { root.show-statistics(); }
+            }
+            MenuSeparator { }
+            MenuItem {
                 title: "Quit";
                 shortcut: @keys(Control + Q);
                 activated => { root.quit(); }
@@ -186,13 +229,13 @@ export component AppWindow inherits Window {
             title: "Actions";
             MenuItem {
                 title: "Select All";
-                enabled: root.select-enabled;
+                enabled: root.rescan-enabled;
                 shortcut: @keys(Control + A);
                 activated => { root.select-all(); }
             }
             MenuItem {
                 title: "Deselect All";
-                enabled: root.select-enabled;
+                enabled: root.rescan-enabled;
                 shortcut: @keys(Control + Shift + A);
                 activated => { root.deselect-all(); }
             }
@@ -307,6 +350,16 @@ export component AppWindow inherits Window {
                 primary: true;
                 clicked => { root.go(); table-scope.focus(); }
             }
+            Button {
+                text: "Stop";
+                enabled: root.stop-enabled;
+                clicked => { root.stop(); }
+            }
+            Button {
+                text: "Rescan";
+                enabled: root.rescan-enabled;
+                clicked => { root.rescan(); table-scope.focus(); }
+            }
             Text {
                 text: root.profile-text;
                 horizontal-alignment: right;
@@ -380,6 +433,18 @@ export component AppWindow inherits Window {
                 }
                 if event.text == "g" {
                     root.go();
+                    return accept;
+                }
+                if event.text == "r" {
+                    root.rescan();
+                    return accept;
+                }
+                if event.text == "a" {
+                    root.proceed();
+                    return accept;
+                }
+                if event.text == "f" {
+                    root.recheck();
                     return accept;
                 }
                 if event.text == "q" {
@@ -519,17 +584,37 @@ export component AppWindow inherits Window {
             }
         }
 
-        // The status line.
+        // The progress bar and the status line.
         Rectangle {
             height: 24px;
             background: Palette.alternate-background;
-            Text {
-                x: 6px;
-                width: parent.width - 12px;
-                text: root.status-text;
-                vertical-alignment: center;
-                overflow: elide;
-                accessible-label: "Status";
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 8px;
+                Rectangle {
+                    width: 220px;
+                    ProgressIndicator {
+                        y: (parent.height - self.height) / 2;
+                        width: parent.width;
+                        progress: root.progress-fraction;
+                        indeterminate: root.progress-pulse;
+                    }
+                    Text {
+                        text: root.progress-text;
+                        font-size: 11px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        accessible-label: "Progress";
+                    }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.status-text;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    accessible-label: "Status";
+                }
             }
         }
     }
@@ -560,6 +645,53 @@ export component AppWindow inherits Window {
             }
             if root.dialog-ok != "": Button {
                 text: root.dialog-ok;
+                primary: true;
+                clicked => { root.dialog-done(true); }
+                init => { self.focus(); }
+            }
+        }
+    }
+
+    // The summary of a sync that left the replicas not fully synchronized
+    // (`summaryBox`), with its items under "Show details".
+    if root.dialog == 4: Card {
+        title: root.dialog-title;
+        card-width: 520px;
+        escape => { root.dialog-done(true); }
+        property <bool> details;
+        Text {
+            text: root.dialog-message;
+            wrap: word-wrap;
+            accessible-label: "Message";
+        }
+        Button {
+            text: details ? "Hide details" : "Show details";
+            clicked => { details = !details; }
+        }
+        if details: ScrollView {
+            min-height: 120px;
+            preferred-height: 200px;
+            VerticalLayout {
+                padding: 4px;
+                spacing: 2px;
+                alignment: start;
+                for entry in root.summary-entries: VerticalLayout {
+                    Text {
+                        text: entry.path + " — " + entry.description;
+                        wrap: word-wrap;
+                    }
+                    for error in entry.errors: Text {
+                        x: 16px;
+                        text: "• " + error;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            Button {
+                text: "OK";
                 primary: true;
                 clicked => { root.dialog-done(true); }
                 init => { self.focus(); }
@@ -645,6 +777,68 @@ export component AppWindow inherits Window {
                 text: "OK";
                 primary: true;
                 clicked => { root.dialog-done(true); }
+            }
+        }
+    }
+}
+
+// The statistics window (`statistics`): the rates of what is sent to and
+// received from the server, as graphs, and a table of the rates and
+// bytes on the client's side, the server's and in all.
+export component StatsWindow inherits Window {
+    title: "Statistics";
+    preferred-width: 400px;
+
+    in property <string> emission;
+    in property <string> reception;
+    // Rows: reception rate, data received, file data written; columns:
+    // client, server, total.
+    in property <[[string]]> table: [["", "", ""], ["", "", ""], ["", "", ""]];
+
+    callback close();
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 8px;
+        for graph[i] in [root.emission, root.reception]: Rectangle {
+            height: 50px;
+            background: white;
+            border-width: 1px;
+            border-color: Palette.border;
+            accessible-role: image;
+            accessible-label: i == 0 ? "Emission rate" : "Reception rate";
+            Path {
+                width: parent.width;
+                height: parent.height;
+                commands: graph;
+                viewbox-width: 320;
+                viewbox-height: 50;
+                fill: black;
+            }
+        }
+        GridLayout {
+            spacing: 6px;
+            Row {
+                Text { text: ""; }
+                Text { text: "Client"; font-weight: 700; horizontal-alignment: right; }
+                Text { text: "Server"; font-weight: 700; horizontal-alignment: right; }
+                Text { text: "Total"; font-weight: 700; horizontal-alignment: right; }
+            }
+            for row[r] in root.table: Row {
+                Text { text: r == 0 ? "Reception rate" : r == 1 ? "Data received" : "File data written"; }
+                for cell[c] in row: Text {
+                    text: cell;
+                    horizontal-alignment: right;
+                    accessible-label: (r == 0 ? "Reception rate" : r == 1 ? "Data received" : "File data written")
+                        + ", " + (c == 0 ? "client" : c == 1 ? "server" : "total");
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            Button {
+                text: "Close";
+                clicked => { root.close(); }
             }
         }
     }

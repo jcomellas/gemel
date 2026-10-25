@@ -13,31 +13,35 @@
 //!
 //! What `uigtk3` does that isn't here yet (milestone 4's plan): the
 //! profile manager, so a profile must be named on the command line (or
-//! roots given); the progress bar, statistics and summary; rescanning and
-//! stopping; diffs, ignoring, sorting, the Expert menu and the profile
-//! keys; ssh's prompts.
+//! roots given); diffs, ignoring, sorting, the Expert menu and the
+//! profile keys; ssh's prompts.
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 
 pub mod recon_view;
+pub mod stats;
+pub mod summary;
 mod task;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use gemel_ui_api::clroot::{self, Clroot};
 use gemel_ui_api::exit_code::ExitCode;
 use gemel_ui_api::session::{
-    self, Command, Config, Event, Favor, ItemView, LogKind, Overrides, Question, Reply, RootNames,
-    SetAction, Settings, Summary, Updates,
+    self, Command, Config, Event, Favor, ItemView, LogKind, Overrides, Progress, Question, Reply,
+    RootNames, SetAction, Settings, Summary, Traffic, Updates,
 };
 use gemel_ui_api::{MY_NAME, Subpaths, Trace, padto};
-use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString};
+use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::recon_view::{Arrow, ClickMods, Done, ReconTable, Row};
+use crate::stats::Stats;
+use crate::summary::Entry;
 
 /// The window, compiled from `ui/app.slint`.
 pub mod ui {
@@ -45,7 +49,7 @@ pub mod ui {
     slint::include_modules!();
 }
 
-use ui::{AppWindow, RowData};
+use ui::{AppWindow, RowData, StatsWindow, SummaryEntry};
 
 /// How the window starts its session.
 pub struct Startup {
@@ -182,13 +186,16 @@ enum OnAnswer {
 
 /// A dialog waiting to be shown, or shown.
 struct Dialog {
-    /// 1 a message, 2 the first root, 3 the second (`ui/app.slint`).
+    /// 1 a message, 2 the first root, 3 the second, 4 the summary
+    /// (`ui/app.slint`).
     kind: i32,
     title: String,
     message: String,
     ok: &'static str,
     cancel: &'static str,
     on: OnAnswer,
+    /// The summary's items.
+    entries: Vec<Entry>,
 }
 
 impl Dialog {
@@ -206,6 +213,7 @@ impl Dialog {
             ok,
             cancel,
             on,
+            entries: Vec::new(),
         }
     }
 }
@@ -217,6 +225,7 @@ impl Dialog {
 enum AfterConfigure {
     Nothing,
     Synchronize,
+    Detect,
 }
 
 /// What a commit ends.
@@ -236,6 +245,22 @@ struct State {
     go: bool,
     /// `grRescan`: what may be done once the items are shown.
     rescan: bool,
+    /// `grStop`: a sync is running.
+    stop: bool,
+    /// The profile is being loaded again: no "contacting server" message
+    /// (`loadProfile`'s `reload`).
+    reloading: bool,
+    /// "Detect Updates and Proceed": batch mode is to be set once the
+    /// profile is loaded again.
+    proceed: bool,
+    /// Rechecking the items not synchronised.
+    rechecking: bool,
+    /// The overall progress bar's last fraction, and when its text was
+    /// last shown (`lastFrac`, `t1`).
+    last_frac: f64,
+    progress_shown: Option<Instant>,
+    /// Each item's bytes transferred, as the last progress had them.
+    transferred: Vec<i64>,
     settings: Option<Settings>,
     roots: Option<RootNames>,
     /// `profileInitSuccess`.
@@ -264,6 +289,11 @@ pub struct App {
     state: RefCell<State>,
     /// The program is quitting: no more events are taken.
     quitting: Cell<bool>,
+    stats: RefCell<Stats>,
+    stats_timer: slint::Timer,
+    stats_window: StatsWindow,
+    /// This, for the timers.
+    weak: RefCell<std::rc::Weak<App>>,
 }
 
 impl App {
@@ -274,6 +304,7 @@ impl App {
         // `Trace.sendLogMsgsToStderr := false`, and uigtk3's status format.
         trace.send_log_msgs_to_stderr = false;
         trace.set_status_formatter(Some(Box::new(format_status)));
+        let traffic = Arc::new(Traffic::default());
         let session = session::spawn(Config {
             unison_dir: startup.unison_dir,
             args: startup.args,
@@ -284,10 +315,10 @@ impl App {
             log_warnings: false,
             print_wait_message: false,
             complete_progress: true,
-            traffic: None,
+            traffic: Some(traffic.clone()),
         })
         .map_err(|e| slint::PlatformError::Other(format!("Can't start the session: {e}")))?;
-        let app = App::create(Some(session))?;
+        let app = App::create(Some(session), traffic)?;
         app.send(Command::Start);
         Ok(app)
     }
@@ -296,10 +327,13 @@ impl App {
     /// [`App::handle`], and the commands it would send are kept
     /// ([`App::sent`]). For tests, and fake sources of events.
     pub fn detached() -> Result<Rc<Self>, slint::PlatformError> {
-        App::create(None)
+        App::create(None, Arc::default())
     }
 
-    fn create(session: Option<session::Handle>) -> Result<Rc<Self>, slint::PlatformError> {
+    fn create(
+        session: Option<session::Handle>,
+        traffic: Arc<Traffic>,
+    ) -> Result<Rc<Self>, slint::PlatformError> {
         let ui = AppWindow::new()?;
         let model = Rc::new(RowsModel {
             table: RefCell::new(ReconTable::default()),
@@ -324,9 +358,15 @@ impl App {
             session: RefCell::new(session),
             state: RefCell::new(State::default()),
             quitting: Cell::new(false),
+            stats: RefCell::new(Stats::new(traffic)),
+            stats_timer: slint::Timer::default(),
+            stats_window: StatsWindow::new()?,
+            weak: RefCell::default(),
         });
+        *app.weak.borrow_mut() = Rc::downgrade(&app);
         app.wire();
         app.refresh_groups();
+        app.refresh_stats();
         Ok(app)
     }
 
@@ -363,6 +403,11 @@ impl App {
     /// Without a session, the commands sent so far.
     pub fn sent(&self) -> Vec<Command> {
         self.state.borrow().sent.clone()
+    }
+
+    /// The statistics window.
+    pub fn stats_window(&self) -> &StatsWindow {
+        &self.stats_window
     }
 
     /// Starts the timer that applies what the session sends (~60 Hz); it
@@ -418,9 +463,9 @@ impl App {
 
     /// Sets the window's groups from the state (`grSet`, `updateButtons`).
     fn refresh_groups(&self) {
-        let (busy, go, rescan) = {
+        let (busy, go, rescan, stop) = {
             let s = self.state.borrow();
-            (s.busy, s.go, s.rescan)
+            (s.busy, s.go, s.rescan, s.stop)
         };
         let (actions, detail) = if busy {
             (false, false)
@@ -437,7 +482,8 @@ impl App {
         self.ui.set_actions_enabled(actions);
         self.ui.set_detail_enabled(detail);
         self.ui.set_go_enabled(go && !busy);
-        self.ui.set_select_enabled(rescan && !busy);
+        self.ui.set_rescan_enabled(rescan && !busy);
+        self.ui.set_stop_enabled(stop);
     }
 
     /// `grDisactivateAll` and `make_busy`.
@@ -525,6 +571,23 @@ impl App {
         self.ui.set_dialog_message(d.message.as_str().into());
         self.ui.set_dialog_ok(d.ok.into());
         self.ui.set_dialog_cancel(d.cancel.into());
+        let entries: Vec<SummaryEntry> = d
+            .entries
+            .iter()
+            .map(|e| SummaryEntry {
+                path: e.path.as_str().into(),
+                description: e.description.as_str().into(),
+                errors: ModelRc::new(VecModel::from(
+                    e.errors
+                        .iter()
+                        .flat_map(|e| e.lines())
+                        .map(SharedString::from)
+                        .collect::<Vec<_>>(),
+                )),
+            })
+            .collect();
+        self.ui
+            .set_summary_entries(ModelRc::new(VecModel::from(entries)));
         if d.kind != 1 {
             self.ui.set_root_dir(SharedString::new());
             self.ui.set_root_kind(0);
@@ -592,6 +655,7 @@ impl App {
                         ok: "OK",
                         cancel: "Cancel",
                         on: OnAnswer::SecondRoot(first, r),
+                        entries: Vec::new(),
                     });
                 } else {
                     r.send(None);
@@ -666,21 +730,30 @@ impl App {
                         self.state.borrow_mut().busy = false;
                         self.synchronize();
                     }
+                    Some(AfterConfigure::Detect) => self.detect(None),
                 }
             }
             Event::Connected(names) => {
-                {
+                let proceed = {
                     let mut s = self.state.borrow_mut();
                     s.roots = Some(names);
                     s.profile_loaded = true;
-                }
+                    s.reloading = false;
+                    std::mem::take(&mut s.proceed)
+                };
                 self.update_from_profile();
-                self.detect();
+                if proceed {
+                    self.configure(true, AfterConfigure::Detect);
+                } else {
+                    self.detect(None);
+                }
             }
             Event::Contacting(msg) => {
-                // `displayWaitMessage`.
-                self.set_busy(true);
-                self.status(&msg);
+                // `displayWaitMessage`, unless loading the profile again.
+                if !self.state.borrow().reloading {
+                    self.set_busy(true);
+                    self.status(&msg);
+                }
             }
             Event::Status(s) => self.set_status(&s),
             Event::Scanning(_) | Event::Merge { .. } | Event::Refused(_) => {}
@@ -692,22 +765,16 @@ impl App {
             Event::Updates(u) => self.detected(u),
             Event::Item(i, item) => self.set_item(i, item),
             Event::Items { items, .. } => self.display_main(items),
-            Event::Progress(p) => {
-                // `showProgress`'s `updateRowStatus`.
-                let changed = self
-                    .model
-                    .table
-                    .borrow_mut()
-                    .set_progress(p.item, &p.item_progress);
-                self.model.changed(changed);
-            }
+            Event::Progress(p) => self.show_progress(&p),
             Event::Synchronized(summary) => {
                 // `commitUpdates`.
                 {
                     let mut s = self.state.borrow_mut();
                     s.summary = Some(summary);
                     s.after_commit = Some(AfterCommit::Sync);
+                    s.stop = false;
                 }
+                self.refresh_groups();
                 self.status("Updating synchronizer state");
                 self.send(Command::Commit);
             }
@@ -725,11 +792,8 @@ impl App {
                     }
                 }
             }
-            Event::Profiles(_)
-            | Event::ProfileUnchanged(_)
-            | Event::Changed
-            | Event::Diff { .. }
-            | Event::Interrupted => {}
+            Event::ProfileUnchanged(unchanged) => self.reloaded(unchanged),
+            Event::Profiles(_) | Event::Changed | Event::Diff { .. } | Event::Interrupted => {}
             Event::Error(msg) => self.error(&msg),
             // The user chose to stop at a warning (`doExit`).
             Event::Exit(_) => self.quit(0),
@@ -748,6 +812,7 @@ impl App {
                 ok: "OK",
                 cancel: "Cancel",
                 on: OnAnswer::FirstRoot(r),
+                entries: Vec::new(),
             },
             Question::Merge { title, text, reply } => Dialog::message(
                 &title,
@@ -772,9 +837,16 @@ impl App {
             s.after_configure = None;
             s.after_commit = None;
             s.busy = false;
+            s.stop = false;
+            s.reloading = false;
+            s.proceed = false;
+            s.rechecking = false;
             s.rescan = s.profile_loaded;
         }
         self.refresh_groups();
+        self.ui.set_progress_pulse(false);
+        self.display_global_progress(0., f64::NAN, "");
+        self.stop_stats();
         if started {
             self.status(&format!("Fatal error: {msg}"));
             self.push_dialog(Dialog::message(
@@ -859,8 +931,9 @@ impl App {
         self.update_details();
     }
 
-    /// `detectCmd`: finds the updates, if the profile has loaded.
-    fn detect(&self) {
+    /// `detectCmd`: finds the updates, if the profile has loaded; with
+    /// `only`, in those paths only.
+    fn detect(&self, only: Option<Vec<gemel_ui_api::Path<gemel_ui_api::Global>>>) {
         self.ui.invoke_focus_table();
         if !self.state.borrow().profile_loaded {
             self.state.borrow_mut().rescan = true;
@@ -868,17 +941,23 @@ impl App {
             return;
         }
         self.clear_main_window();
+        // `detectUpdatesAndReconcile`'s pulsing progress bar and statistics.
+        self.ui.set_progress_pulse(true);
+        self.start_stats();
         let paths = self.state.borrow().unsynchronized.clone();
         self.send(Command::Update {
             allow_partial: true,
             want_watcher: true,
             paths,
-            only: None,
+            only,
         });
     }
 
     /// The rest of `detectUpdatesAndReconcile`, then of `detectCmd`.
     fn detected(&self, u: Updates) {
+        self.ui.set_progress_pulse(false);
+        self.display_global_progress(0., f64::NAN, "");
+        self.stop_stats();
         let empty = u.items.is_empty();
         let commit = empty && u.found_archives;
         self.status(if !empty {
@@ -890,14 +969,22 @@ impl App {
         });
         let (confirm, batch) = {
             let mut s = self.state.borrow_mut();
-            s.unsynchronized = Some((u.items.iter().map(|i| i.path.clone()).collect(), Vec::new()));
+            // A recheck sets `paths` for a while, which the watcher can't
+            // follow: the next detection is a whole one, and big deletions
+            // aren't confirmed.
+            let rechecking = std::mem::take(&mut s.rechecking);
+            s.unsynchronized = if rechecking {
+                None
+            } else {
+                Some((u.items.iter().map(|i| i.path.clone()).collect(), Vec::new()))
+            };
             s.started = true;
             s.go = !empty;
             s.rescan = !commit;
             s.busy = commit;
             let settings = s.settings.as_ref();
             (
-                settings.is_some_and(|s| s.confirm_big_deletes),
+                !rechecking && settings.is_some_and(|s| s.confirm_big_deletes),
                 settings.is_some_and(|s| s.batch),
             )
         };
@@ -1042,34 +1129,27 @@ impl App {
         }
         self.set_busy(true);
         self.status("Propagating changes");
+        {
+            let mut s = self.state.borrow_mut();
+            s.stop = true;
+            s.transferred = vec![0; self.model.table.borrow().len()];
+            // `initGlobalProgress`.
+            s.last_frac = 0.;
+            s.progress_shown = Some(Instant::now());
+        }
+        self.refresh_groups();
+        self.display_global_progress(0., f64::NAN, "");
+        self.start_stats();
         self.send(Command::Synchronize);
     }
 
-    /// The end of `synchronize`, once committed.
+    /// The end of `synchronize`, once committed: the status line, and
+    /// the summary box if the replicas are not fully synchronized.
     fn synchronized(&self) {
+        self.stop_stats();
         let summary = self.state.borrow().summary.clone().unwrap_or_default();
-        let count = |n: usize, what: &str| match n {
-            0 => None,
-            n => Some(format!("{n} {what}")),
-        };
-        let failures = match summary.failed.len() {
-            0 => None,
-            1 => Some("1 failure".to_owned()),
-            n => Some(format!("{n} failures")),
-        };
-        let parts: Vec<String> = [
-            failures,
-            count(summary.partial.len(), "partially transferred"),
-            count(summary.skipped.len(), "skipped"),
-            count(summary.not_started, "not started"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        self.status(&format!(
-            "Synchronization complete         {}",
-            parts.join(", ")
-        ));
+        self.status(&summary::status(&summary));
+        self.display_global_progress(0., f64::NAN, "");
         {
             let mut s = self.state.borrow_mut();
             s.unsynchronized = Some((summary.unsynchronized.clone(), Vec::new()));
@@ -1077,6 +1157,206 @@ impl App {
             s.rescan = true;
         }
         self.refresh_groups();
+        let items: Vec<ItemView> = (self.model.table.borrow().rows().iter())
+            .map(|r| r.item.clone())
+            .collect();
+        if let Some(shown) = summary::shown(&summary, &items) {
+            self.push_dialog(Dialog {
+                kind: 4,
+                title: "Synchronization summary".to_owned(),
+                message: shown.message,
+                ok: "OK",
+                cancel: "",
+                on: OnAnswer::Close,
+                entries: shown.entries,
+            });
+        }
+    }
+
+    /// `showProgress`: an item's progress, the overall progress, and the
+    /// file data written on each side.
+    fn show_progress(&self, p: &Progress) {
+        let changed = self
+            .model
+            .table
+            .borrow_mut()
+            .set_progress(p.item, &p.item_progress);
+        self.model.changed(changed);
+        let written = {
+            let mut s = self.state.borrow_mut();
+            let last = s
+                .transferred
+                .get_mut(p.item)
+                .map(|t| std::mem::replace(t, p.item_transferred));
+            last.map(|last| p.item_transferred - last)
+        };
+        if let Some(n) = written.filter(|&n| n > 0) {
+            let local = |host: &str| host == "local";
+            let (local1, local2) = self
+                .state
+                .borrow()
+                .roots
+                .as_ref()
+                .map_or((true, true), |r| (local(&r.hosts.0), local(&r.hosts.1)));
+            let client = match self.model.table.borrow().rows().get(p.item).map(Row::arrow) {
+                Some(Arrow::Right { .. }) => local2,
+                Some(Arrow::Left { .. }) => local1,
+                _ => true,
+            };
+            let mut stats = self.stats.borrow_mut();
+            if client {
+                stats.client_written += n as f64;
+            } else {
+                stats.server_written += n as f64;
+            }
+        }
+        // `Uutil.Filesize.percentageOfTotalSize`.
+        let v = if p.length == 0 {
+            100.
+        } else {
+            p.transferred as f64 * 100. / p.length as f64
+        };
+        self.display_global_progress(v, p.rate, &p.eta);
+    }
+
+    /// `displayGlobalProgress`: the progress bar at `v` percent, with the
+    /// time left and the rate twice a second.
+    fn display_global_progress(&self, v: f64, rate: f64, eta: &str) {
+        let mut s = self.state.borrow_mut();
+        if v == 0. || (v - s.last_frac).abs() > 1. {
+            s.last_frac = v;
+            self.ui
+                .set_progress_fraction((v / 100.).clamp(0., 1.) as f32);
+        }
+        if v < 0.001 {
+            self.ui.set_progress_text(" ".into());
+            return;
+        }
+        let now = Instant::now();
+        if s.progress_shown
+            .is_some_and(|t| now.duration_since(t).as_secs_f64() < 0.5)
+        {
+            return;
+        }
+        s.progress_shown = Some(now);
+        let rem = if v >= 100. {
+            "00:00 remaining".to_owned()
+        } else {
+            format!("{eta} remaining")
+        };
+        let text = if rate > 99. {
+            format!("{rem}  ({})", stats::rate2str(rate))
+        } else {
+            rem
+        };
+        self.ui.set_progress_text(text.into());
+    }
+
+    // ---- Statistics ----
+
+    /// `startStats`.
+    fn start_stats(&self) {
+        if !self.stats.borrow_mut().start() {
+            return;
+        }
+        let weak = self.weak.borrow().clone();
+        self.stats_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs_f64(stats::DELAY),
+            move || {
+                if let Some(app) = weak.upgrade() {
+                    let more = app.stats.borrow_mut().sample();
+                    app.refresh_stats();
+                    if !more {
+                        app.stats_timer.stop();
+                    }
+                }
+            },
+        );
+    }
+
+    /// `stopStats`.
+    fn stop_stats(&self) {
+        self.stats.borrow_mut().stop();
+    }
+
+    /// Shows the figures in the statistics window (`updateTable`, and the
+    /// graphs).
+    fn refresh_stats(&self) {
+        let stats = self.stats.borrow();
+        let w = &self.stats_window;
+        w.set_emission(stats.emission.commands(50.).into());
+        w.set_reception(stats.reception.commands(50.).into());
+        let rows: Vec<ModelRc<SharedString>> = stats
+            .table()
+            .iter()
+            .map(|row| {
+                ModelRc::new(VecModel::from(
+                    row.iter().map(SharedString::from).collect::<Vec<_>>(),
+                ))
+            })
+            .collect();
+        w.set_table(ModelRc::new(VecModel::from(rows)));
+    }
+
+    // ---- Rescanning and stopping ----
+
+    /// Rescan (`reloadProfile`, then `detectCmd`); with `proceed`, "Detect
+    /// Updates and Proceed (Without Waiting)", which syncs once the
+    /// updates are found.
+    fn rescan(&self, proceed: bool) {
+        if self.state.borrow().busy {
+            return self.status("Synchronizer is busy, please wait..");
+        }
+        self.clear_main_window();
+        self.state.borrow_mut().proceed = proceed;
+        self.send(Command::ProfileUnchanged);
+    }
+
+    /// The rest of `reloadProfile`: the profile is loaded again if it has
+    /// changed (or never loaded), which scans everything again; otherwise
+    /// the roots are connected, which keeps the paths left unsynchronised.
+    fn reloaded(&self, unchanged: bool) {
+        let (loaded, name) = {
+            let s = self.state.borrow();
+            (
+                s.profile_loaded,
+                s.settings.as_ref().map(|s| s.profile.clone()),
+            )
+        };
+        match name {
+            Some(name) if !unchanged || !loaded => {
+                self.state.borrow_mut().reloading = true;
+                self.load_profile(&name);
+            }
+            _ => self.send(Command::Connect),
+        }
+    }
+
+    /// "Recheck Unsynchronized Items": detects updates in the paths of the
+    /// items not propagated, failed, skipped or with a problem only.
+    fn recheck(&self) {
+        if self.state.borrow().busy {
+            return self.status("Synchronizer is busy, please wait..");
+        }
+        let paths = {
+            let t = self.model.table.borrow();
+            (t.rows().iter())
+                .filter(|r| {
+                    let i = &r.item;
+                    !matches!(i.outcome, Some(session::Outcome::Succeeded))
+                        || i.problem.is_some()
+                        || matches!(i.action, gemel_ui_api::uicommon::Action::Skip(_))
+                })
+                .map(|r| r.item.path.clone())
+                .collect()
+        };
+        {
+            let mut s = self.state.borrow_mut();
+            s.rechecking = true;
+            s.unsynchronized = None;
+        }
+        self.detect(Some(paths));
     }
 
     // ---- Quitting ----
@@ -1123,6 +1403,8 @@ impl App {
             s.send(Command::Interrupt);
             let _ = s.join();
         }
+        self.stats_timer.stop();
+        let _ = self.stats_window.hide();
         let _ = self.ui.hide();
         let _ = slint::quit_event_loop();
     }
@@ -1194,7 +1476,7 @@ impl App {
         let w = with.clone();
         ui.on_select_all(move || {
             w(&|s| {
-                if s.ui.get_dialog() != 0 || !s.ui.get_select_enabled() {
+                if s.ui.get_dialog() != 0 || !s.ui.get_rescan_enabled() {
                     return;
                 }
                 let changed = s.model.table.borrow_mut().select_all();
@@ -1205,7 +1487,7 @@ impl App {
         let w = with.clone();
         ui.on_deselect_all(move || {
             w(&|s| {
-                if s.ui.get_dialog() != 0 || !s.ui.get_select_enabled() {
+                if s.ui.get_dialog() != 0 || !s.ui.get_rescan_enabled() {
                     return;
                 }
                 let changed = s.model.table.borrow_mut().deselect_all();
@@ -1228,6 +1510,58 @@ impl App {
                     s.synchronize();
                 }
             })
+        });
+        let w = with.clone();
+        ui.on_stop(move || {
+            w(&|s| {
+                if s.ui.get_stop_enabled() {
+                    s.send(Command::Abort);
+                }
+            })
+        });
+        let w = with.clone();
+        ui.on_rescan(move || {
+            w(&|s| {
+                if s.ui.get_dialog() == 0 && s.ui.get_rescan_enabled() {
+                    s.rescan(false);
+                }
+            })
+        });
+        let w = with.clone();
+        ui.on_proceed(move || {
+            w(&|s| {
+                if s.ui.get_dialog() == 0 && s.ui.get_rescan_enabled() {
+                    s.rescan(true);
+                }
+            })
+        });
+        let w = with.clone();
+        ui.on_recheck(move || {
+            w(&|s| {
+                if s.ui.get_dialog() == 0 && s.ui.get_rescan_enabled() {
+                    s.recheck();
+                }
+            })
+        });
+        let w = with.clone();
+        ui.on_show_statistics(move || {
+            w(&|s| {
+                s.refresh_stats();
+                let _ = s.stats_window.show();
+            })
+        });
+        let w = with.clone();
+        self.stats_window.on_close(move || {
+            w(&|s| {
+                let _ = s.stats_window.hide();
+            })
+        });
+        let w = with.clone();
+        self.stats_window.window().on_close_requested(move || {
+            w(&|s| {
+                let _ = s.stats_window.hide();
+            });
+            slint::CloseRequestResponse::HideWindow
         });
         let w = with.clone();
         ui.on_quit(move || w(&|s| s.safe_exit()));

@@ -253,7 +253,7 @@ const SYNC: Duration = Duration::from_secs(120);
 
 /// A sync of `work`'s replicas `a` and `b` through the window, with the
 /// default actions, as a user goes through it: OK at each warning, then
-/// Go if there is anything to propagate. The oracle's flags but batch
+/// Go if there is anything to propagate, and OK at the summary. The oracle's flags but batch
 /// mode and the text interface. Its exit code is the text interface's
 /// for the same summary; it prints nothing.
 pub fn window_sync(work: &Path) -> io::Result<Step> {
@@ -282,6 +282,11 @@ pub fn window_sync(work: &Path) -> io::Result<Step> {
         match ui.get_dialog() {
             0 => {}
             1 if ui.get_dialog_title() == "Warning" => {
+                press(ui, "OK");
+                return false;
+            }
+            // The summary, when the replicas aren't fully synchronized.
+            4 => {
                 press(ui, "OK");
                 return false;
             }
