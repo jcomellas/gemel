@@ -47,6 +47,7 @@ fn start_counting(
         print_wait_message: false,
         complete_progress: true,
         traffic,
+        prompts: false,
     })
     .unwrap();
     (s, output)

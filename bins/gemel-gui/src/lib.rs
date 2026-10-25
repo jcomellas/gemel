@@ -329,6 +329,7 @@ impl App {
             print_wait_message: false,
             complete_progress: true,
             traffic: Some(traffic.clone()),
+            prompts: false,
         })
         .map_err(|e| slint::PlatformError::Other(format!("Can't start the session: {e}")))?;
         let app = App::create(Some(session), traffic, Some(unison_dir))?;
@@ -833,7 +834,7 @@ impl App {
             }
             Event::ProfileUnchanged(unchanged) => self.reloaded(unchanged),
             Event::Diff { shown, errors } => self.diffs_shown(shown, &errors),
-            Event::Changed | Event::Interrupted => {}
+            Event::Changed | Event::Interrupted | Event::InputEnded(_) => {}
             Event::Error(msg) => self.error(&msg),
             // The user chose to stop at a warning (`doExit`).
             Event::Exit(_) => self.quit(0),
@@ -854,6 +855,8 @@ impl App {
                 on: OnAnswer::FirstRoot(r),
                 entries: Vec::new(),
             },
+            // The window doesn't ask for them yet (phase 2b).
+            Question::Password { .. } => return,
             Question::Merge { title, text, reply } => Dialog::message(
                 &title,
                 &format!("Do you want to commit the changes to the replicas ?\n\n{text}"),
