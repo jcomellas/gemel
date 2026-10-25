@@ -12,12 +12,17 @@
 //! the file watcher, Windows' long path names (`GetLongPathNameW`), for
 //! sockets `getaddrinfo`, and for ssh under a pseudo-terminal `openpty`,
 //! `fcntl` and the child's session (`setsid`, `ioctl(TIOCSCTTY)`, its
-//! terminal's modes), and sending a child `SIGTERM`.
+//! terminal's modes), and sending a child `SIGTERM`, and on Windows
+//! pseudo-consoles (`CreatePseudoConsole`) and starting a process on one
+//! (`CreateProcessW` with its attributes, `SearchPathW`, pipes, and waiting
+//! for and ending it).
 //!
 //! Not ported yet: AppleDouble files (resource forks on volumes without
 //! them), reading and setting xattrs and ACLs, and block cloning on
 //! Windows (see [`reflink`]).
 
+#[cfg(windows)]
+pub mod conpty;
 pub mod fileinfo;
 pub mod fingerprint;
 pub mod fs;
