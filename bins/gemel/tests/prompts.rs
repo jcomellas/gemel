@@ -35,6 +35,7 @@ fn start(pair: &Pair) -> (session::Handle, mpsc::Receiver<Event>) {
         complete_progress: true,
         traffic: None,
         prompts: true,
+        host_name: None,
     })
     .unwrap();
     let (tx, rx) = mpsc::channel();
