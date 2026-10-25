@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 1c, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 2a, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -27,7 +27,7 @@ Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.m
    Profiles are written as `uigtk3` writes them, and OCaml Unison loads them.
 4. **ssh's prompts through the GUI** (`termInteract`), as `uigtk3` shows them:
    - ssh runs under a pseudo-terminal on Unix and ConPTY on Windows (`terminal.ml`, `pty.c`, `win_openpty`);
-   - what ssh prints is shown, and a password, passphrase or host-key question gets the password dialog, recognised as `terminal.ml` recognises them;
+   - what ssh prints at its terminal is shown in the password dialog, which takes the answer, as `uigtk3` shows it. `uigtk3` doesn't tell prompts apart by `terminal.ml`'s patterns for passwords, passphrases and host keys; only the Mac interface uses them. They are ported all the same;
    - Quit there ends the GUI as `uigtk3`'s does.
 5. **`gemel-gui` is a whole gemel,** as `unison-gui` is a whole unison:
    - `-ui text` runs the text interface;
@@ -267,6 +267,36 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - golden vectors for the patterns and the escape handling, generated from `terminal.ml` with milestone 1's fixture scripts (`gen_terminal.ml`);
   - a shim standing in for ssh asks for a password on its terminal, as `bins/gemel/tests/terminal.rs` does, and the GUI's dialog answers it, on Unix;
   - on Windows, the same through ConPTY, which needs no console. Whether CI's runner allows it is checked in this phase. If it doesn't, the plan says so.
+
+**Notes (phase 2a, 2026-10-25):**
+- **The split:**
+  - **2a:** what is below the window, on Unix: the pseudo-terminal, `terminal.ml`, and the session's questions.
+  - **2b:** the window's password dialog, and remote roots in the harness.
+  - **2c:** ConPTY, which only Windows CI can test. Until then, on Windows, ssh runs as a plain process, as `fallback_session` runs it.
+- **What ssh prints:**
+  - `terminal.ml`'s parser of control sequences (`parseCtrlSeq`) and its patterns for OpenSSH's messages are ported, on bytes. Golden vectors come from `terminal.ml` itself (`tools/ocaml-fixtures/gen_terminal.ml`), and are the same on OCaml 4.13 and 5.3.
+  - A cursor forward stands for at most 1000 spaces, where OCaml has no limit.
+- **The pseudo-terminal** is in `gemel-fs` (`pty.rs`, the only new `unsafe`):
+  - `openpty`, with both ends closed on exec;
+  - the child's session: its standard error is the terminal, then `setsid`, `TIOCSCTTY` and echo off.
+
+  `gemel-fs`'s documentation lists the calls.
+- **`terminal.rs`:**
+  - `create_session` reads the terminal on a thread of its own, since tokio can't be relied on to wake for a terminal on macOS.
+  - `handle_password_requests` shows what ssh prints 50 ms after it comes, unless the connection is up by then, and writes the answers back.
+  - Once the server has written something (`initConnection`'s `connReady`, now a hook of `init_connection`), nothing more is asked, and what ssh prints goes to the client's standard error.
+  - If the connection fails, ssh's last words become a warning.
+- **The shell:** an ssh started under a terminal is also ended as the program exits, if it still runs (`end_shells`), rather than by `safe_waitpid` when its connection closes. A connection's close handlers may run as the engine thread ends, when nothing can be started.
+- **The session:**
+  - `Config::prompts` sets `Rpc::set_term_interact`.
+  - What ssh prints comes as `Question::Password`, with the root as the user wrote it (`canonize_root` and `open_connection` now take the name), and `Event::InputEnded` says it won't be answered any more.
+  - The text interface and, until 2b, the window don't ask for prompts.
+- **Tests:**
+  - the vectors;
+  - the pseudo-terminal: `/dev/tty` and `-echo`;
+  - with a shim standing in for ssh: a password asked for until the answer is right; a banner after the connection is up not shown; ssh's last words kept when it fails; nothing written once input has ended;
+  - in `gemel`'s tests, a session with prompts against a shim that asks twice, then runs the server: `gemel`, or OCaml's with `GEMEL_REFERENCE_UNISON`.
+- **Generating the vectors** on OCaml 4.13 fails at `gen_transfer.ml`, which needs `Digest.MD5` (OCaml 5.2). That failure predates this phase: the terminal vectors were checked on 4.13 on their own.
 
 ### Phase 3: profiles (`uigtk3.ml`'s profile manager, wizard and editor, ~1.7k; `strings.ml` as data)
 
