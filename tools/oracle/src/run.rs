@@ -283,39 +283,109 @@ pub fn client_flags(how: &How) -> Vec<String> {
         .collect()
 }
 
-fn run(p: &Pairing, remote: Option<Remote>, how: &How, work: &Path) -> io::Result<Step> {
-    let mut cmd = Command::new(&p.client);
-    cmd.arg(work.join("a"));
+/// A client's run, set up: its roots, and how replica `b` is reached.
+pub struct ClientRun {
+    /// The roots, and what reaches `b` (the ssh shim and the server's
+    /// command): the client's first arguments, before [`client_flags`].
+    pub args: Vec<String>,
+    /// The client's host name, with a remote root (`UNISONLOCALHOSTNAME`).
+    pub host_name: Option<&'static str>,
+    remote: Option<Remote>,
+    server: Option<SocketServer>,
+    /// The ssh shim's runs before this one.
+    runs: u64,
+}
+
+/// Sets up a client's run in `work`, with `p`'s server for replica `b`
+/// if `remote` says how to reach it: the ssh shim installed, or a socket
+/// server started.
+pub fn client_run(
+    p: &Pairing,
+    remote: Option<Remote>,
+    how: &How,
+    work: &Path,
+) -> io::Result<ClientRun> {
+    let mut args = vec![work.join("a").display().to_string()];
     let mut server = None;
     let mut runs = 0;
-    let server_stderr = work.join("remote").join("stderr");
     match remote {
-        None => {
-            cmd.arg(work.join("b"));
-        }
+        None => args.push(work.join("b").display().to_string()),
         Some(Remote::Ssh) => {
-            fs::write(&server_stderr, "")?;
+            fs::write(work.join("remote").join("stderr"), "")?;
             let _ = fs::remove_file(work.join("remote").join("exit"));
             runs = shim_runs(work);
-            cmd.arg(format!("ssh://{SERVER_HOST}/b"))
-                .arg("-sshcmd")
-                .arg(shim::install(
-                    work,
-                    &how.harness,
-                    how.old_server,
-                    how.ssh_config.as_deref(),
-                )?)
-                .arg("-servercmd")
-                .arg(server_cmd(&p.server)?);
+            let shim = shim::install(
+                work,
+                &how.harness,
+                how.old_server,
+                how.ssh_config.as_deref(),
+            )?;
+            args.extend([
+                format!("ssh://{SERVER_HOST}/b"),
+                "-sshcmd".to_owned(),
+                shim.display().to_string(),
+                "-servercmd".to_owned(),
+                server_cmd(&p.server)?,
+            ]);
         }
         Some(Remote::Socket) => {
             let s = SocketServer::start(&p.server, work)?;
-            cmd.arg(format!("socket://127.0.0.1:{}/b", s.port));
+            args.push(format!("socket://127.0.0.1:{}/b", s.port));
             server = Some(s);
         }
     }
-    if remote.is_some() {
-        cmd.env("UNISONLOCALHOSTNAME", CLIENT_HOST);
+    Ok(ClientRun {
+        args,
+        host_name: remote.map(|_| CLIENT_HOST),
+        remote,
+        server,
+        runs,
+    })
+}
+
+impl ClientRun {
+    /// Once the client has ended: the server's standard error, normalised,
+    /// once the server has ended too, and `normalize` for the client's.
+    pub fn finish(self, work: &Path) -> io::Result<(String, impl Fn(&str) -> String)> {
+        let (server, port) = match (self.remote, self.server) {
+            (None, _) => (String::new(), None),
+            (Some(Remote::Ssh), _) => {
+                // The client can finish before the server it started has;
+                // wait for the server, if the shim ran one.
+                let exit = work.join("remote").join("exit");
+                let start = Instant::now();
+                while shim_runs(work) > self.runs
+                    && !exit.exists()
+                    && start.elapsed() < SERVER_START
+                {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                (
+                    fs::read_to_string(work.join("remote").join("stderr"))?,
+                    None,
+                )
+            }
+            (Some(Remote::Socket), Some(mut s)) => (s.stop(), Some(s.port)),
+            (Some(Remote::Socket), None) => unreachable!("started with the run"),
+        };
+        let work = work.to_owned();
+        let norm = move |s: &str| {
+            let s = normalize(s, &work);
+            match port {
+                Some(p) => s.replace(&format!("127.0.0.1:{p}"), "127.0.0.1:<port>"),
+                None => s,
+            }
+        };
+        Ok((norm(&server), norm))
+    }
+}
+
+fn run(p: &Pairing, remote: Option<Remote>, how: &How, work: &Path) -> io::Result<Step> {
+    let c = client_run(p, remote, how, work)?;
+    let mut cmd = Command::new(&p.client);
+    cmd.args(&c.args);
+    if let Some(name) = c.host_name {
+        cmd.env("UNISONLOCALHOSTNAME", name);
     }
     let mut child = cmd
         .args(client_flags(how))
@@ -333,33 +403,12 @@ fn run(p: &Pairing, remote: Option<Remote>, how: &How, work: &Path) -> io::Resul
         out.join().unwrap_or_default(),
         err.join().unwrap_or_default(),
     );
-    let (server, port) = match (remote, server) {
-        (None, _) => (String::new(), None),
-        (Some(Remote::Ssh), _) => {
-            // The client can finish before the server it started has; wait
-            // for the server, if the shim ran one.
-            let exit = work.join("remote").join("exit");
-            let start = Instant::now();
-            while shim_runs(work) > runs && !exit.exists() && start.elapsed() < SERVER_START {
-                thread::sleep(Duration::from_millis(20));
-            }
-            (fs::read_to_string(&server_stderr)?, None)
-        }
-        (Some(Remote::Socket), Some(mut s)) => (s.stop(), Some(s.port)),
-        (Some(Remote::Socket), None) => unreachable!("started above"),
-    };
-    let norm = |s: &str| {
-        let s = normalize(s, work);
-        match port {
-            Some(p) => s.replace(&format!("127.0.0.1:{p}"), "127.0.0.1:<port>"),
-            None => s,
-        }
-    };
+    let (server, norm) = c.finish(work)?;
     Ok(Step {
         exit,
         stdout: norm(&stdout),
         stderr: norm(&stderr),
-        server: norm(&server),
+        server,
     })
 }
 
