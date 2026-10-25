@@ -160,6 +160,9 @@ pub enum Command {
         /// only these and what the watcher reported are scanned; otherwise
         /// everything is.
         paths: update::Subpaths,
+        /// Scan only these, as if `paths` named them, then set `paths` back
+        /// (`uigtk3`'s "Recheck Unsynchronized Items").
+        only: Option<Vec<Path<Global>>>,
     },
     /// `waitForChanges` on every root: replies [`Event::Changed`] once the
     /// file watcher reports a change to any replica. [`Command::Interrupt`]
@@ -703,6 +706,31 @@ impl From<Error> for Stop {
     }
 }
 
+/// The `paths` preference, set for a while: set back when dropped.
+struct PathsSetBack {
+    host: Rc<gemel_rpc::host::Host>,
+    saved: Vec<Path<Global>>,
+}
+
+impl PathsSetBack {
+    fn new(host: &Rc<gemel_rpc::host::Host>, paths: Vec<Path<Global>>) -> PathsSetBack {
+        let mut prefs = host.prefs().borrow_mut();
+        let saved = prefs.read(&globals::PATHS).clone();
+        prefs.set(&globals::PATHS, paths);
+        PathsSetBack {
+            host: host.clone(),
+            saved,
+        }
+    }
+}
+
+impl Drop for PathsSetBack {
+    fn drop(&mut self) {
+        let saved = std::mem::take(&mut self.saved);
+        self.host.prefs().borrow_mut().set(&globals::PATHS, saved);
+    }
+}
+
 /// `stateItem`: an item, and how its propagation goes.
 struct Item {
     ri: ReconItem,
@@ -862,7 +890,12 @@ impl Session {
                 allow_partial,
                 want_watcher,
                 paths,
-            } => self.update(allow_partial, want_watcher, paths).await?,
+                only,
+            } => {
+                // Set back however the scan ends, an interrupt included.
+                let _paths = only.map(|only| PathsSetBack::new(self.rpc().client_host(), only));
+                self.update(allow_partial, want_watcher, paths).await?
+            }
             Command::WaitForChanges => {
                 self.wait_for_changes().await?;
                 self.send(Event::Changed);

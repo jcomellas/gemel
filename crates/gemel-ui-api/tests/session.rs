@@ -129,6 +129,7 @@ fn updates(s: &mut Session, answer: &mut dyn FnMut(&mut Session, Question)) -> U
         allow_partial: true,
         want_watcher: false,
         paths: None,
+        only: None,
     };
     match ok(s, c, answer) {
         Event::Updates(u) => u,
@@ -286,6 +287,7 @@ fn warnings_are_shown_or_asked_about() {
         allow_partial: true,
         want_watcher: false,
         paths: None,
+        only: None,
     };
     let (before, _) = call(&mut s, c, &mut no_questions);
     assert!(
@@ -305,6 +307,7 @@ fn warnings_are_shown_or_asked_about() {
         allow_partial: true,
         want_watcher: false,
         paths: None,
+        only: None,
     };
     let mut asked = Vec::new();
     let (_, e) = call(&mut s, c, &mut |_, q| match q {
@@ -638,6 +641,7 @@ fn status_comes_as_events() {
             allow_partial: true,
             want_watcher: false,
             paths: None,
+            only: None,
         };
         let (before, _) = call(&mut s, c, &mut no_questions);
         let statuses: Vec<_> = before
@@ -689,6 +693,7 @@ fn quitting_answers_what_is_left_unanswered() {
         allow_partial: true,
         want_watcher: false,
         paths: None,
+        only: None,
     }));
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || tx.send(s.join().is_ok()).unwrap());
@@ -795,6 +800,34 @@ fn conflicts_are_resolved_only_if_they_are_conflicts() {
         );
         s.join().unwrap();
     }
+}
+
+/// Only some paths can be scanned, as `paths` would name them; `paths` is
+/// as it was afterwards.
+#[test]
+fn only_some_paths_can_be_rechecked() {
+    let pair = synced_pair("session-only", &[], |r| write(r, "f", "same", T0));
+    write(&pair.a(), "one", "new in a", T0 + 10.0);
+    write(&pair.a(), "two", "new in a", T0 + 10.0);
+    settle(&[&pair.a(), &pair.b()]);
+    let (mut s, _) = start(&pair, &["p", "-batch"], false);
+    load(&mut s, &mut no_questions);
+    let one = gemel_ui_api::Path::from_bytes(b"one").unwrap();
+    let c = Command::Update {
+        allow_partial: true,
+        want_watcher: false,
+        paths: None,
+        only: Some(vec![one]),
+    };
+    let Event::Updates(u) = ok(&mut s, c, &mut no_questions) else {
+        panic!()
+    };
+    assert_eq!(names(&u.items), ["one"]);
+    assert_eq!(
+        names(&updates(&mut s, &mut no_questions).items),
+        ["one", "two"]
+    );
+    s.join().unwrap();
 }
 
 /// Whether the profile is as it was loaded: not once its file changes.
@@ -977,6 +1010,7 @@ fn an_interrupt_stops_a_question_unanswered() {
         allow_partial: true,
         want_watcher: false,
         paths: None,
+        only: None,
     };
     let (_, e) = call(&mut s, c, &mut |s, q| match q {
         // No archives: the warning.

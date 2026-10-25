@@ -873,6 +873,7 @@ impl App {
             allow_partial: true,
             want_watcher: true,
             paths,
+            only: None,
         });
     }
 
