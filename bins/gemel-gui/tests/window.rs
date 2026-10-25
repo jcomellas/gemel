@@ -10,11 +10,11 @@ use std::path::Path;
 use std::time::Duration;
 
 use gemel_gui::App;
-use gemel_ui_api::session::{Command, Event, SetAction};
+use gemel_ui_api::session::{Command, Event, Progress, SetAction, Summary};
 use gemel_ui_api::uicommon::Action;
 use i_slint_backend_testing::{AccessibleRole, ElementQuery};
 use slint::platform::Key;
-use slint::{ComponentHandle, LogicalSize};
+use slint::{ComponentHandle, LogicalSize, Model};
 
 use support::{click, fake_item, fake_updates, init, items, press, type_text, wait_until};
 
@@ -344,5 +344,213 @@ fn merges_are_confirmed() {
             "a's change\nb's change\n"
         );
     }
+    app.quit(0);
+}
+
+/// A cell of the statistics window's table: row `r` (the reception rate,
+/// the data received, the file data written), column `c` (the client,
+/// the server, the total).
+fn stat(app: &App, r: usize, c: usize) -> String {
+    let row = app.stats_window().get_table().row_data(r).unwrap();
+    row.row_data(c).unwrap().to_string()
+}
+
+/// A sync, without a session: Stop while it runs, the progress bar with
+/// the time left and the rate, the file data written, then the summary.
+#[test]
+fn a_sync_shows_its_progress_and_summary() {
+    init();
+    let app = App::detached().unwrap();
+    let ui = app.ui();
+    ui.show().unwrap();
+    app.handle(Event::Updates(fake_updates(vec![
+        fake_item("a", Action::LtoR(false)),
+        fake_item("b", Action::LtoR(false)),
+    ])));
+    assert!(!ui.get_stop_enabled());
+    assert!(press(ui, "Go"));
+    assert!(ui.get_stop_enabled() && !ui.get_go_enabled());
+    assert!(press(ui, "Stop"));
+    let sent = format!("{:?}", app.sent());
+    assert!(sent.ends_with("Synchronize, Abort]"), "{sent}");
+
+    let progress = |transferred| Progress {
+        item: 0,
+        item_transferred: transferred,
+        item_length: 100,
+        item_progress: format!("{transferred:3}%"),
+        transferred,
+        length: 200,
+        items_done: 0,
+        items: 2,
+        rate: 1000.,
+        eta: "00:01".to_owned(),
+    };
+    app.handle(Event::Progress(progress(50)));
+    assert_eq!(ui.get_progress_fraction(), 0.25);
+    // The text, at most twice a second.
+    assert_eq!(ui.get_progress_text(), " ");
+    std::thread::sleep(Duration::from_millis(550));
+    app.handle(Event::Progress(progress(60)));
+    assert_eq!(ui.get_progress_text(), "00:01 remaining  (1.0 KiB/s)");
+    assert_eq!(app.table().row(0).status_text(), " 60%");
+
+    let summary = Summary {
+        transferred: 1,
+        failed: vec![(1, "disk full".to_owned())],
+        ..Summary::default()
+    };
+    app.handle(Event::Synchronized(summary));
+    assert!(!ui.get_stop_enabled());
+    assert!(format!("{:?}", app.sent()).ends_with("Commit]"));
+    app.handle(Event::Committed);
+    assert_eq!(
+        ui.get_status_text().trim_end(),
+        "Synchronization complete         1 failure"
+    );
+    assert_eq!(
+        (ui.get_dialog(), ui.get_dialog_title()),
+        (4, "Synchronization summary".into())
+    );
+    assert_eq!(
+        ui.get_dialog_message(),
+        "The replicas are not fully synchronized.\nThere was one failure."
+    );
+    let entry = ui.get_summary_entries().row_data(0).unwrap();
+    assert_eq!(
+        (entry.path.as_str(), entry.description.as_str()),
+        ("b", "transport failure")
+    );
+    assert!(press(ui, "OK"));
+    assert_eq!(ui.get_dialog(), 0);
+
+    // Both items' bytes were written on the client's side (local roots).
+    ui.invoke_show_statistics();
+    assert_eq!(stat(&app, 2, 0), "60 B");
+    assert_eq!(stat(&app, 2, 1), "0 B");
+}
+
+/// Rescan finds what changed since; "Recheck Unsynchronized Items" looks
+/// only at the items not synchronised.
+#[test]
+fn rescan_and_recheck() {
+    let work = support::Work::new("window-rescan");
+    let dir = &work.0;
+    synced(dir, &["both"]);
+    std::fs::write(dir.join("a/both"), "a's").unwrap();
+    std::fs::write(dir.join("b/both"), "b's").unwrap();
+    std::fs::write(dir.join("a/new"), "new in a").unwrap();
+    let (app, out) = support::window(&dir.join("unison"), roots(dir));
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    let ready = || app.started() && !app.busy() && ui.get_dialog() == 0;
+    assert!(wait_until(WAIT, ready), "{}", out.text());
+    assert_eq!(app.table().len(), 2);
+
+    // The conflict is skipped.
+    assert!(press(ui, "Go"));
+    assert!(wait_until(WAIT, || ui.get_dialog() == 4), "{}", out.text());
+    assert!(
+        ui.get_dialog_message()
+            .ends_with("There was one skipped item.")
+    );
+    assert!(press(ui, "OK"));
+    assert!(wait_until(WAIT, ready));
+
+    // Something else changes: a recheck doesn't see it, a rescan does.
+    std::fs::write(dir.join("a/other"), "other in a").unwrap();
+    type_text(ui, "f");
+    assert!(wait_until(WAIT, ready), "{}", out.text());
+    let paths = |app: &App| -> Vec<String> {
+        (app.table().rows().iter())
+            .map(|r| r.item.path_string.clone())
+            .collect()
+    };
+    assert_eq!(paths(&app), ["both"]);
+    assert!(press(ui, "Rescan"));
+    assert!(wait_until(WAIT, ready), "{}", out.text());
+    assert_eq!(paths(&app), ["both", "other"]);
+    app.quit(0);
+}
+
+/// A server on a socket, killed when dropped.
+struct Server(std::process::Child);
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `gemel-gui -socket` serving `dir`, once it says it has started, and
+/// its port.
+fn socket_server(dir: &Path) -> (Server, u16) {
+    use std::io::BufRead;
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut child = std::process::Command::new(support::gemel_gui())
+        .args(["-socket", &port.to_string(), "-listen", "127.0.0.1"])
+        .current_dir(dir)
+        .env("UNISON", dir.join("unison-server"))
+        .env("HOME", dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut r = std::io::BufReader::new(child.stderr.take().unwrap());
+    let server = Server(child);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let _ = r.read_line(&mut line);
+        let _ = tx.send(line);
+    });
+    let line = rx.recv_timeout(Duration::from_secs(20)).unwrap();
+    assert_eq!(line.trim_end(), "server started");
+    (server, port)
+}
+
+/// With a root on a server, the statistics window counts what is
+/// received from it.
+#[test]
+fn statistics_count_what_comes_from_the_server() {
+    let work = support::Work::new("window-stats");
+    let dir = &work.0;
+    for r in ["a", "b", "unison", "unison-server"] {
+        std::fs::create_dir_all(dir.join(r)).unwrap();
+    }
+    std::fs::write(dir.join("b/f"), "from the server").unwrap();
+    let (_server, port) = socket_server(dir);
+    let args = vec![
+        dir.join("a").display().to_string(),
+        format!("socket://127.0.0.1:{port}/b"),
+        "-log=false".to_owned(),
+        "-times".to_owned(),
+    ];
+    let (app, out) = support::window(&dir.join("unison"), args);
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    // No archives yet: a warning first.
+    assert!(wait_until(WAIT, || ui.get_dialog() == 1), "{}", out.text());
+    assert!(press(ui, "OK"));
+    assert!(
+        wait_until(WAIT, || app.started() && !app.busy()),
+        "{}",
+        out.text()
+    );
+    assert!(press(ui, "Go"));
+    assert!(wait_until(WAIT, || app.summary().is_some() && !app.busy()));
+    assert_eq!(
+        std::fs::read_to_string(dir.join("a/f")).unwrap(),
+        "from the server"
+    );
+    // Sampled twice a second.
+    assert!(wait_until(WAIT, || stat(&app, 1, 0) != "0 B"));
+    assert_ne!(stat(&app, 1, 1), "0 B");
     app.quit(0);
 }
