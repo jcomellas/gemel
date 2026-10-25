@@ -396,6 +396,7 @@ mod tests {
             conflict: matches!(action, Action::Skip(_)),
             changed_from_default: false,
             can_diff: false,
+            both_files: true,
             length: 1,
             file_type: "file",
             line: String::new(),

@@ -503,6 +503,9 @@ pub struct ItemView {
     pub changed_from_default: bool,
     /// The two versions can be diffed.
     pub can_diff: bool,
+    /// Both replicas are files (`uigtk3` enables its Diff button for
+    /// these, whatever changed).
+    pub both_files: bool,
     /// How much propagating it transfers (`riLength`).
     pub length: Filesize,
     /// `riFileType`.
@@ -1349,6 +1352,10 @@ impl Session {
             conflict,
             changed_from_default,
             can_diff,
+            both_files: match &ri.replicas {
+                Replicas::Different(d) => d.rc1.typ == Typ::File && d.rc2.typ == Typ::File,
+                Replicas::Problem(_) => false,
+            },
             length: common::ri_length(ri),
             file_type: common::ri_file_type(ri),
             line: fmt.recon_item(&previous, ri, ""),

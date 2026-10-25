@@ -168,6 +168,7 @@ pub fn fake_item(path: &str, action: Action) -> ItemView {
         conflict: matches!(action, Action::Skip(_)),
         changed_from_default: false,
         can_diff: false,
+        both_files: true,
         length: 100,
         file_type: "file",
         line: String::new(),
