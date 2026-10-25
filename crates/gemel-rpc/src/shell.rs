@@ -121,23 +121,34 @@ pub async fn connect(
         SysError::new("create_process", program.as_bytes(), e).to_fatal("starting shell connection")
     };
     let host = endpoint.host().clone();
-    let (term, mut child) = match &interact {
+    let session = match &interact {
         Some(_) => terminal::create_session(cmd).map_err(starting)?,
         None => {
             cmd.stderr(Stdio::inherit());
             gemel_fs::signal::block_interrupt_in_child(&mut cmd);
-            let child = tokio::process::Command::from(cmd)
+            let mut child = tokio::process::Command::from(cmd)
                 .spawn()
                 .map_err(starting)?;
-            (None, child)
+            let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+                return Err(Error::Fatal("Internal error: the shell's pipes".into()));
+            };
+            terminal::Session {
+                term: None,
+                stdin,
+                stdout,
+                child: terminal::Child::Spawned(Box::new(child)),
+            }
         }
     };
+    let terminal::Session {
+        term,
+        stdin,
+        stdout,
+        child,
+    } = session;
     if let Some(shell) = child.id().and_then(Started::new) {
         SHELLS.lock().unwrap_or_else(|e| e.into_inner()).push(shell);
     }
-    let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-        return Err(Error::Fatal("Internal error: the shell's pipes".into()));
-    };
     let requests = match (&term, interact) {
         (Some(term), Some(interact)) => {
             Some(terminal::handle_password_requests(term.clone(), interact))
