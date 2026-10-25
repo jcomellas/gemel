@@ -727,3 +727,107 @@ fn diffs_open_windows_of_their_own() {
     assert!(w.get_lines().row_count() > 0);
     app.quit(0);
 }
+
+/// Replicas `a` and `b` in `dir`, `b` reached over ssh through a shim
+/// that asks for a password at its terminal (twice at most) and, once
+/// it is `secret`, runs `gemel-gui -server` there: the window's
+/// arguments.
+#[cfg(unix)]
+fn over_ssh_with_a_password(dir: &Path) -> Vec<String> {
+    for r in ["a", "b", "unison", "unison-server"] {
+        std::fs::create_dir_all(dir.join(r)).unwrap();
+    }
+    std::fs::write(dir.join("a/f"), "f").unwrap();
+    let shim = dir.join("ssh");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\n\
+             n=0\n\
+             while :; do\n\
+               printf \"me@server's password: \" > /dev/tty\n\
+               read -r pw < /dev/tty\n\
+               [ \"$pw\" = secret ] && break\n\
+               n=$((n+1)); [ $n -ge 2 ] && exit 255\n\
+               echo 'Permission denied, please try again.' > /dev/tty\n\
+             done\n\
+             while [ \"$1\" != -e ]; do shift; done; shift 2\n\
+             UNISONLOCALHOSTNAME=server UNISON={} HOME={} exec \"$@\"\n",
+            dir.join("unison-server").display(),
+            dir.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    vec![
+        dir.join("a").display().to_string(),
+        format!("ssh://server/{}", dir.join("b").display()),
+        "-sshcmd".to_owned(),
+        shim.display().to_string(),
+        "-servercmd".to_owned(),
+        support::gemel_gui().display().to_string(),
+        "-log=false".to_owned(),
+    ]
+}
+
+/// ssh's password prompt in a dialog of its own (`createPasswordDialog`):
+/// a wrong answer, asked again, then the right one, and the connection.
+#[cfg(unix)]
+#[test]
+fn ssh_asks_for_a_password_in_a_dialog() {
+    let work = support::Work::new("window-password");
+    let dir = &work.0;
+    let args = over_ssh_with_a_password(dir);
+    let root = args[1].clone();
+    let (app, out) = support::window(&dir.join("unison"), args);
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    for answer in ["wrong", "secret"] {
+        assert!(
+            wait_until(WAIT, || ui.get_dialog() == 5
+                && ui.get_dialog_message().ends_with("password: ")),
+            "{}",
+            out.text()
+        );
+        assert_eq!(ui.get_password_root(), root.as_str());
+        assert!(ui.get_password_editable());
+        if answer == "secret" {
+            assert!(
+                ui.get_dialog_message()
+                    .contains("Permission denied, please try again."),
+                "{}",
+                ui.get_dialog_message()
+            );
+        }
+        ui.set_password_text(answer.into());
+        assert!(press(ui, "OK"));
+        assert_eq!(ui.get_dialog(), 0);
+    }
+    // Connected: no archives yet, then the items.
+    assert!(wait_until(WAIT, || ui.get_dialog() == 1), "{}", out.text());
+    assert_eq!(ui.get_dialog_title(), "Warning");
+    assert!(press(ui, "OK"));
+    assert!(
+        wait_until(WAIT, || app.started() && !app.busy()),
+        "{}",
+        out.text()
+    );
+    assert_eq!(app.table().len(), 1);
+    app.quit(0);
+}
+
+/// Quit in the password dialog ends the program.
+#[cfg(unix)]
+#[test]
+fn quit_in_the_password_dialog_ends_the_program() {
+    let work = support::Work::new("window-password-quit");
+    let dir = &work.0;
+    let args = over_ssh_with_a_password(dir);
+    let (app, out) = support::window(&dir.join("unison"), args);
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(wait_until(WAIT, || ui.get_dialog() == 5), "{}", out.text());
+    assert!(press(ui, "Quit"));
+    assert_eq!(app.exit_code(), Some(0));
+}

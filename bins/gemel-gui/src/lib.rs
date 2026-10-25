@@ -13,7 +13,7 @@
 //!
 //! What `uigtk3` does that isn't here yet (milestone 4's plan): the
 //! profile manager, so a profile must be named on the command line (or
-//! roots given); the Help menu; ssh's prompts.
+//! roots given); the Help menu.
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 
@@ -181,6 +181,15 @@ enum OnAnswer {
     FirstRoot(Reply<Option<(String, String)>>),
     /// The second (`getSecondRoot`), after the first.
     SecondRoot(String, Reply<Option<(String, String)>>),
+    /// What ssh prints, connecting to `root`, and the answer
+    /// (`createPasswordDialog`): OK sends the password, if it is still
+    /// asked for; Quit ends the program.
+    Password {
+        root: String,
+        reply: Reply<Option<String>>,
+        /// Still asked for: input hasn't ended (`closeInput`).
+        editable: bool,
+    },
 }
 
 /// A dialog waiting to be shown, or shown.
@@ -329,7 +338,7 @@ impl App {
             print_wait_message: false,
             complete_progress: true,
             traffic: Some(traffic.clone()),
-            prompts: false,
+            prompts: true,
             host_name: None,
         })
         .map_err(|e| slint::PlatformError::Other(format!("Can't start the session: {e}")))?;
@@ -626,6 +635,11 @@ impl App {
             self.ui.set_root_port(SharedString::new());
             self.ui.set_root_error(SharedString::new());
         }
+        if let OnAnswer::Password { root, editable, .. } = &d.on {
+            self.ui.set_password_root(root.as_str().into());
+            self.ui.set_password_editable(*editable);
+            self.ui.set_password_text(SharedString::new());
+        }
         self.ui.set_dialog(d.kind);
     }
 
@@ -693,6 +707,19 @@ impl App {
             }
             OnAnswer::SecondRoot(first, r) => {
                 r.send(root.map(|second| (first, second)));
+            }
+            OnAnswer::Password {
+                reply, editable, ..
+            } => {
+                let password = self.ui.get_password_text().to_string();
+                self.ui.set_password_text(SharedString::new());
+                if !ok {
+                    // `safeExit`, which doesn't ask while the roots are
+                    // being connected.
+                    self.quit(0);
+                } else if editable {
+                    reply.send(Some(password));
+                }
             }
         }
         if !self.quitting.get() {
@@ -835,7 +862,8 @@ impl App {
             }
             Event::ProfileUnchanged(unchanged) => self.reloaded(unchanged),
             Event::Diff { shown, errors } => self.diffs_shown(shown, &errors),
-            Event::Changed | Event::Interrupted | Event::InputEnded(_) => {}
+            Event::InputEnded(root) => self.input_ended(&root),
+            Event::Changed | Event::Interrupted => {}
             Event::Error(msg) => self.error(&msg),
             // The user chose to stop at a warning (`doExit`).
             Event::Exit(_) => self.quit(0),
@@ -856,8 +884,46 @@ impl App {
                 on: OnAnswer::FirstRoot(r),
                 entries: Vec::new(),
             },
-            // The window doesn't ask for them yet (phase 2b).
-            Question::Password { .. } => return,
+            Question::Password { root, text, reply } => {
+                // `getPassword`: more of what ssh prints goes to the dialog
+                // already open for the root (whose answer is the one that
+                // counts).
+                let open = {
+                    let mut s = self.state.borrow_mut();
+                    let first = s.dialogs.front().is_some_and(
+                        |d| matches!(&d.on, OnAnswer::Password { root: r, .. } if *r == root),
+                    );
+                    let d = s.dialogs.iter_mut().find(
+                        |d| matches!(&d.on, OnAnswer::Password { root: r, .. } if *r == root),
+                    );
+                    d.map(|d| {
+                        d.message.push_str(&text);
+                        (first, d.message.clone())
+                    })
+                };
+                match open {
+                    Some((first, message)) => {
+                        if first {
+                            self.ui.set_dialog_message(message.into());
+                        }
+                        drop(reply);
+                        return;
+                    }
+                    None => Dialog {
+                        kind: 5,
+                        title: format!("{}: SSH connection", my_name_capitalized()),
+                        message: text,
+                        ok: "OK",
+                        cancel: "Quit",
+                        on: OnAnswer::Password {
+                            root,
+                            reply,
+                            editable: true,
+                        },
+                        entries: Vec::new(),
+                    },
+                }
+            }
             Question::Merge { title, text, reply } => Dialog::message(
                 &title,
                 &format!("Do you want to commit the changes to the replicas ?\n\n{text}"),
@@ -867,6 +933,33 @@ impl App {
             ),
         };
         self.push_dialog(d);
+    }
+
+    /// `disablePassword`: the password dialog for `root`, if one is open,
+    /// takes no more input (`closeInput`).
+    fn input_ended(&self, root: &str) {
+        let first = {
+            let mut s = self.state.borrow_mut();
+            let mut first = true;
+            let mut found = None;
+            for d in s.dialogs.iter_mut() {
+                if let OnAnswer::Password {
+                    root: r, editable, ..
+                } = &mut d.on
+                    && r == root
+                {
+                    *editable = false;
+                    found = Some(first);
+                    break;
+                }
+                first = false;
+            }
+            found
+        };
+        if first == Some(true) {
+            self.ui.set_password_editable(false);
+            self.ui.set_password_text(SharedString::new());
+        }
     }
 
     /// `fatalErrorHandler`, or before the first items are shown, `start`'s
