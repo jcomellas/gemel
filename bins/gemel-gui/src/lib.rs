@@ -330,6 +330,7 @@ impl App {
             complete_progress: true,
             traffic: Some(traffic.clone()),
             prompts: false,
+            host_name: None,
         })
         .map_err(|e| slint::PlatformError::Other(format!("Can't start the session: {e}")))?;
         let app = App::create(Some(session), traffic, Some(unison_dir))?;

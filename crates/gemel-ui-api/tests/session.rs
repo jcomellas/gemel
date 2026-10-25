@@ -48,6 +48,7 @@ fn start_counting(
         complete_progress: true,
         traffic,
         prompts: false,
+        host_name: None,
     })
     .unwrap();
     (s, output)
@@ -843,6 +844,58 @@ fn only_some_paths_can_be_rechecked() {
         names(&updates(&mut s, &mut no_questions).items),
         ["one", "two"]
     );
+    s.join().unwrap();
+}
+
+/// Archives are named after the host name the session is given: a
+/// session named the same finds them, one named otherwise doesn't.
+#[test]
+fn archives_are_named_after_the_host_name_given() {
+    let pair = Pair::new("session-host-name");
+    pair.profile("p", &[]);
+    write(&pair.a(), "f", "f", T0);
+    let session = |host: &str| {
+        let output = Output::default();
+        session::spawn(Config {
+            unison_dir: pair.u(),
+            args: vec!["p".to_owned(), "-batch".to_owned()],
+            trace: Trace::with_sinks(Box::new(output.clone()), Box::new(output)),
+            loopback: false,
+            status_events: true,
+            scan_status: false,
+            log_warnings: false,
+            print_wait_message: false,
+            complete_progress: true,
+            traffic: None,
+            prompts: false,
+            host_name: Some(host.to_owned()),
+        })
+        .unwrap()
+    };
+    let c = || Command::Update {
+        allow_partial: true,
+        want_watcher: false,
+        paths: None,
+        only: None,
+    };
+    // Whether finding the updates warned that there were no archives.
+    let no_archives = |s: &mut Session| {
+        load(s, &mut no_questions);
+        let (before, _) = call(s, c(), &mut no_questions);
+        before
+            .iter()
+            .any(|e| matches!(e, Event::Warning(w) if w.starts_with("No archive files were found")))
+    };
+    let mut s = session("one");
+    assert!(no_archives(&mut s));
+    synchronize(&mut s, &mut no_questions);
+    ok(&mut s, Command::Commit, &mut no_questions);
+    s.join().unwrap();
+    let mut s = session("one");
+    assert!(!no_archives(&mut s));
+    s.join().unwrap();
+    let mut s = session("two");
+    assert!(no_archives(&mut s));
     s.join().unwrap();
 }
 

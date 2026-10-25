@@ -113,6 +113,10 @@ pub struct Config {
     /// interface wants; otherwise it asks at the client's terminal, as in
     /// the text interface.
     pub prompts: bool,
+    /// The client's host name, which archives are named after, instead of
+    /// `UNISONLOCALHOSTNAME` or the system's: for a session in a process
+    /// that runs others, as tests do.
+    pub host_name: Option<String>,
 }
 
 pub use gemel_rpc::host::Traffic;
@@ -805,6 +809,9 @@ impl Session {
         }
         if config.prompts {
             rpc.set_term_interact(Some(term_interact(events.clone())));
+        }
+        if let Some(name) = config.host_name {
+            rpc.client_host().set_host_name(name);
         }
         // The engine warns synchronously, often holding the preferences:
         // kept for the end of the step. A loopback server's warnings too
