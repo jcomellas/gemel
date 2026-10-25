@@ -178,10 +178,11 @@ pub enum Command {
     Abort,
     /// `commitUpdates`: saves the archives. Replies [`Event::Committed`].
     Commit,
-    /// `addIgnorePattern`: ignores an item's path, name or extension from
-    /// now on (in the profile too), and drops the items that are now
+    /// `addIgnorePattern`: ignores these items' paths, names or extensions
+    /// from now on (in the profile too), each pattern once and in order
+    /// (`uigtk3`'s `addRegExpByPath`), and drops the items that are now
     /// ignored. Replies [`Event::Items`].
-    Ignore(usize, IgnoreKind),
+    Ignore(Vec<usize>, IgnoreKind),
     /// `showDiffs` on an item. Replies [`Event::Diff`].
     Diff(usize),
     /// Keeps only these items, in this order: the text interface's list
@@ -319,7 +320,7 @@ pub enum Event {
     /// a sync has finished with.
     Item(usize, ItemView),
     /// [`Command::Ignore`]'s reply: the items left, and the index of the
-    /// first one at or after the ignored one (`unisonUpdateForIgnore`).
+    /// first one at or after the first ignored (`unisonUpdateForIgnore`).
     /// Also [`Command::Arrange`]'s and [`Command::Sort`]'s, from 0.
     Items {
         /// The items.
@@ -909,7 +910,7 @@ impl Session {
                 r?;
                 self.send(Event::Committed);
             }
-            Command::Ignore(i, kind) => self.ignore(i, kind).await?,
+            Command::Ignore(items, kind) => self.ignore(&items, kind).await?,
             Command::Diff(i) => self.diff(i).await?,
             Command::Arrange(order) => self.arrange(&order)?,
             Command::Sort(kind) => self.sort(kind)?,
@@ -1227,15 +1228,21 @@ impl Session {
         Ok(())
     }
 
-    async fn ignore(&mut self, i: usize, kind: IgnoreKind) -> Result<(), Stop> {
-        let path = self.item_ri(i)?.path1;
-        let re = match kind {
-            IgnoreKind::Path => uicommon::ignore_path(&path),
-            IgnoreKind::Name => uicommon::ignore_name(&path),
-            IgnoreKind::Ext => uicommon::ignore_ext(&path),
-        };
-        uicommon::add_ignore_pattern(self.rpc(), self.roots()?, &re).await?;
+    async fn ignore(&mut self, indices: &[usize], kind: IgnoreKind) -> Result<(), Stop> {
+        let mut patterns = std::collections::BTreeSet::new();
+        for &i in indices {
+            let path = self.item_ri(i)?.path1;
+            patterns.insert(match kind {
+                IgnoreKind::Path => uicommon::ignore_path(&path),
+                IgnoreKind::Name => uicommon::ignore_name(&path),
+                IgnoreKind::Ext => uicommon::ignore_ext(&path),
+            });
+        }
+        for re in &patterns {
+            uicommon::add_ignore_pattern(self.rpc(), self.roots()?, re).await?;
+        }
         self.ask_warnings().await?;
+        let i = indices.iter().copied().min().unwrap_or(0);
         // `unisonUpdateForIgnore`. (Only the items' own paths are tested,
         // as in OCaml.)
         let (ignore, items) = {
