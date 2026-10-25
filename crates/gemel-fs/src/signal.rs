@@ -210,6 +210,15 @@ mod unix {
         unsafe { libc::kill(pid, libc::SIGKILL) };
     }
 
+    /// Asks the child `pid` to stop (`SIGTERM`), as `safe_waitpid` does
+    /// before it kills.
+    pub fn terminate(pid: u32) {
+        if let Ok(pid) = libc::pid_t::try_from(pid) {
+            // SAFETY: plain values.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+
     /// `Util.blockSignals [Sys.sigint]` around starting a process: `cmd`
     /// starts with `SIGINT` blocked, so that Ctrl-C at the terminal, which
     /// reaches the whole foreground process group, doesn't reach it.
