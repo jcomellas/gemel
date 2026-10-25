@@ -185,16 +185,46 @@ pub struct Terminal {
     /// Where answers are written.
     output: RefCell<Option<std::fs::File>>,
     /// What the terminal shows, read on a thread of its own: tokio can't
-    /// be relied on to wake for a terminal on macOS.
+    /// be relied on to wake for a terminal on macOS, and a pseudo-console's
+    /// pipes can't be waited for at all.
     input: RefCell<Option<Chunks>>,
     /// The parent's own slave, kept until the session is closed, as OCaml
     /// keeps it: ssh closes its own before it opens `/dev/tty`, and the
     /// master would fail meanwhile.
     #[cfg(unix)]
     slave: RefCell<Option<std::os::fd::OwnedFd>>,
+    /// The pseudo-console, closed with the session (`win_closepty`), while
+    /// its output is still being read: closing it can wait for that.
+    #[cfg(windows)]
+    console: RefCell<Option<gemel_fs::conpty::Console>>,
 }
 
 impl Terminal {
+    /// The terminal whose output is `shown` and input `typed`: what it
+    /// shows is read on a thread of its own.
+    fn new(mut shown: std::fs::File, typed: std::fs::File) -> std::io::Result<Terminal> {
+        use std::io::Read;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::Builder::new()
+            .name("gemel-terminal".into())
+            .spawn(move || {
+                let mut buf = vec![0; 10_000];
+                while let Ok(n) = shown.read(&mut buf) {
+                    if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
+                        return;
+                    }
+                }
+            })?;
+        Ok(Terminal {
+            output: RefCell::new(Some(typed)),
+            input: RefCell::new(Some(rx)),
+            #[cfg(unix)]
+            slave: RefCell::new(None),
+            #[cfg(windows)]
+            console: RefCell::new(None),
+        })
+    }
+
     /// Writes `s` and a newline (`sendResponse`), unless the session has
     /// been closed. Errors are dropped: ssh will say what went wrong.
     fn answer(&self, s: &str) {
@@ -205,68 +235,129 @@ impl Terminal {
     }
 
     /// `close_session`'s terminal half: the master and the parent's slave
-    /// close, which ends the reader.
+    /// close (on Windows, the pseudo-console), which ends the reader.
     pub fn close(&self) {
         self.output.borrow_mut().take();
         self.input.borrow_mut().take();
         #[cfg(unix)]
         self.slave.borrow_mut().take();
+        #[cfg(windows)]
+        self.console.borrow_mut().take();
     }
 }
 
-/// `create_session`: starts `cmd` with a terminal of its own, if one can be
-/// had, its standard error going there: its terminal, if so, and the
-/// child. Otherwise, as `fallback_session`, a plain process.
-pub fn create_session(
-    mut cmd: std::process::Command,
-) -> std::io::Result<(Option<Rc<Terminal>>, tokio::process::Child)> {
+/// A shell's process.
+pub enum Child {
+    /// Started by tokio: under a pseudo-terminal, or plain.
+    Spawned(Box<tokio::process::Child>),
+    /// Started on a pseudo-console.
+    #[cfg(windows)]
+    OnConsole(gemel_fs::conpty::Process),
+}
+
+impl Child {
+    /// Its process id, while it runs.
+    pub fn id(&self) -> Option<u32> {
+        match self {
+            Child::Spawned(c) => c.id(),
+            #[cfg(windows)]
+            Child::OnConsole(p) => Some(p.id()),
+        }
+    }
+}
+
+/// A shell started: its terminal, if it has one, its standard input and
+/// output, and its process.
+pub struct Session {
+    /// Its terminal.
+    pub term: Option<Rc<Terminal>>,
+    /// Its standard input.
+    pub stdin: tokio::process::ChildStdin,
+    /// Its standard output.
+    pub stdout: tokio::process::ChildStdout,
+    /// Its process.
+    pub child: Child,
+}
+
+/// `create_session`: starts `cmd`, whose standard input and output are
+/// piped, with a terminal of its own if one can be had (a pseudo-terminal,
+/// or on Windows a pseudo-console), its standard error going there.
+/// Otherwise, as `fallback_session`, a plain process.
+pub fn create_session(mut cmd: std::process::Command) -> std::io::Result<Session> {
     #[cfg(unix)]
     if let Ok(pty) = gemel_fs::pty::open() {
-        use std::io::Read;
         gemel_fs::pty::controlled_by(&mut cmd, &pty.slave)?;
         let child = tokio::process::Command::from(cmd).spawn()?;
-        let mut master = std::fs::File::from(pty.master);
-        let output = master.try_clone()?;
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        std::thread::Builder::new()
-            .name("gemel-terminal".into())
-            .spawn(move || {
-                let mut buf = vec![0; 10_000];
-                while let Ok(n) = master.read(&mut buf) {
-                    if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
-                        return;
-                    }
-                }
-            })?;
-        let term = Terminal {
-            output: RefCell::new(Some(output)),
-            input: RefCell::new(Some(rx)),
-            slave: RefCell::new(Some(pty.slave)),
-        };
-        return Ok((Some(Rc::new(term)), child));
+        let master = std::fs::File::from(pty.master);
+        let term = Terminal::new(master.try_clone()?, master)?;
+        *term.slave.borrow_mut() = Some(pty.slave);
+        return spawned(Some(Rc::new(term)), child);
+    }
+    #[cfg(windows)]
+    {
+        let args: Vec<std::ffi::OsString> = cmd.get_args().map(|a| a.to_owned()).collect();
+        if let Ok(started) = gemel_fs::conpty::spawn(cmd.get_program(), &args) {
+            let term = Terminal::new(started.output, started.input)?;
+            *term.console.borrow_mut() = Some(started.console);
+            return Ok(Session {
+                term: Some(Rc::new(term)),
+                stdin: tokio::process::ChildStdin::from_std(started.stdin.into())?,
+                stdout: tokio::process::ChildStdout::from_std(started.stdout.into())?,
+                child: Child::OnConsole(started.process),
+            });
+        }
     }
     cmd.stderr(std::process::Stdio::inherit());
-    Ok((None, tokio::process::Command::from(cmd).spawn()?))
+    spawned(None, tokio::process::Command::from(cmd).spawn()?)
+}
+
+/// The session of `child`, started by tokio with its standard input and
+/// output piped.
+fn spawned(
+    term: Option<Rc<Terminal>>,
+    mut child: tokio::process::Child,
+) -> std::io::Result<Session> {
+    let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        return Err(std::io::Error::other("the shell's pipes"));
+    };
+    Ok(Session {
+        term,
+        stdin,
+        stdout,
+        child: Child::Spawned(Box::new(child)),
+    })
 }
 
 /// `close_session`'s child half (`safe_waitpid`): if `child` hasn't ended
-/// half a second on, it is asked to stop, and two seconds on, killed.
-/// In the background.
-pub fn end_session(mut child: tokio::process::Child) {
-    crate::runtime::spawn_local(async move {
-        let ms = std::time::Duration::from_millis;
-        if tokio::time::timeout(ms(500), child.wait()).await.is_ok() {
-            return;
+/// half a second on, it is asked to stop, and two seconds on, killed (on
+/// Windows, it is ended half a second on). In the background.
+pub fn end_session(child: Child) {
+    match child {
+        Child::Spawned(mut child) => {
+            crate::runtime::spawn_local(async move {
+                let ms = std::time::Duration::from_millis;
+                if tokio::time::timeout(ms(500), child.wait()).await.is_ok() {
+                    return;
+                }
+                #[cfg(unix)]
+                if let Some(pid) = child.id() {
+                    gemel_fs::signal::terminate(pid);
+                }
+                if tokio::time::timeout(ms(1500), child.wait()).await.is_ok() {
+                    return;
+                }
+                let _ = child.kill().await;
+            });
         }
-        #[cfg(unix)]
-        if let Some(pid) = child.id() {
-            gemel_fs::signal::terminate(pid);
+        #[cfg(windows)]
+        Child::OnConsole(p) => {
+            crate::runtime::spawn_local(crate::runtime::blocking(move || {
+                if !p.wait(500) {
+                    p.terminate();
+                }
+            }));
         }
-        if tokio::time::timeout(ms(1500), child.wait()).await.is_ok() {
-            return;
-        }
-        let _ = child.kill().await;
-    });
+    }
 }
 
 /// What [`handle_password_requests`] keeps.

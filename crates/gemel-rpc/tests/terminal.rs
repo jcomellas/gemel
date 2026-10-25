@@ -1,8 +1,7 @@
 //! ssh under a terminal of its own: a shim standing in for it asks for a
-//! password at its terminal, and what it prints there reaches the user;
-//! once the connection is up, no more is asked.
-
-#![cfg(unix)]
+//! password at its terminal (a pseudo-terminal, or on Windows a
+//! pseudo-console), and what it prints there reaches the user; once the
+//! connection is up, no more is asked.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -10,12 +9,13 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use gemel_rpc::runtime;
-use gemel_rpc::terminal::{self, Interact};
+use gemel_rpc::terminal::{self, Child, Interact};
 use tokio::io::AsyncReadExt;
 
 /// A shim that asks for a password at its terminal twice at most, says it
 /// is connected on its standard output once the answer is `secret`, then
 /// prints a banner at its terminal.
+#[cfg(unix)]
 const SHIM: &str = "\
 n=0
 while :; do
@@ -58,6 +58,30 @@ fn interact(answers: &[&str]) -> (Interact, Rc<RefCell<Seen>>) {
     (i, seen)
 }
 
+/// The same, as a batch file: `set /p` asks at the console (`CON`).
+#[cfg(windows)]
+const SHIM: &str = "\
+@echo off\r
+setlocal enabledelayedexpansion\r
+set n=0\r
+:ask\r
+set pw=\r
+set /p pw=me@server's password: <CON >CON\r
+if \"!pw!\"==\"secret\" goto up\r
+set /a n+=1\r
+if !n! geq 2 (\r
+  echo Permission denied ^(publickey,password^).>CON\r
+  exit /b 255\r
+)\r
+echo Permission denied, please try again.>CON\r
+goto ask\r
+:up\r
+echo UP\r
+echo Welcome, this is a banner>CON\r
+ping -n 3 127.0.0.1 >NUL\r
+";
+
+#[cfg(unix)]
 fn shim() -> std::process::Command {
     let mut cmd = std::process::Command::new("sh");
     cmd.args(["-c", SHIM])
@@ -66,15 +90,45 @@ fn shim() -> std::process::Command {
     cmd
 }
 
+#[cfg(windows)]
+fn shim() -> std::process::Command {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let script = std::env::temp_dir().join(format!(
+        "gemel-terminal-shim-{}-{n}.cmd",
+        std::process::id()
+    ));
+    std::fs::write(&script, SHIM).unwrap();
+    let mut cmd = std::process::Command::new("cmd");
+    cmd.arg("/c")
+        .arg(script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped());
+    cmd
+}
+
+/// Waits for the shim to end: its exit code, where it can be had.
+async fn ended(child: Child) -> Option<i32> {
+    match child {
+        Child::Spawned(mut c) => c.wait().await.ok().and_then(|s| s.code()),
+        #[cfg(windows)]
+        Child::OnConsole(p) => {
+            runtime::blocking(move || p.wait(u32::MAX)).await;
+            None
+        }
+    }
+}
+
 #[test]
 fn a_password_is_asked_for_until_the_connection_is_up() {
     runtime::run_here(async {
         let (i, seen) = interact(&["wrong", "secret"]);
-        let (term, mut child) = terminal::create_session(shim()).unwrap();
-        let term = term.expect("a terminal");
+        let s = terminal::create_session(shim()).unwrap();
+        let term = s.term.expect("a terminal");
         let requests = terminal::handle_password_requests(term.clone(), i);
         // The server's first bytes: the connection is up.
-        let mut stdout = child.stdout.take().unwrap();
+        let mut stdout = s.stdout;
         let mut b = [0; 2];
         tokio::time::timeout(Duration::from_secs(10), stdout.read_exact(&mut b))
             .await
@@ -86,13 +140,18 @@ fn a_password_is_asked_for_until_the_connection_is_up() {
         tokio::time::sleep(Duration::from_millis(300)).await;
         // What ssh printed, in as many pieces as it came in (pieces more
         // than 50 ms apart are shown apart, as in OCaml).
+        // (A pseudo-console may draw the screen again: there, the prompt
+        // shows at least twice.)
         let seen = seen.borrow();
         let all = seen.shown.concat();
         assert!(
-            seen.shown[0].starts_with("me@server's password: "),
+            seen.shown[0]
+                .trim_start()
+                .starts_with("me@server's password:"),
             "{all:?}"
         );
-        assert_eq!(all.matches("password: ").count(), 2, "{all:?}");
+        let prompts = all.matches("password:").count();
+        assert!(prompts == 2 || cfg!(windows) && prompts > 2, "{all:?}");
         assert!(
             all.contains("Permission denied, please try again."),
             "{all:?}"
@@ -100,7 +159,7 @@ fn a_password_is_asked_for_until_the_connection_is_up() {
         assert!(!all.contains("banner"), "{all:?}");
         assert_eq!(seen.ended, 1);
         term.close();
-        terminal::end_session(child);
+        terminal::end_session(s.child);
     })
     .unwrap();
 }
@@ -109,14 +168,15 @@ fn a_password_is_asked_for_until_the_connection_is_up() {
 fn what_ssh_said_last_is_kept_when_it_fails() {
     runtime::run_here(async {
         let (i, seen) = interact(&["wrong", "wrong"]);
-        let (term, mut child) = terminal::create_session(shim()).unwrap();
-        let term = term.expect("a terminal");
+        let s = terminal::create_session(shim()).unwrap();
+        let term = s.term.expect("a terminal");
         let requests = terminal::handle_password_requests(term.clone(), i);
-        let status = tokio::time::timeout(Duration::from_secs(10), child.wait())
+        let code = tokio::time::timeout(Duration::from_secs(10), ended(s.child))
             .await
-            .expect("ended")
-            .unwrap();
-        assert_eq!(status.code(), Some(255));
+            .expect("ended");
+        if cfg!(unix) {
+            assert_eq!(code, Some(255));
+        }
         // ssh's last words: shown, if they came in time, or the warning.
         let last = requests.remaining().await;
         let seen = seen.borrow();
@@ -135,16 +195,23 @@ fn what_ssh_said_last_is_kept_when_it_fails() {
 fn without_answers_nothing_is_written() {
     runtime::run_here(async {
         let (i, seen) = interact(&[]);
-        let (term, child) = terminal::create_session(shim()).unwrap();
-        let term = term.expect("a terminal");
+        let s = terminal::create_session(shim()).unwrap();
+        let term = s.term.expect("a terminal");
         let requests = terminal::handle_password_requests(term.clone(), i);
         tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(seen.borrow().shown, ["me@server's password: "]);
+        let shown = seen.borrow().shown.concat();
+        assert!(
+            shown.trim_start().starts_with("me@server's password:"),
+            "{shown:?}"
+        );
+        if cfg!(unix) {
+            assert_eq!(seen.borrow().shown, ["me@server's password: "]);
+        }
         // Once input has ended, an answer goes nowhere.
         assert_eq!(requests.ready(), "");
         assert_eq!(seen.borrow().ended, 1);
         term.close();
-        terminal::end_session(child);
+        terminal::end_session(s.child);
         tokio::time::sleep(Duration::from_millis(100)).await;
     })
     .unwrap();
