@@ -58,6 +58,7 @@ fn is_reply(c: &Command, e: &Event) -> bool {
         Event::Started(_)
         | Event::Profiles(_)
         | Event::ProfileLoaded(_)
+        | Event::ProfileUnchanged(_)
         | Event::Connected(_)
         | Event::Updates(_)
         | Event::Items { .. }
@@ -794,6 +795,29 @@ fn conflicts_are_resolved_only_if_they_are_conflicts() {
         );
         s.join().unwrap();
     }
+}
+
+/// Whether the profile is as it was loaded: not once its file changes.
+#[test]
+fn a_changed_profile_is_told() {
+    let pair = Pair::new("session-profile-changed");
+    pair.profile("p", &["times = true"]);
+    let (mut s, _) = start(&pair, &["p", "-batch"], false);
+    load(&mut s, &mut no_questions);
+    let unchanged = |s: &mut Session| match ok(s, Command::ProfileUnchanged, &mut no_questions) {
+        Event::ProfileUnchanged(u) => u,
+        e => panic!("{e:?}"),
+    };
+    assert!(unchanged(&mut s));
+    pair.profile("p", &["times = true", "fastcheck = false"]);
+    assert!(!unchanged(&mut s));
+    ok(
+        &mut s,
+        Command::LoadProfile("p".to_owned()),
+        &mut no_questions,
+    );
+    assert!(unchanged(&mut s));
+    s.join().unwrap();
 }
 
 /// The bytes the client's connections write and read are counted where

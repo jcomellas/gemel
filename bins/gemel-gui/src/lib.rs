@@ -725,7 +725,11 @@ impl App {
                     }
                 }
             }
-            Event::Profiles(_) | Event::Changed | Event::Diff { .. } | Event::Interrupted => {}
+            Event::Profiles(_)
+            | Event::ProfileUnchanged(_)
+            | Event::Changed
+            | Event::Diff { .. }
+            | Event::Interrupted => {}
             Event::Error(msg) => self.error(&msg),
             // The user chose to stop at a warning (`doExit`).
             Event::Exit(_) => self.quit(0),
