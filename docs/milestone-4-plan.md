@@ -330,8 +330,10 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - The process is ended half a second on, as `safe_waitpid` does on Windows.
   - Without a pseudo-console, ssh runs as a plain process.
   - `win_alloc_console` isn't ported: gemel-gui is a console program.
-- **Tests:** the terminal tests run on Windows too, with a batch file that asks at the console (`set /p ... <CON >CON`). A pseudo-console may draw the screen again, so there the prompt may show more than twice. The GUI's scenarios over ssh run the oracle's shim on a pseudo-console on Windows.
-- **Not checked yet:** whether CI's Windows runner allows ConPTY, and whether the shim's console input ends a line with `"\n"`, which is what OCaml writes. This PR's Windows run is the first test of either.
+- **Tests:** the terminal tests run on Windows too, with a Python shim that asks at the console and reads the answer a key at a time (`msvcrt.getwch`) until a return or a newline, as Windows OpenSSH reads a password (`_getch`). A pseudo-console may draw the screen again, so there the prompt may show more than twice. The GUI's scenarios over ssh run the oracle's shim on a pseudo-console on Windows.
+- **On CI's Windows runner:**
+  - ConPTY works: what a program prints at the console comes out of the pseudo-console.
+  - A first shim read its answer a line at a time (`set /p`), which a bare `"\n"` doesn't end. That is how Windows reads lines, not how ssh reads passwords, so the answer stays `"\n"`, as OCaml writes it.
 
 ### Phase 3: profiles (`uigtk3.ml`'s profile manager, wizard and editor, ~1.7k; `strings.ml` as data)
 
