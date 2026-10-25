@@ -595,8 +595,11 @@ impl Summary {
     }
 }
 
+/// A running session, as a frontend holds it.
+pub type Handle = EngineThread<Command, Event>;
+
 /// Starts a session on its own engine thread.
-pub fn spawn(config: Config) -> std::io::Result<EngineThread<Command, Event>> {
+pub fn spawn(config: Config) -> std::io::Result<Handle> {
     EngineThread::spawn(move |commands, events| run(config, commands, events))
 }
 
