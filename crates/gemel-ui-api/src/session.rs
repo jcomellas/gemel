@@ -108,6 +108,11 @@ pub struct Config {
     /// counted, as they go (`Remote.emittedBytes`, `Remote.receivedBytes`),
     /// for a frontend's statistics.
     pub traffic: Option<Arc<Traffic>>,
+    /// ssh runs under a terminal of its own, and what it prints there
+    /// comes as [`Question::Password`] (`termInteract`), as a graphical
+    /// interface wants; otherwise it asks at the client's terminal, as in
+    /// the text interface.
+    pub prompts: bool,
 }
 
 pub use gemel_rpc::host::Traffic;
@@ -360,6 +365,9 @@ pub enum Event {
     Interrupted,
     /// The session has ended: the user chose to stop at a warning.
     Exit(ExitCode),
+    /// ssh, connecting to this root, won't be answered any more: the
+    /// connection is up, or has failed (`endInput`).
+    InputEnded(String),
 }
 
 /// A question, with the channel for the answer. Dropping it answers no.
@@ -369,6 +377,17 @@ pub enum Question {
     Roots(Reply<Option<(String, String)>>),
     /// A warning: go on (`true`), or stop?
     Warning(String, Reply<bool>),
+    /// What ssh printed at its terminal, connecting to `root`: maybe a
+    /// password prompt. An answer is written back to it; none (or the
+    /// reply dropped) writes nothing.
+    Password {
+        /// The root, as the user wrote it.
+        root: String,
+        /// What ssh printed, without its control sequences.
+        text: String,
+        /// The answer.
+        reply: Reply<Option<String>>,
+    },
     /// A merge's result (with `confirmmerge`): keep it?
     Merge {
         /// "Results of merging …".
@@ -783,6 +802,9 @@ impl Session {
         let rpc = client_rpc(&config.unison_dir, trace, config.loopback)?;
         if let Some(t) = config.traffic {
             rpc.client_host().set_traffic(t);
+        }
+        if config.prompts {
+            rpc.set_term_interact(Some(term_interact(events.clone())));
         }
         // The engine warns synchronously, often holding the preferences:
         // kept for the end of the step. A loopback server's warnings too
@@ -1692,6 +1714,33 @@ impl Session {
             .collect();
         s
     }
+}
+
+/// `termInteract`: what ssh prints at its terminal, for `root`, comes as
+/// [`Question::Password`], and its end as [`Event::InputEnded`].
+fn term_interact(events: Events<Event>) -> gemel_rpc::terminal::InteractFor {
+    Rc::new(move |root: &str| {
+        let (asked, ended) = (events.clone(), events.clone());
+        let (root, root_ended) = (root.to_owned(), root.to_owned());
+        gemel_rpc::terminal::Interact {
+            user_input: Box::new(move |text, respond| {
+                let (tx, rx) = oneshot::channel();
+                let _ = asked.send(Event::Ask(Question::Password {
+                    root: root.clone(),
+                    text,
+                    reply: Reply(tx),
+                }));
+                gemel_rpc::runtime::spawn_local(async move {
+                    if let Ok(Some(answer)) = rx.await {
+                        respond(answer);
+                    }
+                });
+            }),
+            end_input: Box::new(move || {
+                let _ = ended.send(Event::InputEnded(root_ended.clone()));
+            }),
+        }
+    })
 }
 
 /// `root2hostname`.

@@ -282,6 +282,7 @@ pub fn start(args: Vec<String>, interface: Interface) -> i32 {
         print_wait_message: true,
         complete_progress: false,
         traffic: None,
+        prompts: false,
     })
     .and_then(|mut s| {
         let events = tx.clone();
@@ -881,6 +882,8 @@ impl Text {
                 let keep = self.verify_merge(&text);
                 reply.send(self.asked(keep)?);
             }
+            // ssh asks at the terminal itself (no `termInteract`).
+            Question::Password { .. } => {}
         }
         Ok(())
     }
