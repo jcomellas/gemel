@@ -211,6 +211,29 @@ pub enum SetAction {
     OlderIfConflict,
     /// The same, for the newer version.
     NewerIfConflict,
+    /// One version wins if the item's default is a conflict; nothing
+    /// otherwise (`Recon.setDirection` with `` `Prefer ``): `uigtk3`'s
+    /// "Resolve Conflicts in Favor of …".
+    Prefer(Favor),
+    /// Merge it, if it is a path to merge (`merge`); nothing otherwise
+    /// (`Recon.setDirection` with `` `Merge `` and `` `Force ``): `uigtk3`'s
+    /// "Revert to the Merging Default, if Available".
+    MergeDefault,
+    /// Skip it, with no reason given (`uigtk3`'s `questionAction`).
+    Conflict,
+}
+
+/// Which version [`SetAction::Prefer`] lets win.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Favor {
+    /// The first replica's.
+    First,
+    /// The second's.
+    Second,
+    /// The newer.
+    Newer,
+    /// The older.
+    Older,
 }
 
 /// How [`Command::Sort`] sorts.
@@ -371,6 +394,8 @@ pub struct Overrides {
 pub struct RootNames {
     /// `roots2niceStrings 32`.
     pub short: (String, String),
+    /// `roots2niceStrings 15`: `uigtk3`'s column headings.
+    pub narrow: (String, String),
     /// The ends of their paths that differ (`Fspath.differentSuffix`), or
     /// `local` and the host's name, in full.
     pub full: (String, String),
@@ -967,6 +992,7 @@ impl Session {
         let roots = self.roots()?.pair();
         Ok(RootNames {
             short: uicommon::roots_to_nice_strings(32, roots),
+            narrow: uicommon::roots_to_nice_strings(15, roots),
             full: uicommon::root_suffixes(roots),
             headings: uicommon::roots_to_string(roots),
             hosts: (host_name(roots.0), host_name(roots.1)),
@@ -1094,6 +1120,7 @@ impl Session {
                 SetAction::Left => d.direction = Direction::Replica2ToReplica1,
                 SetAction::Right => d.direction = Direction::Replica1ToReplica2,
                 SetAction::Skip => d.direction = Direction::Conflict("skip requested".to_owned()),
+                SetAction::Conflict => d.direction = Direction::Conflict(String::new()),
                 SetAction::Merge => d.direction = Direction::Merge,
                 SetAction::Older | SetAction::Newer => {
                     let dir = if a == SetAction::Older {
@@ -1118,6 +1145,20 @@ impl Session {
                     };
                     let prefs = self.rpc().client_host().prefs().borrow();
                     recon::set_direction(&prefs, &mut ri, dir, strength)?;
+                }
+                SetAction::Prefer(f) => {
+                    let dir = match f {
+                        Favor::First => Choice::Replica1ToReplica2,
+                        Favor::Second => Choice::Replica2ToReplica1,
+                        Favor::Newer => Choice::Newer,
+                        Favor::Older => Choice::Older,
+                    };
+                    let prefs = self.rpc().client_host().prefs().borrow();
+                    recon::set_direction(&prefs, &mut ri, dir, Strength::Prefer)?;
+                }
+                SetAction::MergeDefault => {
+                    let prefs = self.rpc().client_host().prefs().borrow();
+                    recon::set_direction(&prefs, &mut ri, Choice::Merge, Strength::Force)?;
                 }
             }
         }
