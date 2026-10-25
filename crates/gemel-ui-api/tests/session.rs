@@ -361,7 +361,8 @@ fn actions_can_be_changed_and_reverted() {
             (both.left, both.right, both.action, both.conflict),
             ("Modified", "Modified", Action::Skip(false), true)
         );
-        assert!(both.can_diff && both.problematic && !both.changed_from_default);
+        assert!(both.can_diff && both.both_files);
+        assert!(both.problematic && !both.changed_from_default);
         assert!(both.line.contains("<-?->"), "{}", both.line);
         let (_, new) = item(&u.items, "new");
         assert_eq!(
@@ -1017,6 +1018,8 @@ fn props_changes_are_told_apart() {
             props.props_only && props.favor_changed.is_none(),
             "{props:?}"
         );
+        // Only properties: nothing to diff, though both are files.
+        assert!(!props.can_diff && props.both_files, "{props:?}");
         let (_, mixed) = item(&u.items, "mixed");
         assert!(!mixed.props_only, "{mixed:?}");
         assert_eq!(mixed.favor_changed, Some(SetAction::Right));
