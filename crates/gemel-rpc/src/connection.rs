@@ -285,6 +285,19 @@ impl std::fmt::Debug for Connection {
     }
 }
 
+/// A connection that isn't kept open by being held: for what the
+/// connection itself keeps (its close handlers), which would otherwise
+/// keep it alive.
+#[derive(Clone)]
+pub struct WeakConnection(std::rc::Weak<Inner>);
+
+impl WeakConnection {
+    /// The connection, if it is still there.
+    pub fn upgrade(&self) -> Option<Connection> {
+        self.0.upgrade().map(Connection)
+    }
+}
+
 impl PartialEq for Connection {
     /// `connEq`.
     fn eq(&self, other: &Self) -> bool {
@@ -342,6 +355,11 @@ impl Connection {
         }));
         runtime::spawn_local(conn.clone().close_output());
         conn
+    }
+
+    /// The connection, without keeping it open.
+    pub fn downgrade(&self) -> WeakConnection {
+        WeakConnection(Rc::downgrade(&self.0))
     }
 
     /// The side of the connection this end is.
