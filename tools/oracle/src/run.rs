@@ -270,6 +270,19 @@ fn shim_runs(work: &Path) -> u64 {
     fs::metadata(work.join("remote").join("argv")).map_or(0, |m| m.len())
 }
 
+/// What every client is given after the roots: [`FLAGS`], one transfer
+/// at a time unless `how` runs them concurrently, and `how`'s arguments.
+pub fn client_flags(how: &How) -> Vec<String> {
+    let one = if how.concurrent {
+        &[][..]
+    } else {
+        ONE_AT_A_TIME
+    };
+    (FLAGS.iter().chain(one).map(|s| s.to_string()))
+        .chain(how.client_args.iter().cloned())
+        .collect()
+}
+
 fn run(p: &Pairing, remote: Option<Remote>, how: &How, work: &Path) -> io::Result<Step> {
     let mut cmd = Command::new(&p.client);
     cmd.arg(work.join("a"));
@@ -305,13 +318,7 @@ fn run(p: &Pairing, remote: Option<Remote>, how: &How, work: &Path) -> io::Resul
         cmd.env("UNISONLOCALHOSTNAME", CLIENT_HOST);
     }
     let mut child = cmd
-        .args(FLAGS)
-        .args(if how.concurrent {
-            &[][..]
-        } else {
-            ONE_AT_A_TIME
-        })
-        .args(&how.client_args)
+        .args(client_flags(how))
         .env("UNISON", work.join("unison"))
         .env("HOME", work)
         .stdin(Stdio::null())
@@ -375,6 +382,34 @@ pub fn outcome(
     scenario: &Scenario,
     work: &Path,
 ) -> io::Result<Outcome> {
+    let mut o = outcome_with(
+        &mut |work| run(p, remote, how, work),
+        reference,
+        remote,
+        how,
+        scenario,
+        work,
+    )?;
+    if let Ok(server) = server_cmd(&p.server)
+        && !server.is_empty()
+    {
+        o.shell_args = o.shell_args.replace(&server, "<server>");
+    }
+    Ok(o)
+}
+
+/// [`outcome`], with `sync` running each of the two syncs in the work
+/// directory it is given, instead of a program: an interface driven in
+/// this process, say. Only the reference's server is taken out of the
+/// ssh shim's arguments.
+pub fn outcome_with(
+    sync: &mut dyn FnMut(&Path) -> io::Result<Step>,
+    reference: &Pairing,
+    remote: Option<Remote>,
+    how: &How,
+    scenario: &Scenario,
+    work: &Path,
+) -> io::Result<Outcome> {
     if work.exists() {
         remove_all(work)?;
     }
@@ -386,10 +421,10 @@ pub fn outcome(
     let (a, b) = (work.join("a"), work.join("b"));
     scenario::apply(&a, &scenario.initial_a)?;
     scenario::apply(&b, &scenario.initial_b)?;
-    let first = run(p, remote, how, work)?;
+    let first = sync(work)?;
     scenario::apply(&a, &scenario.changes_a)?;
     scenario::apply(&b, &scenario.changes_b)?;
-    let second = run(p, remote, how, work)?;
+    let second = sync(work)?;
     let (snap_a, snap_b) = (snapshot(&a)?, snapshot(&b)?);
     let unison_dir = listing(&work.join("unison"))?;
     let server_dir = match remote {
@@ -398,13 +433,11 @@ pub fn outcome(
     };
     let recheck = run(reference, remote, how, work)?;
     let mut shell_args = fs::read_to_string(work.join("remote").join("argv")).unwrap_or_default();
-    for server in [&p.server, &reference.server] {
-        // (A replay has no reference.)
-        if let Ok(server) = server_cmd(server)
-            && !server.is_empty()
-        {
-            shell_args = shell_args.replace(&server, "<server>");
-        }
+    // (A replay has no reference.)
+    if let Ok(server) = server_cmd(&reference.server)
+        && !server.is_empty()
+    {
+        shell_args = shell_args.replace(&server, "<server>");
     }
     Ok(Outcome {
         first,
