@@ -98,7 +98,7 @@ fn synced(dir: &Path, files: &[&str]) {
         std::fs::write(dir.join("a").join(f), "same").unwrap();
         std::fs::write(dir.join("b").join(f), "same").unwrap();
     }
-    support::window_sync(dir).unwrap();
+    support::window_sync(dir, None).unwrap();
 }
 
 fn roots(dir: &Path) -> Vec<String> {
