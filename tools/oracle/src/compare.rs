@@ -67,6 +67,31 @@ pub fn compare(r: &Outcome, c: &Outcome, how: (bool, bool)) -> Vec<String> {
     let mut out = Vec::new();
     compare_step("first sync", &r.first, &c.first, how, &mut out);
     compare_step("second sync", &r.second, &c.second, how, &mut out);
+    compare_left(r, c, how, &mut out);
+    out
+}
+
+/// [`compare`], but for what the syncs print: only their exit codes are
+/// compared, for a candidate that prints nothing (a graphical interface).
+/// The reference's rechecks are still compared whole, so the candidate
+/// is accepted as far as the reference's outcome is ([`check_recheck`]).
+pub fn compare_state(r: &Outcome, c: &Outcome) -> Vec<String> {
+    let mut out = Vec::new();
+    for (name, x, y) in [
+        ("first sync", &r.first, &c.first),
+        ("second sync", &r.second, &c.second),
+    ] {
+        if x.exit != y.exit {
+            out.push(format!("{name}: exit code {:?} vs {:?}", x.exit, y.exit));
+        }
+    }
+    compare_left(r, c, (false, false), &mut out);
+    out
+}
+
+/// What the two outcomes left: the replicas, the Unison directories, ssh's
+/// arguments, and the reference's recheck of each.
+fn compare_left(r: &Outcome, c: &Outcome, how: (bool, bool), out: &mut Vec<String>) {
     for (name, x, y) in [("replica a", &r.a, &c.a), ("replica b", &r.b, &c.b)] {
         for path in x
             .keys()
@@ -93,14 +118,7 @@ pub fn compare(r: &Outcome, c: &Outcome, how: (bool, bool)) -> Vec<String> {
             first_difference(&r.shell_args, &c.shell_args)
         ));
     }
-    compare_step(
-        "recheck by the reference",
-        &r.recheck,
-        &c.recheck,
-        how,
-        &mut out,
-    );
-    out
+    compare_step("recheck by the reference", &r.recheck, &c.recheck, how, out);
 }
 
 /// The `skipped: ...` lines of a sync's summary.
