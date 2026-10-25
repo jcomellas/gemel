@@ -847,6 +847,113 @@ fn only_some_paths_can_be_rechecked() {
     s.join().unwrap();
 }
 
+/// `uigtk3`'s assistant writes profiles as it does, and won't write over
+/// one; they load, and OCaml syncs with them (with
+/// `GEMEL_REFERENCE_UNISON`); they can be deleted.
+#[test]
+fn profiles_are_created_and_deleted_as_uigtk3_does() {
+    let pair = Pair::new("session-create-profile");
+    write(&pair.a(), "f", "f", T0);
+    let (a, b) = (
+        pair.a().display().to_string(),
+        pair.b().display().to_string(),
+    );
+    let (mut s, _) = start(&pair, &[], false);
+    let names = |e: Event| match e {
+        Event::Profiles(list) => list.into_iter().map(|(n, _)| n).collect::<Vec<_>>(),
+        e => panic!("{e:?}"),
+    };
+    let p = session::NewProfile {
+        name: "p".to_owned(),
+        label: String::new(),
+        root1: a.clone(),
+        root2: b.clone(),
+        compress: false,
+        fat: false,
+    };
+    let created = ok(&mut s, Command::CreateProfile(p.clone()), &mut no_questions);
+    assert_eq!(names(created), ["p"]);
+    let text = std::fs::read_to_string(pair.u().join("p.prf")).unwrap();
+    assert_eq!(
+        text,
+        format!("# Unison preferences\nroot = {a}\nroot = {b}\n")
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(pair.u().join("p.prf"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // Not over one that exists.
+    match call(&mut s, Command::CreateProfile(p), &mut no_questions).1 {
+        Event::Error(e) => assert!(e.contains("p.prf"), "{e}"),
+        e => panic!("{e:?}"),
+    }
+    let q = session::NewProfile {
+        name: "q".to_owned(),
+        label: "Mine".to_owned(),
+        root1: a.clone(),
+        root2: "ssh://host/dir".to_owned(),
+        compress: true,
+        fat: true,
+    };
+    ok(&mut s, Command::CreateProfile(q), &mut no_questions);
+    assert_eq!(
+        std::fs::read_to_string(pair.u().join("q.prf")).unwrap(),
+        format!(
+            "# Unison preferences\nlabel = Mine\nroot = {a}\nroot = ssh://host/dir\n\
+             sshargs = -C\nfat = true\n"
+        )
+    );
+    let Event::ProfileLoaded(settings) = ok(
+        &mut s,
+        Command::LoadProfile("p".to_owned()),
+        &mut no_questions,
+    ) else {
+        panic!()
+    };
+    assert_eq!(settings.roots, [a, b]);
+    let deleted = ok(
+        &mut s,
+        Command::DeleteProfile("q".to_owned()),
+        &mut no_questions,
+    );
+    assert_eq!(names(deleted), ["p"]);
+    assert!(!pair.u().join("q.prf").exists());
+    s.join().unwrap();
+    if let Some(out) = ui_support::ocaml(&pair, &["p"]) {
+        assert!(pair.b().join("f").exists(), "{out}");
+    }
+}
+
+/// Once the command line's roots are forgotten, a profile is loaded with
+/// its own.
+#[test]
+fn the_command_lines_roots_can_be_forgotten() {
+    let pair = Pair::new("session-forget-roots");
+    pair.profile("p", &[]);
+    let other = pair.base().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    let other = other.display().to_string();
+    let (mut s, _) = start(&pair, &[&other, &other], false);
+    ok(&mut s, Command::Start, &mut no_questions);
+    let Event::Profiles(_) = ok(&mut s, Command::ForgetClRoots, &mut no_questions) else {
+        panic!()
+    };
+    let Event::ProfileLoaded(settings) = ok(
+        &mut s,
+        Command::LoadProfile("p".to_owned()),
+        &mut no_questions,
+    ) else {
+        panic!()
+    };
+    assert_eq!(settings.roots, [pair.root("a"), pair.root("b")]);
+    s.join().unwrap();
+}
+
 /// Archives are named after the host name the session is given: a
 /// session named the same finds them, one named otherwise doesn't.
 #[test]
