@@ -141,6 +141,16 @@ pub enum Command {
         /// Its second.
         root2: String,
     },
+    /// `createProfile`'s `saveProfile`: writes the profile `name` as
+    /// `uigtk3` writes it, which mustn't exist. Replies [`Event::Profiles`].
+    CreateProfile(NewProfile),
+    /// `getProfile`'s `deleteProfile`: removes the profile `name` (as
+    /// there, an error removing it is dropped). Replies [`Event::Profiles`].
+    DeleteProfile(String),
+    /// `clearClRoots`: the roots the command line gave are forgotten, so
+    /// that the profile loaded next has its own (as after an error
+    /// starting). Replies [`Event::Profiles`], which a frontend then shows.
+    ForgetClRoots,
     /// `initPrefs`: loads a profile, and the command line over it (asking
     /// for roots if neither gives them). Replies [`Event::ProfileLoaded`].
     LoadProfile(String),
@@ -210,6 +220,41 @@ pub enum Command {
     /// Writes to the log, or shows a status. No reply. (Taken during a
     /// sync.)
     Log(LogKind, String),
+}
+
+/// A profile as `uigtk3`'s assistant makes it ([`Command::CreateProfile`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProfile {
+    /// Its name.
+    pub name: String,
+    /// Its description (`label`), if not empty.
+    pub label: String,
+    /// Its first root, as given.
+    pub root1: String,
+    /// Its second.
+    pub root2: String,
+    /// `sshargs = -C`: compression, for a root reached over ssh.
+    pub compress: bool,
+    /// `fat = true`: a replica on a FAT partition.
+    pub fat: bool,
+}
+
+impl NewProfile {
+    /// The profile's text, as `saveProfile` writes it.
+    pub fn text(&self) -> String {
+        let mut t = String::from("# Unison preferences\n");
+        if !self.label.is_empty() {
+            t += &format!("label = {}\n", self.label);
+        }
+        t += &format!("root = {}\nroot = {}\n", self.root1, self.root2);
+        if self.compress {
+            t += "sshargs = -C\n";
+        }
+        if self.fat {
+            t += "fat = true\n";
+        }
+        t
+    }
 }
 
 /// A new action for an item.
@@ -885,6 +930,38 @@ impl Session {
                     prefs.add("root", &root1)?;
                     prefs.add("root", &root2)?;
                 }
+                self.ui.scan_profiles()?;
+                self.send(Event::Profiles(self.ui.profiles_and_roots.clone()));
+            }
+            Command::CreateProfile(p) => {
+                let path = self
+                    .rpc()
+                    .client_host()
+                    .prefs()
+                    .borrow()
+                    .profile_pathname(&p.name, true)?;
+                write_new_profile(&path, &p.text()).map_err(|e| {
+                    // As `Sys_error` has it.
+                    let e = e.to_string();
+                    let e = e.split(" (os error").next().unwrap_or(&e);
+                    Error::Transient(format!("{}: {e}", path.display()))
+                })?;
+                self.ui.scan_profiles()?;
+                self.send(Event::Profiles(self.ui.profiles_and_roots.clone()));
+            }
+            Command::DeleteProfile(name) => {
+                let path = self
+                    .rpc()
+                    .client_host()
+                    .prefs()
+                    .borrow()
+                    .profile_pathname(&name, true)?;
+                let _ = std::fs::remove_file(path);
+                self.ui.scan_profiles()?;
+                self.send(Event::Profiles(self.ui.profiles_and_roots.clone()));
+            }
+            Command::ForgetClRoots => {
+                self.ui.clear_cl_roots();
                 self.ui.scan_profiles()?;
                 self.send(Event::Profiles(self.ui.profiles_and_roots.clone()));
             }
@@ -1748,6 +1825,17 @@ fn term_interact(events: Events<Event>) -> gemel_rpc::terminal::InteractFor {
             }),
         }
     })
+}
+
+/// `open_out_gen [Open_wronly; Open_creat; Open_excl] 0o600`: writes a
+/// file that mustn't exist, readable by its owner only.
+fn write_new_profile(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)?.write_all(text.as_bytes())
 }
 
 /// `root2hostname`.
