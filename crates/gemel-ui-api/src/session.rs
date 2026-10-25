@@ -135,6 +135,10 @@ pub enum Command {
     /// `initPrefs`: loads a profile, and the command line over it (asking
     /// for roots if neither gives them). Replies [`Event::ProfileLoaded`].
     LoadProfile(String),
+    /// `Prefs.profileUnchanged`: whether the files the profile was read
+    /// from are as they were, so that it needn't be loaded again. Replies
+    /// [`Event::ProfileUnchanged`].
+    ProfileUnchanged,
     /// Overrides some of the profile's settings, as `-silent` and
     /// `-repeat` imply others. Replies [`Event::ProfileLoaded`].
     Configure(Overrides),
@@ -291,6 +295,8 @@ pub enum Event {
     Profiles(Vec<(String, ProfileInfo)>),
     /// [`Command::LoadProfile`]'s and [`Command::Configure`]'s reply.
     ProfileLoaded(Settings),
+    /// [`Command::ProfileUnchanged`]'s reply.
+    ProfileUnchanged(bool),
     /// [`Command::Connect`]'s reply: the roots' names.
     Connected(RootNames),
     /// The roots are being connected (`contactingServerMsg`).
@@ -820,6 +826,15 @@ impl Session {
                 self.send(Event::Profiles(self.ui.profiles_and_roots.clone()));
             }
             Command::LoadProfile(name) => self.load_profile(&name).await?,
+            Command::ProfileUnchanged => {
+                let unchanged = self
+                    .rpc()
+                    .client_host()
+                    .prefs()
+                    .borrow()
+                    .profile_unchanged();
+                self.send(Event::ProfileUnchanged(unchanged));
+            }
             Command::Configure(o) => {
                 {
                     let client = self.rpc().client_host();
