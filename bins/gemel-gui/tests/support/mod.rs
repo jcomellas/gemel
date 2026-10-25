@@ -1,7 +1,8 @@
 //! The GUI harness: driving the window headless on Slint's testing
 //! backend, and running generated scenarios (the oracle's) through the
 //! window, to compare what it leaves with what `gemel-gui -ui text`
-//! leaves.
+//! leaves: with local roots, and with replica `b` over ssh (through the
+//! oracle's shim) or on a socket.
 
 #![allow(dead_code)]
 
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant};
 use gemel_gui::ui::AppWindow;
 use gemel_gui::{App, Startup};
 use gemel_oracle::compare::{check_recheck, compare_state};
-use gemel_oracle::run::{self, How, Pairing, Step};
+use gemel_oracle::run::{self, How, Pairing, Remote, Step};
 use gemel_oracle::scenario::{Flavour, Scenario};
 use gemel_ui_api::session::{ItemView, RootNames, Updates};
 use gemel_ui_api::uicommon::Action;
@@ -237,12 +238,22 @@ impl Write for Output {
 /// The window on `args`, with the Unison directory `unison`, showing,
 /// and its trace's output.
 pub fn window(unison: &Path, args: Vec<String>) -> (std::rc::Rc<App>, Output) {
+    window_named(unison, args, None)
+}
+
+/// [`window`], with the client's host named `host_name`.
+fn window_named(
+    unison: &Path,
+    args: Vec<String>,
+    host_name: Option<&str>,
+) -> (std::rc::Rc<App>, Output) {
     init();
     let out = Output::default();
     let app = App::new(Startup {
         unison_dir: unison.to_owned(),
         args,
         trace: Trace::with_sinks(Box::new(out.clone()), Box::new(out.clone())),
+        host_name: host_name.map(str::to_owned),
     })
     .unwrap();
     app.ui().show().unwrap();
@@ -252,17 +263,53 @@ pub fn window(unison: &Path, args: Vec<String>) -> (std::rc::Rc<App>, Output) {
 /// How long a sync through the window may take.
 const SYNC: Duration = Duration::from_secs(120);
 
+/// The oracle's program, copied as the ssh shim: built next to the tests'
+/// programs when the workspace's tests are (`cargo test --workspace`).
+pub fn oracle() -> PathBuf {
+    let exe = std::env::current_exe().unwrap();
+    let dir = exe.parent().unwrap().parent().unwrap();
+    let p = dir.join(format!("gemel-oracle{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        p.exists(),
+        "{} is missing: build it with `cargo build -p gemel-oracle`",
+        p.display()
+    );
+    p
+}
+
+/// How the scenarios run with replica `b` reached as `remote` says: over
+/// ssh, the oracle's program is the shim.
+fn how(remote: Option<Remote>) -> How {
+    match remote {
+        Some(Remote::Ssh) => How {
+            harness: oracle(),
+            ..How::default()
+        },
+        _ => How::default(),
+    }
+}
+
+/// The text interface's program, which serves replica `b` and is the
+/// reference.
+fn text() -> Pairing {
+    Pairing {
+        client: gemel_gui(),
+        server: gemel_gui(),
+    }
+}
+
 /// A sync of `work`'s replicas `a` and `b` through the window, with the
 /// default actions, as a user goes through it: OK at each warning, then
-/// Go if there is anything to propagate, and OK at the summary. The oracle's flags but batch
-/// mode and the text interface. Its exit code is the text interface's
-/// for the same summary; it prints nothing.
-pub fn window_sync(work: &Path) -> io::Result<Step> {
-    let mut args: Vec<String> = ["a", "b"]
-        .iter()
-        .map(|r| work.join(r).display().to_string())
-        .collect();
-    let mut flags = run::client_flags(&How::default()).into_iter();
+/// Go if there is anything to propagate, and OK at the summary. Replica
+/// `b` is reached as `remote` says, `gemel-gui` serving it. The oracle's
+/// flags but batch mode and the text interface. Its exit code is the text
+/// interface's for the same summary; it prints nothing (but the server's
+/// standard error).
+pub fn window_sync(work: &Path, remote: Option<Remote>) -> io::Result<Step> {
+    let how = how(remote);
+    let client = run::client_run(&text(), remote, &how, work)?;
+    let mut args = client.args.clone();
+    let mut flags = run::client_flags(&how).into_iter();
     while let Some(f) = flags.next() {
         match f.as_str() {
             "-batch" => {}
@@ -272,7 +319,7 @@ pub fn window_sync(work: &Path) -> io::Result<Step> {
             _ => args.push(f),
         }
     }
-    let (app, out) = window(&work.join("unison"), args);
+    let (app, out) = window_named(&work.join("unison"), args, client.host_name);
     let ui = app.ui();
     let _ticks = app.start_ticks();
     let mut went = false;
@@ -319,13 +366,14 @@ pub fn window_sync(work: &Path) -> io::Result<Step> {
     };
     let exit = app.summary().map_or(0, |s| s.exit_code() as i32);
     app.quit(0);
+    let (server, _) = client.finish(work)?;
     match problem {
-        Some(p) => Err(io::Error::other(format!("{p}\n{}", out.text()))),
+        Some(p) => Err(io::Error::other(format!("{p}\n{}\n{server}", out.text()))),
         None => Ok(Step {
             exit: Some(exit),
             stdout: String::new(),
             stderr: String::new(),
-            server: String::new(),
+            server,
         }),
     }
 }
@@ -362,20 +410,24 @@ impl Drop for Work {
     }
 }
 
-/// Runs scenario `seed` with local roots through the window, then through
+/// Runs scenario `seed` through the window, then through
 /// `gemel-gui -ui text -batch`, one after the other in `work` (archive
-/// names hash the roots' absolute paths), each rechecked by the text
-/// interface, and compares what they left: what differs, a line each.
-pub fn disagreements(seed: u64, work: &Path) -> Vec<String> {
+/// names hash the roots' absolute paths), with replica `b` reached as
+/// `remote` says, each rechecked by the text interface, and compares what
+/// they left: what differs, a line each.
+pub fn disagreements(seed: u64, work: &Path, remote: Option<Remote>) -> Vec<String> {
     let scenario = Scenario::generate(seed, Flavour::host());
-    let text = Pairing {
-        client: gemel_gui(),
-        server: gemel_gui(),
-    };
-    let how = How::default();
+    let (text, how) = (text(), how(remote));
     let dir = work.join("work");
-    let reference = run::outcome(&text, &text, None, &how, &scenario, &dir).unwrap();
-    let window = run::outcome_with(&mut window_sync, &text, None, &how, &scenario, &dir);
+    let reference = run::outcome(&text, &text, remote, &how, &scenario, &dir).unwrap();
+    let window = run::outcome_with(
+        &mut |work| window_sync(work, remote),
+        &text,
+        remote,
+        &how,
+        &scenario,
+        &dir,
+    );
     let window = match window {
         Ok(o) => o,
         Err(e) => return vec![scenario.to_string(), format!("through the window: {e}")],

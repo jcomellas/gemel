@@ -59,6 +59,9 @@ pub struct Startup {
     /// Where the session prints (the log's entries, the debugging
     /// output); its status messages come to the window.
     pub trace: Trace,
+    /// The client's host name, instead of `UNISONLOCALHOSTNAME` or the
+    /// system's (for tests).
+    pub host_name: Option<String>,
 }
 
 impl Startup {
@@ -69,6 +72,7 @@ impl Startup {
             unison_dir: gemel_ui_api::unison_dir(),
             args,
             trace: Trace::with_sinks(Box::new(std::io::stdout()), Box::new(std::io::stderr())),
+            host_name: None,
         }
     }
 }
@@ -339,7 +343,7 @@ impl App {
             complete_progress: true,
             traffic: Some(traffic.clone()),
             prompts: true,
-            host_name: None,
+            host_name: startup.host_name,
         })
         .map_err(|e| slint::PlatformError::Other(format!("Can't start the session: {e}")))?;
         let app = App::create(Some(session), traffic, Some(unison_dir))?;
