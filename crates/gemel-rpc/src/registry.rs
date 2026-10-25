@@ -758,6 +758,8 @@ pub struct Rpc {
     loopback: Option<Loopback>,
     endpoint: OnceCell<Rc<Endpoint>>,
     conns: Rc<RefCell<ClientConns>>,
+    /// How ssh's prompts are answered, if they can be (`termInteract`).
+    term_interact: RefCell<Option<crate::terminal::InteractFor>>,
 }
 
 impl Drop for Rpc {
@@ -796,6 +798,7 @@ impl Rpc {
             loopback,
             endpoint: OnceCell::new(),
             conns: Rc::default(),
+            term_interact: RefCell::default(),
         }
     }
 
@@ -954,10 +957,16 @@ impl Rpc {
         }
     }
 
-    /// Opens a connection to the server `clroot` names: through its
-    /// shell, for ssh (`buildShellConnection`), or on its socket
-    /// (`buildSocketConnection`).
-    pub async fn open_connection(&self, clroot: &Clroot) -> Result<Connection, Error> {
+    /// Sets how ssh's prompts are answered (`termInteract`): with none, as
+    /// in the text interface, ssh asks at the client's terminal.
+    pub fn set_term_interact(&self, interact: Option<crate::terminal::InteractFor>) {
+        *self.term_interact.borrow_mut() = interact;
+    }
+
+    /// Opens a connection to the server `clroot` names (`root`, as the user
+    /// wrote it): through its shell, for ssh (`buildShellConnection`), or
+    /// on its socket (`buildSocketConnection`).
+    pub async fn open_connection(&self, root: &str, clroot: &Clroot) -> Result<Connection, Error> {
         match clroot {
             Clroot::ConnectByShell {
                 shell,
@@ -970,7 +979,8 @@ impl Rpc {
                     let prefs = self.client.prefs().borrow();
                     shell::command(&prefs, shell, host, user.as_deref(), port.as_deref())
                 };
-                shell::connect(self.endpoint().clone(), cmd, self.half_duplex()).await
+                let interact = self.term_interact.borrow().as_ref().map(|f| f(root));
+                shell::connect(self.endpoint().clone(), cmd, self.half_duplex(), interact).await
             }
             Clroot::ConnectBySocket { host, port, .. } => {
                 socket::connect(self.endpoint().clone(), host, port, self.half_duplex()).await

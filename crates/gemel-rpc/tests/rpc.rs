@@ -190,7 +190,9 @@ fn direct_and_loopback_agree() {
     block_on(async {
         for rpc in [&direct, &loopback] {
             let clroot = Clroot::ConnectLocal(Some(String::from_utf8(dir_bytes.clone()).unwrap()));
-            let root = root::canonize_root(rpc, &clroot).await.unwrap();
+            let root = root::canonize_root(rpc, &clroot.to_string(), &clroot)
+                .await
+                .unwrap();
             assert_eq!(root, Root::local(expected.clone()));
             assert_eq!(
                 rpc.call_root(&PROBE, &root, b'x').await.unwrap(),

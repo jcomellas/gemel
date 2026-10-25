@@ -76,7 +76,7 @@ pub async fn connect(
     half_duplex: bool,
 ) -> Result<Connection, Error> {
     let (input, output) = connect_socket(host, port).await?;
-    handshake::init_connection(endpoint, input, output, half_duplex).await
+    handshake::init_connection(endpoint, input, output, half_duplex, || {}).await
 }
 
 /// `buildConnectSocket`.
