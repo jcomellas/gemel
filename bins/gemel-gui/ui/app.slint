@@ -1,112 +1,156 @@
-// The gemel main window: the recon table, toolbar, status line, menu bar
-// and SSH-password prompt. Started from the GUI spike (§6 of
-// docs/unison-port-analysis.md).
+// The gemel main window, after uigtk3.ml's createToplevelWindow: the menu
+// bar, the toolbar, the items, the details pane and the status line; and
+// uigtk3's dialogs (warnBox, fatalError, the root selection), drawn as
+// cards over the window, since Slint has no window-modal dialog.
 //
-// StandardTableView is single-select with text-only cells, so the recon
-// table is a custom one on ListView. Selection, sorting and directions live
-// in Rust (src/recon_view.rs); this file only renders rows and forwards
-// input.
+// The items are a custom table on ListView, as StandardTableView is
+// single-select with text-only cells. What the rows show, the selection
+// and what is enabled are worked out in Rust (src/lib.rs and
+// src/recon_view.rs); this file renders them and forwards input.
 
-import { Button, ListView, LineEdit, Palette } from "std-widgets.slint";
+import { Button, ComboBox, LineEdit, ListView, Palette, ScrollView } from "std-widgets.slint";
 
 export struct RowData {
-    path: string,
-    left: string,
-    // 0 unchanged, 1 props, 2 changed, 3 new, 4 deleted
-    left-kind: int,
-    right: string,
-    right-kind: int,
+    // The replicas' statuses (`reconItem2stringList`).
+    replica1: string,
+    replica2: string,
+    // The action, as the text interface draws it (`action2niceString`).
     arrow: string,
-    // 0 conflict, 1 skip, 2 left-to-right, 3 right-to-left
-    direction-kind: int,
-    size: string,
-    progress: float,
+    // 0 error, 1 skip, 2 propagate or merge, 3 partial
+    arrow-kind: int,
+    // The action isn't the default (getArrow's light blue).
+    changed: bool,
+    // 0 nothing, 1 done, 2 failed
+    done: int,
+    status: string,
+    path: string,
     selected: bool,
     spoken: string,
 }
 
 global Theme {
     out property <length> row-height: 20px;
+    out property <length> replica-width: 110px;
+    out property <length> arrow-width: 64px;
     out property <length> status-width: 80px;
-    out property <length> arrow-width: 56px;
-    out property <length> size-width: 80px;
-    out property <length> progress-width: 110px;
 
-    public pure function status-color(kind: int) -> color {
-        if kind == 1 { return #8c8cc8; }
-        if kind == 2 { return #e6aa1e; }
-        if kind == 3 { return #3caa50; }
-        if kind == 4 { return #d23c3c; }
-        return transparent;
-    }
-
-    public pure function direction-color(kind: int) -> color {
-        if kind == 0 { return #d23c3c; }
-        if kind == 1 { return #888888; }
-        return #3c82d2;
+    // getArrow's pixmap colours.
+    public pure function arrow-color(kind: int, changed: bool) -> color {
+        if kind == 0 { return #ff2040; }
+        if changed { return #8888ff; }
+        if kind == 1 { return #ff2040; }
+        if kind == 3 { return #ff9303; }
+        return #00b000;
     }
 }
 
-component StatusCell inherits HorizontalLayout {
+component HeaderCell inherits Rectangle {
     in property <string> label;
-    in property <int> kind;
-    width: Theme.status-width;
-    spacing: 4px;
-    alignment: start;
-    // The per-row status icon.
-    Rectangle {
-        y: (parent.height - self.height) / 2;
-        width: 9px;
-        height: 9px;
-        border-radius: 4.5px;
-        background: Theme.status-color(root.kind);
-    }
-    Text {
-        text: root.label;
-        vertical-alignment: center;
-        accessible-role: none;
-    }
-}
-
-component HeaderCell inherits TouchArea {
-    in property <string> label;
-    in property <bool> active;
-    in property <bool> ascending;
-    accessible-role: button;
-    accessible-label: root.label;
-    accessible-action-default => { root.clicked(); }
     Text {
         x: 4px;
         width: parent.width - 4px;
-        text: root.label + (root.active ? (root.ascending ? " ▲" : " ▼") : "");
+        text: root.label;
         font-weight: 700;
         vertical-alignment: center;
         overflow: elide;
     }
 }
 
+// A dialog's frame: the scrim that swallows input, and the card.
+component Card inherits Rectangle {
+    in property <string> title;
+    in property <length> card-width: 460px;
+    callback escape();
+    background: #00000080;
+    TouchArea { }
+    FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.escape();
+                return accept;
+            }
+            reject
+        }
+        Rectangle {
+            x: (root.width - self.width) / 2;
+            y: max(16px, (root.height - self.height) / 3);
+            width: min(root.card-width, root.width - 32px);
+            height: min(self.preferred-height, root.height - 32px);
+            border-radius: 8px;
+            background: Palette.background;
+            drop-shadow-blur: 16px;
+            drop-shadow-color: #00000060;
+            accessible-role: groupbox;
+            accessible-label: root.title;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                Text {
+                    text: root.title;
+                    font-weight: 700;
+                    font-size: 15px;
+                }
+                @children
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
-    title: "gemel";
-    preferred-width: 1000px;
-    preferred-height: 700px;
+    in property <string> window-title: "Gemel";
+    title: root.window-title;
+    preferred-width: 900px;
+    preferred-height: 640px;
 
     in property <[RowData]> rows;
+    in property <string> replica1-heading: " ";
+    in property <string> replica2-heading: " ";
+    in property <string> profile-text: "No profile";
     in property <string> status-text;
-    in property <string> root-text;
-    // "path", "status" or "size"
-    in property <string> sort-key;
-    in property <bool> sort-ascending;
-    in-out property <bool> ssh-open;
-    in-out property <string> ssh-password;
+    in property <string> details-path;
+    in property <string> details-text;
+    // The details are uigtk3's formatted ones (monospace), not an error.
+    in property <bool> details-formatted;
+    in property <string> mono-font: "Menlo";
+    // The action menu's directions (`buildActionMenu`).
+    in property <string> left-to-right: "Left to Right";
+    in property <string> right-to-left: "Right to Left";
+    // uigtk3's groups of what is sensitive together.
+    in property <bool> actions-enabled;
+    in property <bool> go-enabled;
+    in property <bool> detail-enabled;
+    in property <bool> select-enabled;
+
+    // The dialog shown, if any: 0 none, 1 a message, 2 the first root,
+    // 3 the second root.
+    in property <int> dialog;
+    in property <string> dialog-title;
+    in property <string> dialog-message;
+    // The buttons; "" leaves one out.
+    in property <string> dialog-ok: "OK";
+    in property <string> dialog-cancel;
+    // The root selection's fields.
+    in-out property <string> root-dir;
+    // 0 local, 1 ssh, 2 socket
+    in-out property <int> root-kind;
+    in-out property <string> root-host;
+    in-out property <string> root-user;
+    in-out property <string> root-port;
+    in property <string> root-error;
 
     callback row-clicked(index: int, shift: bool, command: bool);
-    callback direction-key(key: string);
     callback move-cursor(delta: int, extend: bool);
+    // An action on the selection: "right", "left", "skip", "merge",
+    // "first", "second", "newer", "older", "force-newer", "force-older",
+    // "revert", "merge-default".
+    callback action(name: string);
     callback select-all();
-    callback sort(key: string);
-    callback choose-root();
-    callback connect-ssh();
-    callback ssh-done(ok: bool);
+    callback deselect-all();
+    callback details();
+    callback go();
+    callback quit();
+    callback dialog-done(ok: bool);
+    callback browse-root();
 
     // Scrolls so that row `index` is visible.
     public function bring-into-view(index: int) {
@@ -121,97 +165,158 @@ export component AppWindow inherits Window {
         table-scope.focus();
     }
 
-    // Native on macOS (via muda inside Slint). `Control` is Cmd there.
+    // Native on macOS (through muda inside Slint), where `Control` is Cmd.
+    // Keys without modifiers are taken by the table (below): a native menu
+    // would take them from text fields too.
     MenuBar {
         Menu {
-            title: "File";
+            title: "Synchronization";
             MenuItem {
-                title: "Choose Root…";
-                shortcut: @keys(Control + O);
-                activated => { root.choose-root(); }
+                title: "Go";
+                enabled: root.go-enabled;
+                activated => { root.go(); }
             }
             MenuItem {
-                title: "Connect over SSH…";
-                shortcut: @keys(Control + K);
-                activated => { root.connect-ssh(); }
-            }
-        }
-        Menu {
-            title: "Edit";
-            MenuItem {
-                title: "Select All";
-                shortcut: @keys(Control + A);
-                activated => { root.select-all(); }
+                title: "Quit";
+                shortcut: @keys(Control + Q);
+                activated => { root.quit(); }
             }
         }
         Menu {
             title: "Actions";
             MenuItem {
-                title: "Propagate Left to Right  (>)";
-                activated => { root.direction-key(">"); }
+                title: "Select All";
+                enabled: root.select-enabled;
+                shortcut: @keys(Control + A);
+                activated => { root.select-all(); }
             }
             MenuItem {
-                title: "Propagate Right to Left  (<)";
-                activated => { root.direction-key("<"); }
+                title: "Deselect All";
+                enabled: root.select-enabled;
+                shortcut: @keys(Control + Shift + A);
+                activated => { root.deselect-all(); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Propagate " + root.left-to-right;
+                enabled: root.actions-enabled;
+                activated => { root.action("right"); }
             }
             MenuItem {
-                title: "Skip  (/)";
-                activated => { root.direction-key("/"); }
-            }
-        }
-        Menu {
-            title: "View";
-            MenuItem {
-                title: "Sort by Path";
-                shortcut: @keys(Control + "1");
-                activated => { root.sort("path"); }
+                title: "Propagate " + root.right-to-left;
+                enabled: root.actions-enabled;
+                activated => { root.action("left"); }
             }
             MenuItem {
-                title: "Sort by Status";
-                shortcut: @keys(Control + "2");
-                activated => { root.sort("status"); }
+                title: "Do Not Propagate Changes";
+                enabled: root.actions-enabled;
+                activated => { root.action("skip"); }
             }
             MenuItem {
-                title: "Sort by Size";
-                shortcut: @keys(Control + "3");
-                activated => { root.sort("size"); }
+                title: "Merge the Files";
+                enabled: root.actions-enabled;
+                activated => { root.action("merge"); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Resolve Conflicts in Favor of First Root";
+                enabled: root.actions-enabled;
+                activated => { root.action("first"); }
+            }
+            MenuItem {
+                title: "Resolve Conflicts in Favor of Second Root";
+                enabled: root.actions-enabled;
+                activated => { root.action("second"); }
+            }
+            MenuItem {
+                title: "Resolve Conflicts in Favor of Most Recently Modified";
+                enabled: root.actions-enabled;
+                activated => { root.action("newer"); }
+            }
+            MenuItem {
+                title: "Resolve Conflicts in Favor of Least Recently Modified";
+                enabled: root.actions-enabled;
+                activated => { root.action("older"); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Force Newer Files to Replace Older Ones";
+                enabled: root.actions-enabled;
+                activated => { root.action("force-newer"); }
+            }
+            MenuItem {
+                title: "Force Older Files to Replace Newer Ones";
+                enabled: root.actions-enabled;
+                activated => { root.action("force-older"); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Revert to Unison's Recommendation";
+                enabled: root.actions-enabled;
+                activated => { root.action("revert"); }
+            }
+            MenuItem {
+                title: "Revert to the Merging Default, if Available";
+                enabled: root.actions-enabled;
+                activated => { root.action("merge-default"); }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Detailed Information";
+                enabled: root.detail-enabled;
+                activated => { root.details(); }
             }
         }
     }
 
     VerticalLayout {
+        // The toolbar, and the profile's name.
         HorizontalLayout {
             padding: 6px;
             spacing: 6px;
             Button {
-                text: "Choose root…";
-                clicked => { root.choose-root(); }
+                text: "Left to Right";
+                enabled: root.actions-enabled;
+                clicked => { root.action("right"); table-scope.focus(); }
             }
             Button {
-                text: "Connect over SSH…";
-                clicked => { root.connect-ssh(); }
+                text: "Skip";
+                enabled: root.actions-enabled;
+                clicked => { root.action("skip"); table-scope.focus(); }
             }
             Button {
-                text: "Left to right  >";
-                clicked => { root.direction-key(">"); table-scope.focus(); }
+                text: "Right to Left";
+                enabled: root.actions-enabled;
+                clicked => { root.action("left"); table-scope.focus(); }
             }
             Button {
-                text: "Right to left  <";
-                clicked => { root.direction-key("<"); table-scope.focus(); }
+                text: "Merge";
+                enabled: root.actions-enabled;
+                clicked => { root.action("merge"); table-scope.focus(); }
             }
+            Rectangle { width: 8px; }
             Button {
-                text: "Skip  /";
-                clicked => { root.direction-key("/"); table-scope.focus(); }
+                text: "Details";
+                enabled: root.detail-enabled;
+                clicked => { root.details(); }
+            }
+            Rectangle { width: 8px; }
+            Button {
+                text: "Go";
+                enabled: root.go-enabled;
+                primary: true;
+                clicked => { root.go(); table-scope.focus(); }
             }
             Text {
-                text: "root: " + root.root-text;
+                text: root.profile-text;
+                horizontal-alignment: right;
                 vertical-alignment: center;
                 overflow: elide;
                 horizontal-stretch: 1;
             }
         }
 
-        // Column header.
+        // The column headings (`setMainWindowColumnHeaders`).
         Rectangle {
             height: Theme.row-height + 4px;
             background: Palette.alternate-background;
@@ -220,53 +325,65 @@ export component AppWindow inherits Window {
                 padding-right: 6px;
                 spacing: 6px;
                 HeaderCell {
-                    horizontal-stretch: 1;
-                    label: "Path";
-                    active: root.sort-key == "path";
-                    ascending: root.sort-ascending;
-                    clicked => { root.sort("path"); }
-                }
-                HeaderCell {
-                    width: Theme.status-width;
-                    label: "Left";
-                    active: root.sort-key == "status";
-                    ascending: root.sort-ascending;
-                    clicked => { root.sort("status"); }
+                    width: Theme.replica-width;
+                    label: root.replica1-heading;
                 }
                 HeaderCell {
                     width: Theme.arrow-width;
                     label: "Action";
-                    clicked => { root.sort("status"); }
+                }
+                HeaderCell {
+                    width: Theme.replica-width;
+                    label: root.replica2-heading;
                 }
                 HeaderCell {
                     width: Theme.status-width;
-                    label: "Right";
-                    clicked => { root.sort("status"); }
+                    label: "Status";
                 }
                 HeaderCell {
-                    width: Theme.size-width;
-                    label: "Size";
-                    active: root.sort-key == "size";
-                    ascending: root.sort-ascending;
-                    clicked => { root.sort("size"); }
+                    horizontal-stretch: 1;
+                    label: "Path";
                 }
-                HeaderCell {
-                    width: Theme.progress-width;
-                    label: "Progress";
-                }
-                // Room for the scroll bar.
-                Rectangle { width: 10px; }
             }
         }
 
         table-scope := FocusScope {
             vertical-stretch: 1;
             key-pressed(event) => {
-                if root.ssh-open {
+                if root.dialog != 0 {
                     return reject;
                 }
-                if event.text == ">" || event.text == "<" || event.text == "/" {
-                    root.direction-key(event.text);
+                // uigtk3's keys: the Action menu's, the arrows, and the
+                // Synchronization menu's.
+                if event.modifiers.control || event.modifiers.meta || event.modifiers.alt {
+                    return reject;
+                }
+                if event.text == ">" || event.text == "." || event.text == Key.RightArrow {
+                    root.action("right");
+                    return accept;
+                }
+                if event.text == "<" || event.text == "," || event.text == Key.LeftArrow {
+                    root.action("left");
+                    return accept;
+                }
+                if event.text == "/" {
+                    root.action("skip");
+                    return accept;
+                }
+                if event.text == "m" {
+                    root.action("merge");
+                    return accept;
+                }
+                if event.text == "i" {
+                    root.details();
+                    return accept;
+                }
+                if event.text == "g" {
+                    root.go();
+                    return accept;
+                }
+                if event.text == "q" {
+                    root.quit();
                     return accept;
                 }
                 if event.text == Key.DownArrow {
@@ -289,11 +406,11 @@ export component AppWindow inherits Window {
             }
 
             list := ListView {
-                // ListView is already `list` (AccessKit ListBox, which VoiceOver
-                // treats as a container of selectable items); `table` would
-                // map to a Table, whose children VoiceOver doesn't treat as
-                // selectable rows.
-                accessible-label: "Reconciliation items";
+                // ListView is already `list` (AccessKit ListBox, which
+                // VoiceOver treats as a container of selectable items);
+                // `table` would map to a Table, whose children VoiceOver
+                // doesn't treat as selectable rows.
+                accessible-label: "Items";
                 accessible-item-count: root.rows.length;
 
                 for row[index] in root.rows: Rectangle {
@@ -324,6 +441,49 @@ export component AppWindow inherits Window {
                         padding-right: 6px;
                         spacing: 6px;
                         Text {
+                            width: Theme.replica-width;
+                            text: row.replica1;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            accessible-role: none;
+                        }
+                        Text {
+                            width: Theme.arrow-width;
+                            text: row.arrow;
+                            font-family: root.mono-font;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            color: Theme.arrow-color(row.arrow-kind, row.changed);
+                            accessible-role: none;
+                        }
+                        Text {
+                            width: Theme.replica-width;
+                            text: row.replica2;
+                            overflow: elide;
+                            vertical-alignment: center;
+                            color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            accessible-role: none;
+                        }
+                        HorizontalLayout {
+                            width: Theme.status-width;
+                            spacing: 4px;
+                            Text {
+                                text: row.done == 1 ? "✓" : row.done == 2 ? "✗" : "";
+                                color: row.done == 1 ? #00b000 : #ff2040;
+                                vertical-alignment: center;
+                                accessible-role: none;
+                            }
+                            Text {
+                                text: row.status;
+                                font-family: root.mono-font;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                                color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                                accessible-role: none;
+                            }
+                        }
+                        Text {
                             horizontal-stretch: 1;
                             text: row.path;
                             overflow: elide;
@@ -331,119 +491,160 @@ export component AppWindow inherits Window {
                             color: row.selected ? Palette.selection-foreground : Palette.foreground;
                             accessible-role: none;
                         }
-                        StatusCell {
-                            label: row.left;
-                            kind: row.left-kind;
-                        }
-                        Text {
-                            width: Theme.arrow-width;
-                            text: row.arrow;
-                            font-family: "Menlo";
-                            vertical-alignment: center;
-                            color: Theme.direction-color(row.direction-kind);
-                            accessible-role: none;
-                        }
-                        StatusCell {
-                            label: row.right;
-                            kind: row.right-kind;
-                        }
-                        Text {
-                            width: Theme.size-width;
-                            text: row.size;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                            accessible-role: none;
-                        }
-                        Rectangle {
-                            width: Theme.progress-width;
-                            if row.progress > 0: Rectangle {
-                                y: (parent.height - self.height) / 2;
-                                height: 10px;
-                                border-radius: 3px;
-                                background: Palette.alternate-background;
-                                Rectangle {
-                                    x: 0;
-                                    width: parent.width * row.progress;
-                                    border-radius: 3px;
-                                    background: Palette.accent-background;
-                                }
-                            }
-                        }
                     }
                 }
             }
         }
 
+        // The details pane (`updateDetails`): the path, then the details.
+        Rectangle {
+            height: 5 * Theme.row-height;
+            border-width: 1px;
+            border-color: Palette.border;
+            ScrollView {
+                VerticalLayout {
+                    padding: 4px;
+                    alignment: start;
+                    Text {
+                        text: root.details-path;
+                        accessible-label: "Path";
+                    }
+                    Text {
+                        text: root.details-text;
+                        font-family: root.details-formatted ? root.mono-font : "";
+                        wrap: root.details-formatted ? no-wrap : word-wrap;
+                        accessible-label: "Details";
+                    }
+                }
+            }
+        }
+
+        // The status line.
         Rectangle {
             height: 24px;
             background: Palette.alternate-background;
             Text {
                 x: 6px;
+                width: parent.width - 12px;
                 text: root.status-text;
                 vertical-alignment: center;
+                overflow: elide;
+                accessible-label: "Status";
             }
         }
     }
 
-    // The modal SSH-password prompt: a scrim that swallows input plus a
-    // dialog card. (Slint's `Dialog` is a separate top-level window; a
-    // window-modal sheet is not available.)
-    if root.ssh-open: Rectangle {
-        x: 0;
-        y: 0;
-        width: root.width;
-        height: root.height;
-        background: #00000080;
-        TouchArea { }
-        FocusScope {
-            key-pressed(event) => {
-                if event.text == Key.Escape {
-                    root.ssh-done(false);
-                    return accept;
-                }
-                reject
+    // A message, with up to two buttons (warnBox, fatalError, okBox,
+    // messageBox).
+    if root.dialog == 1: Card {
+        title: root.dialog-title;
+        escape => {
+            if root.dialog-cancel != "" { root.dialog-done(false); }
+            else if root.dialog-ok != "" { root.dialog-done(true); }
+        }
+        ScrollView {
+            min-height: 60px;
+            preferred-height: min(message.preferred-height + 8px, 360px);
+            message := Text {
+                text: root.dialog-message;
+                wrap: word-wrap;
+                accessible-label: "Message";
             }
-            Rectangle {
-                x: (root.width - self.width) / 2;
-                y: (root.height - self.height) / 3;
-                width: 360px;
-                height: 170px;
-                border-radius: 8px;
-                background: Palette.background;
-                drop-shadow-blur: 16px;
-                drop-shadow-color: #00000060;
-                accessible-role: groupbox;
-                accessible-label: "SSH password";
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 8px;
-                    Text {
-                        text: "SSH password";
-                        font-weight: 700;
-                        font-size: 15px;
-                    }
-                    Text { text: "jcomellas@example.org's password:"; }
-                    password-edit := LineEdit {
-                        input-type: password;
-                        text <=> root.ssh-password;
-                        accessible-label: "Password";
-                        accepted => { root.ssh-done(true); }
-                        init => { self.focus(); }
-                    }
-                    HorizontalLayout {
-                        alignment: end;
-                        spacing: 8px;
-                        Button {
-                            text: "Cancel";
-                            clicked => { root.ssh-done(false); }
-                        }
-                        Button {
-                            text: "Connect";
-                            primary: true;
-                            clicked => { root.ssh-done(true); }
-                        }
-                    }
-                }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            if root.dialog-cancel != "": Button {
+                text: root.dialog-cancel;
+                clicked => { root.dialog-done(false); }
+            }
+            if root.dialog-ok != "": Button {
+                text: root.dialog-ok;
+                primary: true;
+                clicked => { root.dialog-done(true); }
+                init => { self.focus(); }
+            }
+        }
+    }
+
+    // The root selection (getFirstRoot, getSecondRoot).
+    if root.dialog == 2 || root.dialog == 3: Card {
+        title: "Root selection";
+        card-width: 560px;
+        escape => { root.dialog-done(false); }
+        Text {
+            text: root.dialog-message;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            spacing: 6px;
+            Text {
+                text: root.dialog == 2 ? "Dir:" : "Directory:";
+                vertical-alignment: center;
+            }
+            LineEdit {
+                text <=> root.root-dir;
+                accessible-label: "Directory";
+                accepted => { root.dialog-done(true); }
+                init => { self.focus(); }
+            }
+            Button {
+                text: "Browse…";
+                enabled: root.root-kind == 0;
+                clicked => { root.browse-root(); }
+            }
+        }
+        if root.dialog == 3: HorizontalLayout {
+            spacing: 6px;
+            ComboBox {
+                model: ["Local", "SSH", "Socket"];
+                current-index <=> root.root-kind;
+                accessible-label: "Kind";
+            }
+            Text {
+                text: "Host:";
+                vertical-alignment: center;
+            }
+            LineEdit {
+                text <=> root.root-host;
+                enabled: root.root-kind != 0;
+                accessible-label: "Host";
+            }
+            Text {
+                text: "(Optional) User:";
+                vertical-alignment: center;
+            }
+            LineEdit {
+                text <=> root.root-user;
+                enabled: root.root-kind == 1;
+                accessible-label: "User";
+            }
+            Text {
+                text: "Port:";
+                vertical-alignment: center;
+            }
+            LineEdit {
+                text <=> root.root-port;
+                enabled: root.root-kind == 2;
+                accessible-label: "Port";
+            }
+        }
+        if root.root-error != "": Text {
+            text: root.root-error;
+            color: #d23c3c;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "Cancel";
+                clicked => { root.dialog-done(false); }
+            }
+            Button {
+                text: "OK";
+                primary: true;
+                clicked => { root.dialog-done(true); }
             }
         }
     }
