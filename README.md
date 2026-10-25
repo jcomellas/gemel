@@ -90,7 +90,7 @@ Crates are layered; each depends only on the ones above it:
 | `crates/gemel-engine` | Update detection, reconciliation, propagation, archives |
 | `crates/gemel-ui-api` | The engine/frontend contract |
 | `bins/gemel` | The program: text UI and server modes, as a library and the `gemel` binary (no GUI dependencies, enforced in CI) |
-| `bins/gemel-gui` | Slint GUI frontend (no engine yet: shows fake data), and with `-ui text` or `-server` the same program as `gemel` |
+| `bins/gemel-gui` | Slint GUI frontend after `uigtk3`, on the session (milestone 4, in progress), and with `-ui text` or `-server` the same program as `gemel` |
 | `bins/gemel-fsmonitor` | File-watcher helper |
 
 Each module's doc comment names the Unison source files it ports.

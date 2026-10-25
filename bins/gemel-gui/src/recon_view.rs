@@ -1,162 +1,172 @@
-//! The recon table's view model: rows, sort order and a multi-selection.
+//! The items' view model: the session's items, in its order, with a
+//! multiple selection and what each row shows.
 //!
-//! Rows are addressed two ways. The *id* is the row's index in
-//! [`ReconTable::rows`] and never changes. The *view index* is its position
-//! in the current sort order. The selection is keyed by id, so sorting keeps
-//! it. Methods that change visible state return the view indices that
-//! changed, so the Slint model can notify only those rows.
+//! Ports what `uigtk3.ml`'s main window keeps of the items (`theState`,
+//! the tree view's selection), `columnsOf`, `getArrow` and
+//! `nextInteresting`.
 //!
-//! Selection is a frontend concern and stays here. The item types
-//! ([`ReplicaStatus`], [`Direction`], [`Row`]) are placeholders: the real
-//! ones will come from the reconciliation items in `gemel-ui-api`, and
-//! sorting will move to `gemel_ui_api::sortri` (the port of `sortri.ml`).
+//! A row's index is its item's index in the session, as in `uigtk3`,
+//! where the list store and `theState` correspond one to one: sorting is
+//! the session's (`Command::Sort`). The selection is a frontend concern
+//! and stays here. Methods that change what is shown return the rows that
+//! changed, so the Slint model can tell only those.
 
-use std::cmp::Ordering;
+use gemel_ui_api::session::{ItemView, Outcome};
+use gemel_ui_api::uicommon::Action;
 
-/// What changed on one replica since the last sync. Mirrors the status
-/// column of Unison's recon table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ReplicaStatus {
-    /// Nothing changed on this side.
-    Unchanged,
-    /// Only properties (permissions, times) changed.
-    PropsChanged,
-    /// Contents changed.
-    Modified,
-    /// The path is new on this side.
-    Created,
-    /// The path was deleted on this side.
-    Deleted,
-}
-
-impl ReplicaStatus {
-    /// The label Unison shows in the status column.
-    pub fn label(self) -> &'static str {
-        match self {
-            ReplicaStatus::Unchanged => "",
-            ReplicaStatus::PropsChanged => "props",
-            ReplicaStatus::Modified => "changed",
-            ReplicaStatus::Created => "new",
-            ReplicaStatus::Deleted => "deleted",
-        }
-    }
-}
-
-/// Which way an item will be propagated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Direction {
-    /// Unresolved conflict: both sides changed.
-    Conflict,
-    /// The user asked to skip this item (`/`).
+/// What the action column shows (`getArrow`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Arrow {
+    /// A problem found during update detection (`failedIcon`).
+    Error,
+    /// Skipped (`ignoreAct`).
     Skip,
-    /// Copy left to right (`>`).
-    LeftToRight,
-    /// Copy right to left (`<`).
-    RightToLeft,
+    /// From left to right (`rightArrow`), orange if partial.
+    Right {
+        /// Errors deep inside (`orangeRightArrow`).
+        partial: bool,
+    },
+    /// From right to left (`leftArrow`), orange if partial.
+    Left {
+        /// Errors deep inside (`orangeLeftArrow`).
+        partial: bool,
+    },
+    /// Merged (`mergeLogo`).
+    Merge,
 }
 
-impl Direction {
-    /// The arrow Unison shows between the status columns.
-    pub fn arrow(self) -> &'static str {
-        match self {
-            Direction::Conflict => "<-?->",
-            Direction::Skip => "<-/->",
-            Direction::LeftToRight => "---->",
-            Direction::RightToLeft => "<----",
+impl Arrow {
+    /// The arrow for `action`.
+    pub fn of(action: Action) -> Arrow {
+        match action {
+            Action::Error => Arrow::Error,
+            Action::Skip(_) => Arrow::Skip,
+            Action::LtoR(partial) => Arrow::Right { partial },
+            Action::RtoL(partial) => Arrow::Left { partial },
+            Action::Merge => Arrow::Merge,
         }
     }
 
     /// Words for screen readers.
     pub fn spoken(self) -> &'static str {
         match self {
-            Direction::Conflict => "conflict",
-            Direction::Skip => "skip",
-            Direction::LeftToRight => "left to right",
-            Direction::RightToLeft => "right to left",
-        }
-    }
-
-    /// Maps the recon-table key to a direction: `>`, `<` or `/`.
-    pub fn from_key(text: &str) -> Option<Direction> {
-        match text {
-            ">" | "." => Some(Direction::LeftToRight),
-            "<" | "," => Some(Direction::RightToLeft),
-            "/" => Some(Direction::Skip),
-            _ => None,
+            Arrow::Error => "error",
+            Arrow::Skip => "skip",
+            Arrow::Right { partial: false } => "left to right",
+            Arrow::Right { partial: true } => "left to right, partially",
+            Arrow::Left { partial: false } => "right to left",
+            Arrow::Left { partial: true } => "right to left, partially",
+            Arrow::Merge => "merge",
         }
     }
 }
 
-/// One recon item.
+/// What the status column shows of an item's outcome (`uigtk3`'s
+/// `status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Done {
+    /// Not propagated (`NoStatus`): skipped, a problem, or not yet.
+    No,
+    /// Propagated (`Done`).
+    Yes,
+    /// It failed (`Failed`).
+    Failed,
+}
+
+/// A row: an item, and how far its propagation has got.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
-    /// Path relative to the roots.
-    pub path: String,
-    /// Status on the left replica.
-    pub left: ReplicaStatus,
-    /// Status on the right replica.
-    pub right: ReplicaStatus,
-    /// Propagation direction.
-    pub direction: Direction,
-    /// Bytes to transfer.
-    pub size: u64,
-    /// Transfer progress in `0.0..=1.0`.
-    pub progress: f32,
+    /// The item.
+    pub item: ItemView,
+    /// Its progress (`c_statust`), until it is done.
+    pub progress: String,
 }
 
 impl Row {
-    /// The size as Unison prints it in the recon table.
-    pub fn size_label(&self) -> String {
-        human_size(self.size)
+    fn new(item: ItemView) -> Row {
+        Row {
+            item,
+            progress: String::new(),
+        }
+    }
+
+    /// The action's arrow.
+    pub fn arrow(&self) -> Arrow {
+        Arrow::of(self.item.action)
+    }
+
+    /// `columnsOf`'s status: none for a conflict or a problem.
+    pub fn done(&self) -> Done {
+        if self.item.problem.is_some() || matches!(self.item.action, Action::Skip(_)) {
+            return Done::No;
+        }
+        match self.item.outcome {
+            None => Done::No,
+            Some(Outcome::Succeeded) => Done::Yes,
+            Some(Outcome::Failed(_)) => Done::Failed,
+        }
+    }
+
+    /// The path, as the path column shows it: with a note once it has
+    /// failed (`redisplay`).
+    pub fn path(&self) -> String {
+        match self.done() {
+            Done::Failed => format!(
+                "{}       [failed: click on this line for details]",
+                self.item.shown_path
+            ),
+            _ => self.item.shown_path.clone(),
+        }
+    }
+
+    /// The status column's text: the progress, until there is an outcome
+    /// (`displayRowStatus`).
+    pub fn status_text(&self) -> &str {
+        match self.done() {
+            Done::No => &self.progress,
+            _ => "",
+        }
+    }
+
+    /// Whether an action can be set on it: it is not a problem and hasn't
+    /// been propagated (`actionPossible`).
+    pub fn action_possible(&self) -> bool {
+        self.item.outcome.is_none() && self.item.problem.is_none()
+    }
+
+    /// Whether there is more to show of it than its details: errors, a
+    /// problem or a failure (`updateButtons`' `details`).
+    pub fn has_details(&self) -> bool {
+        let i = &self.item;
+        !i.errors1.is_empty()
+            || !i.errors2.is_empty()
+            || i.problem.is_some()
+            || matches!(i.outcome, Some(Outcome::Failed(_)))
     }
 
     /// One sentence for screen readers.
     pub fn spoken(&self) -> String {
-        let side = |s: ReplicaStatus| {
-            if s == ReplicaStatus::Unchanged {
-                "unchanged"
+        let side = |s: &str| {
+            if s.trim().is_empty() {
+                "unchanged".to_owned()
             } else {
-                s.label()
+                s.trim().to_owned()
             }
         };
+        let done = match self.done() {
+            Done::No if self.progress.trim().is_empty() => String::new(),
+            Done::No => format!(", {}", self.progress.trim()),
+            Done::Yes => ", done".to_owned(),
+            Done::Failed => ", failed".to_owned(),
+        };
         format!(
-            "{}, left {}, {}, right {}, {}, {:.0}% done",
-            self.path,
-            side(self.left),
-            self.direction.spoken(),
-            side(self.right),
-            self.size_label(),
-            self.progress * 100.0
+            "{}, left {}, {}, right {}{done}",
+            self.item.shown_path,
+            side(self.item.status1),
+            self.arrow().spoken(),
+            side(self.item.status2),
         )
     }
-}
-
-/// Formats a byte count as `123 B`, `4.5 KiB`, ...
-pub fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    let mut v = bytes as f64;
-    let mut unit = 0;
-    while v >= 1024.0 && unit + 1 < UNITS.len() {
-        v /= 1024.0;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{v:.1} {}", UNITS[unit])
-    }
-}
-
-/// A sortable column.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SortKey {
-    /// By path.
-    Path,
-    /// Conflicts first, then by direction and the two statuses, then path
-    /// (the order `sortri.ml` uses for "sort by status").
-    Status,
-    /// By transfer size.
-    Size,
 }
 
 /// Modifier keys held during a click.
@@ -168,36 +178,22 @@ pub struct ClickMods {
     pub command: bool,
 }
 
-/// Rows, sort order and selection.
-#[derive(Debug)]
+/// The rows, and the selection.
+#[derive(Debug, Default)]
 pub struct ReconTable {
     rows: Vec<Row>,
-    /// View index -> id.
-    order: Vec<u32>,
-    /// Id -> view index.
-    position: Vec<u32>,
     selected: Vec<bool>,
     selected_count: usize,
-    anchor: Option<u32>,
-    cursor: Option<u32>,
-    sort: Option<(SortKey, bool)>,
+    anchor: Option<usize>,
+    cursor: Option<usize>,
 }
 
 impl ReconTable {
-    /// Wraps `rows` in their original order with nothing selected.
-    pub fn new(rows: Vec<Row>) -> Self {
-        let n = rows.len();
-        let order: Vec<u32> = (0..n as u32).collect();
-        ReconTable {
-            rows,
-            position: order.clone(),
-            order,
-            selected: vec![false; n],
-            selected_count: 0,
-            anchor: None,
-            cursor: None,
-            sort: None,
-        }
+    /// The rows of `items`, with nothing selected.
+    pub fn new(items: Vec<ItemView>) -> Self {
+        let mut t = ReconTable::default();
+        t.replace(items, false);
+        t
     }
 
     /// Number of rows.
@@ -210,19 +206,19 @@ impl ReconTable {
         self.rows.is_empty()
     }
 
-    /// The row shown at `view`.
-    pub fn row_at(&self, view: usize) -> &Row {
-        &self.rows[self.order[view] as usize]
+    /// The row `i`.
+    pub fn row(&self, i: usize) -> &Row {
+        &self.rows[i]
     }
 
-    /// Where the row with `id` is shown.
-    pub fn view_of(&self, id: u32) -> usize {
-        self.position[id as usize] as usize
+    /// The rows.
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
     }
 
-    /// Whether the row shown at `view` is selected.
-    pub fn is_selected(&self, view: usize) -> bool {
-        self.selected[self.order[view] as usize]
+    /// Whether row `i` is selected.
+    pub fn is_selected(&self, i: usize) -> bool {
+        self.selected[i]
     }
 
     /// Number of selected rows.
@@ -230,88 +226,119 @@ impl ReconTable {
         self.selected_count
     }
 
-    /// View index of the keyboard cursor (the focused row), if any.
+    /// The selected rows, in order.
+    pub fn selected(&self) -> Vec<usize> {
+        (0..self.rows.len()).filter(|&i| self.selected[i]).collect()
+    }
+
+    /// The row selected, if exactly one is (`currentRow`).
+    pub fn current(&self) -> Option<usize> {
+        match self.selected_count {
+            1 => self.selected.iter().position(|&s| s),
+            _ => None,
+        }
+    }
+
+    /// The keyboard cursor, if any.
     pub fn cursor(&self) -> Option<usize> {
-        self.cursor.map(|id| self.view_of(id))
+        self.cursor
     }
 
-    /// The current sort column and whether it is ascending.
-    pub fn sort(&self) -> Option<(SortKey, bool)> {
-        self.sort
+    /// Replaces the rows with `items`. With `keep`, the rows selected stay
+    /// selected, where there still are as many (`displayMain`, which keeps
+    /// the selected rows' indices); otherwise nothing is.
+    pub fn replace(&mut self, items: Vec<ItemView>, keep: bool) {
+        let n = items.len();
+        self.rows = items.into_iter().map(Row::new).collect();
+        if !keep {
+            self.selected.clear();
+            self.anchor = None;
+            self.cursor = None;
+        }
+        self.selected.resize(n, false);
+        self.selected.truncate(n);
+        self.selected_count = self.selected.iter().filter(|&&s| s).count();
+        self.anchor = self.anchor.filter(|&a| a < n);
+        self.cursor = self.cursor.filter(|&c| c < n);
     }
 
-    fn set_selected(&mut self, id: u32, on: bool, changed: &mut Vec<usize>) {
-        let slot = &mut self.selected[id as usize];
-        if *slot != on {
-            *slot = on;
+    /// Item `i` has changed.
+    pub fn set_item(&mut self, i: usize, item: ItemView) -> Option<usize> {
+        let row = self.rows.get_mut(i)?;
+        row.item = item;
+        Some(i)
+    }
+
+    /// Item `i`'s progress (`updateRowStatus`).
+    pub fn set_progress(&mut self, i: usize, progress: &str) -> Option<usize> {
+        let row = self.rows.get_mut(i)?;
+        (row.progress != progress).then(|| {
+            row.progress = progress.to_owned();
+            i
+        })
+    }
+
+    fn set_selected(&mut self, i: usize, on: bool, changed: &mut Vec<usize>) {
+        if self.selected[i] != on {
+            self.selected[i] = on;
             if on {
                 self.selected_count += 1;
             } else {
                 self.selected_count -= 1;
             }
-            changed.push(self.position[id as usize] as usize);
+            changed.push(i);
         }
     }
 
-    /// Deselects every selected row whose view index is outside `lo..=hi`.
-    fn retain_range(&mut self, lo: usize, hi: usize, changed: &mut Vec<usize>) {
-        if self.selected_count == 0 {
-            return;
-        }
-        for id in 0..self.rows.len() as u32 {
-            let view = self.position[id as usize] as usize;
-            if !(lo..=hi).contains(&view) {
-                self.set_selected(id, false, changed);
-            }
-        }
-    }
-
-    fn select_range(&mut self, from: usize, to: usize, only: bool, changed: &mut Vec<usize>) {
-        let (lo, hi) = if from <= to { (from, to) } else { (to, from) };
-        if only {
-            self.retain_range(lo, hi, changed);
-        }
-        for view in lo..=hi {
-            self.set_selected(self.order[view], true, changed);
-        }
-    }
-
-    /// Handles a click on the row at `view`, with Finder/Explorer semantics:
-    /// plain click selects one row, command toggles one row, shift selects
-    /// from the anchor (adding to the selection if command is also held).
-    /// Returns the view indices whose selection state changed.
-    pub fn click(&mut self, view: usize, mods: ClickMods) -> Vec<usize> {
+    /// Selects only row `i`, with the cursor on it (`select`).
+    pub fn select(&mut self, i: usize) -> Vec<usize> {
         let mut changed = Vec::new();
-        let id = self.order[view];
-        match (mods.shift, mods.command, self.anchor) {
-            (true, cmd, Some(anchor)) => {
-                self.select_range(self.view_of(anchor), view, !cmd, &mut changed);
-            }
-            (false, true, _) => {
-                let on = !self.selected[id as usize];
-                self.set_selected(id, on, &mut changed);
-                self.anchor = Some(id);
-            }
-            _ => {
-                self.select_range(view, view, true, &mut changed);
-                self.anchor = Some(id);
-            }
+        for j in 0..self.rows.len() {
+            self.set_selected(j, j == i, &mut changed);
         }
-        self.cursor = Some(id);
+        self.anchor = Some(i);
+        self.cursor = Some(i);
         changed
     }
 
-    /// Moves the keyboard cursor by `delta` rows. With `extend`, selects from
-    /// the anchor to the new cursor (shift+arrow); otherwise selects only the
-    /// new cursor row. Returns the new cursor view index and the changed
-    /// view indices.
+    /// Handles a click on row `i`, as GTK's multiple selection does: a
+    /// plain click selects one row, command toggles one row, shift
+    /// selects from the anchor (adding to the selection if command is
+    /// also held). Returns the rows whose selection changed.
+    pub fn click(&mut self, i: usize, mods: ClickMods) -> Vec<usize> {
+        let mut changed = Vec::new();
+        match (mods.shift, mods.command, self.anchor) {
+            (true, cmd, Some(anchor)) => {
+                let (lo, hi) = (anchor.min(i), anchor.max(i));
+                for j in 0..self.rows.len() {
+                    if (lo..=hi).contains(&j) {
+                        self.set_selected(j, true, &mut changed);
+                    } else if !cmd {
+                        self.set_selected(j, false, &mut changed);
+                    }
+                }
+            }
+            (false, true, _) => {
+                let on = !self.selected[i];
+                self.set_selected(i, on, &mut changed);
+                self.anchor = Some(i);
+            }
+            _ => return self.select(i),
+        }
+        self.cursor = Some(i);
+        changed
+    }
+
+    /// Moves the keyboard cursor by `delta` rows. With `extend`, selects
+    /// from the anchor to the new cursor; otherwise only the new cursor's
+    /// row. Returns the new cursor and the rows that changed.
     pub fn move_cursor(&mut self, delta: isize, extend: bool) -> (Option<usize>, Vec<usize>) {
         if self.rows.is_empty() {
             return (None, Vec::new());
         }
         let last = self.rows.len() as isize - 1;
-        let target = match self.cursor() {
-            Some(view) => (view as isize + delta).clamp(0, last) as usize,
+        let target = match self.cursor {
+            Some(c) => (c as isize + delta).clamp(0, last) as usize,
             None => 0,
         };
         let changed = self.click(
@@ -324,111 +351,82 @@ impl ReconTable {
         (Some(target), changed)
     }
 
-    /// Selects every row. Returns the changed view indices.
+    /// Selects every row (`select_all`).
     pub fn select_all(&mut self) -> Vec<usize> {
         let mut changed = Vec::new();
-        for id in 0..self.rows.len() as u32 {
-            self.set_selected(id, true, &mut changed);
+        for i in 0..self.rows.len() {
+            self.set_selected(i, true, &mut changed);
         }
         changed
     }
 
-    /// Sets the direction of every selected row, as the `>` `<` `/` keys do.
-    /// Returns the view indices that changed.
-    pub fn set_direction(&mut self, direction: Direction) -> Vec<usize> {
+    /// Selects no row (`unselect_all`).
+    pub fn deselect_all(&mut self) -> Vec<usize> {
         let mut changed = Vec::new();
-        for (id, row) in self.rows.iter_mut().enumerate() {
-            if self.selected[id] && row.direction != direction {
-                row.direction = direction;
-                changed.push(self.position[id] as usize);
-            }
+        for i in 0..self.rows.len() {
+            self.set_selected(i, false, &mut changed);
         }
         changed
     }
 
-    /// Applies progress updates from the engine. Returns the view indices
-    /// that changed.
-    pub fn apply_progress(&mut self, updates: &[ProgressUpdate]) -> Vec<usize> {
-        updates
-            .iter()
-            .map(|u| {
-                self.rows[u.id as usize].progress = u.progress;
-                self.position[u.id as usize] as usize
-            })
-            .collect()
+    /// `nextInteresting`: the first item after the one selected (or from
+    /// the first, if not exactly one is) that isn't a problem, and, with
+    /// `auto`, is a conflict.
+    pub fn next_interesting(&self, auto: bool) -> Option<usize> {
+        let start = self.current().map_or(0, |i| i + 1);
+        (start..self.rows.len()).find(|&i| {
+            let item = &self.rows[i].item;
+            item.problem.is_none() && (!auto || matches!(item.action, Action::Skip(_)))
+        })
     }
-
-    /// Sorts by `key`. Sorting by the current key again flips the order.
-    pub fn sort_by(&mut self, key: SortKey) {
-        let ascending = match self.sort {
-            Some((k, asc)) if k == key => !asc,
-            _ => true,
-        };
-        self.sort_with(key, ascending);
-    }
-
-    /// Sorts by `key` in the given order.
-    pub fn sort_with(&mut self, key: SortKey, ascending: bool) {
-        let rows = &self.rows;
-        let cmp = |a: &u32, b: &u32| -> Ordering {
-            let (ra, rb) = (&rows[*a as usize], &rows[*b as usize]);
-            let ord = match key {
-                SortKey::Path => Ordering::Equal,
-                SortKey::Status => {
-                    (ra.direction, ra.left, ra.right).cmp(&(rb.direction, rb.left, rb.right))
-                }
-                SortKey::Size => ra.size.cmp(&rb.size),
-            }
-            .then_with(|| ra.path.cmp(&rb.path));
-            if ascending { ord } else { ord.reverse() }
-        };
-        self.order.sort_by(cmp);
-        for (view, &id) in self.order.iter().enumerate() {
-            self.position[id as usize] = view as u32;
-        }
-        self.sort = Some((key, ascending));
-    }
-}
-
-/// One progress update from the (fake) engine.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ProgressUpdate {
-    /// Row id.
-    pub id: u32,
-    /// New progress in `0.0..=1.0`.
-    pub progress: f32,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gemel_ui_api::{Global, Path};
+
+    pub(crate) fn item(path: &str, action: Action) -> ItemView {
+        ItemView {
+            path: Path::<Global>::from_bytes(path.as_bytes()).unwrap(),
+            path_string: path.to_owned(),
+            left: "Created",
+            right: "",
+            action,
+            conflict: matches!(action, Action::Skip(_)),
+            changed_from_default: false,
+            can_diff: false,
+            length: 1,
+            file_type: "file",
+            line: String::new(),
+            details: String::new(),
+            problematic: false,
+            partially_problematic: false,
+            deletion: false,
+            transferred: 0,
+            progress: String::new(),
+            outcome: None,
+            status1: "new file",
+            status2: "        ",
+            shown_path: path.to_owned(),
+            problem: None,
+            skip_reason: None,
+            errors1: Vec::new(),
+            errors2: Vec::new(),
+            props_only: false,
+            favor_changed: None,
+        }
+    }
 
     fn table() -> ReconTable {
-        let row = |path: &str, direction, size| Row {
-            path: path.to_string(),
-            left: ReplicaStatus::Modified,
-            right: ReplicaStatus::Unchanged,
-            direction,
-            size,
-            progress: 0.0,
-        };
+        let mut problem = item("p", Action::Error);
+        problem.problem = Some("no".to_owned());
         ReconTable::new(vec![
-            row("c", Direction::LeftToRight, 1),
-            row("a", Direction::Conflict, 3),
-            row("d", Direction::RightToLeft, 2),
-            row("b", Direction::Conflict, 4),
+            item("a", Action::LtoR(false)),
+            problem,
+            item("c", Action::Skip(false)),
+            item("d", Action::RtoL(true)),
         ])
-    }
-
-    fn paths(t: &ReconTable) -> Vec<&str> {
-        (0..t.len()).map(|v| t.row_at(v).path.as_str()).collect()
-    }
-
-    fn selected_paths(t: &ReconTable) -> Vec<&str> {
-        (0..t.len())
-            .filter(|&v| t.is_selected(v))
-            .map(|v| t.row_at(v).path.as_str())
-            .collect()
     }
 
     const SHIFT: ClickMods = ClickMods {
@@ -441,30 +439,15 @@ mod tests {
     };
 
     #[test]
-    fn sorts_and_toggles_order() {
-        let mut t = table();
-        t.sort_by(SortKey::Path);
-        assert_eq!(paths(&t), ["a", "b", "c", "d"]);
-        t.sort_by(SortKey::Path);
-        assert_eq!(paths(&t), ["d", "c", "b", "a"]);
-        t.sort_by(SortKey::Status);
-        assert_eq!(paths(&t), ["a", "b", "c", "d"]);
-        assert_eq!(t.sort(), Some((SortKey::Status, true)));
-        t.sort_by(SortKey::Size);
-        assert_eq!(paths(&t), ["c", "d", "a", "b"]);
-    }
-
-    #[test]
     fn click_shift_and_command() {
         let mut t = table();
-        t.sort_by(SortKey::Path);
         t.click(0, ClickMods::default());
-        let changed = t.click(2, SHIFT);
-        assert_eq!(selected_paths(&t), ["a", "b", "c"]);
-        assert_eq!(changed, [1, 2]);
+        assert_eq!(t.click(2, SHIFT), [1, 2]);
+        assert_eq!(t.selected(), [0, 1, 2]);
         t.click(1, CMD);
-        assert_eq!(selected_paths(&t), ["a", "c"]);
-        // The anchor moved to "b": shift+cmd adds b..d to the selection.
+        assert_eq!(t.selected(), [0, 2]);
+        assert_eq!(t.current(), None);
+        // The anchor moved to 1: shift+cmd adds 1..=3.
         t.click(
             3,
             ClickMods {
@@ -472,65 +455,75 @@ mod tests {
                 command: true,
             },
         );
-        assert_eq!(selected_paths(&t), ["a", "b", "c", "d"]);
+        assert_eq!(t.selected(), [0, 1, 2, 3]);
         t.click(3, ClickMods::default());
-        assert_eq!(selected_paths(&t), ["d"]);
-        assert_eq!(t.selected_count(), 1);
-    }
-
-    #[test]
-    fn selection_survives_sorting() {
-        let mut t = table();
-        t.sort_by(SortKey::Path);
-        t.click(0, ClickMods::default());
-        t.click(1, SHIFT);
-        t.sort_by(SortKey::Path);
-        assert_eq!(selected_paths(&t), ["b", "a"]);
-        assert_eq!(t.cursor(), Some(2));
-    }
-
-    #[test]
-    fn direction_keys_apply_to_selection() {
-        let mut t = table();
-        t.sort_by(SortKey::Path);
-        t.click(0, ClickMods::default());
-        t.click(1, SHIFT);
-        let changed = t.set_direction(Direction::from_key(">").unwrap());
-        assert_eq!(changed.len(), 2);
-        assert!((0..2).all(|v| t.row_at(v).direction == Direction::LeftToRight));
-        assert_eq!(t.row_at(3).direction, Direction::RightToLeft);
-        assert!(t.set_direction(Direction::LeftToRight).is_empty());
+        assert_eq!((t.selected(), t.current()), (vec![3], Some(3)));
     }
 
     #[test]
     fn cursor_moves_and_extends() {
         let mut t = table();
-        let (c, _) = t.move_cursor(1, false);
-        assert_eq!(c, Some(0));
-        let (c, _) = t.move_cursor(2, true);
-        assert_eq!(c, Some(2));
+        assert_eq!(t.move_cursor(1, false).0, Some(0));
+        assert_eq!(t.move_cursor(2, true).0, Some(2));
         assert_eq!(t.selected_count(), 3);
-        let (c, _) = t.move_cursor(10, false);
-        assert_eq!(c, Some(3));
-        assert_eq!(t.selected_count(), 1);
+        assert_eq!(t.move_cursor(10, false).0, Some(3));
+        assert_eq!(t.selected(), [3]);
+        assert_eq!(t.deselect_all(), [3]);
+        assert_eq!(t.select_all().len(), 4);
     }
 
     #[test]
-    fn progress_reports_view_index() {
+    fn next_interesting_skips_problems_and_with_auto_all_but_conflicts() {
         let mut t = table();
-        t.sort_by(SortKey::Path);
-        let changed = t.apply_progress(&[ProgressUpdate {
-            id: 0,
-            progress: 0.5,
-        }]);
-        assert_eq!(changed, [2]);
-        assert_eq!(t.row_at(2).progress, 0.5);
+        assert_eq!(t.next_interesting(false), Some(0));
+        assert_eq!(t.next_interesting(true), Some(2));
+        t.select(0);
+        assert_eq!(t.next_interesting(false), Some(2));
+        t.select(3);
+        assert_eq!(t.next_interesting(false), None);
     }
 
     #[test]
-    fn sizes() {
-        assert_eq!(human_size(512), "512 B");
-        assert_eq!(human_size(1536), "1.5 KiB");
-        assert_eq!(human_size(5 * 1024 * 1024), "5.0 MiB");
+    fn replacing_keeps_the_selection_or_not() {
+        let mut t = table();
+        t.select(3);
+        t.replace(
+            vec![item("a", Action::Merge), item("b", Action::Merge)],
+            true,
+        );
+        assert_eq!((t.selected(), t.cursor()), (vec![], None));
+        t.select(1);
+        t.replace(
+            vec![item("a", Action::Merge), item("b", Action::Merge)],
+            true,
+        );
+        assert_eq!(t.selected(), [1]);
+        t.replace(
+            vec![item("a", Action::Merge), item("b", Action::Merge)],
+            false,
+        );
+        assert!(t.selected().is_empty());
+    }
+
+    #[test]
+    fn what_a_row_shows() {
+        let mut r = Row::new(item("dir/f", Action::RtoL(true)));
+        assert_eq!(r.arrow(), Arrow::Left { partial: true });
+        r.progress = " 45%".to_owned();
+        assert_eq!(r.status_text(), " 45%");
+        assert_eq!(
+            r.spoken(),
+            "dir/f, left new file, right to left, partially, right unchanged, 45%"
+        );
+        r.item.outcome = Some(Outcome::Failed("disk full".to_owned()));
+        assert_eq!(r.done(), Done::Failed);
+        assert_eq!(r.status_text(), "");
+        assert!(
+            r.path()
+                .ends_with("[failed: click on this line for details]")
+        );
+        assert!(r.has_details() && !r.action_possible());
+        let skipped = Row::new(item("s", Action::Skip(false)));
+        assert_eq!(skipped.done(), Done::No);
     }
 }

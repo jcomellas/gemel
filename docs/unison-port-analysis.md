@@ -296,7 +296,7 @@ The sort frame is mostly the shared Rust sort of 50k rows: the same code in both
 - `ui/app.slint` is the spike's window, titled "gemel".
 - `src/recon_view.rs` holds the recon view model: rows, sorting and the multi-selection. Selection stays in the GUI. The item types are placeholders until `gemel-ui-api` defines the reconciliation items, and sorting is due to move to `gemel_engine::sortri`.
 - `src/fake_engine.rs` holds the spike's fake feed. It is the GUI's only data source until the engine exists, and must not depend on `gemel-engine` directly.
-- The bench and startup-timing flags were dropped. `--rows` and `--rate` remain as development flags.
+- The bench and startup-timing flags were dropped. `--rows` and `--rate` remain as development flags. (In milestone 4's phase 1a, the session replaced the fake feed, and both flags went.)
 - The input and accessibility test came across unchanged.
 - The egui spike and the shared spike crate were deleted; they remain in `d33970e`.
 - Verified on macOS and in the Linux image (arm64): fmt, workspace clippy `-D warnings`, tests and `check-no-gui-deps.sh` pass. Clippy also passes for `x86_64-pc-windows-msvc`. The window renders as in the spike, both on macOS (checked from a screenshot) and under Xvfb.
