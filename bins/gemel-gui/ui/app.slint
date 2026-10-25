@@ -28,6 +28,19 @@ export struct RowData {
     spoken: string,
 }
 
+// A profile with a key (`profileKeymap`).
+export struct ProfileKey {
+    key: int,
+    name: string,
+}
+
+// A line of a diff, and how to colour it: 0 plain, 1 added, 2 removed,
+// 3 a location.
+export struct DiffLine {
+    text: string,
+    kind: int,
+}
+
 // An item the summary box lists (`summaryBox`).
 export struct SummaryEntry {
     path: string,
@@ -127,6 +140,14 @@ export component AppWindow inherits Window {
     in property <bool> go-enabled;
     in property <bool> detail-enabled;
     in property <bool> rescan-enabled;
+    in property <bool> diff-enabled;
+    // The Expert menu, shown with `expert`, and its check marks.
+    in property <bool> expert;
+    in property <bool> debug-all;
+    in property <bool> debug-verbose;
+    in property <bool> debug-update;
+    // The profiles bound to keys.
+    in property <[ProfileKey]> profile-keys;
     in property <bool> stop-enabled;
     // The overall progress (`displayGlobalProgress`), pulsing while
     // updates are detected.
@@ -162,6 +183,13 @@ export component AppWindow inherits Window {
     callback select-all();
     callback deselect-all();
     callback details();
+    callback diff();
+    // "path", "ext" or "name".
+    callback ignore(kind: string);
+    // "name", "size", "new-first" or "default".
+    callback sort(kind: string);
+    callback debug(module: string, on: bool);
+    callback select-profile(key: int);
     callback go();
     callback stop();
     callback rescan();
@@ -214,6 +242,12 @@ export component AppWindow inherits Window {
                 activated => { root.recheck(); }
             }
             MenuSeparator { }
+            for p in root.profile-keys: MenuItem {
+                title: "Select profile " + p.name + "  (" + p.key + ")";
+                enabled: root.rescan-enabled;
+                activated => { root.select-profile(p.key); }
+            }
+            if root.profile-keys.length > 0: MenuSeparator { }
             MenuItem {
                 title: "Show Statistics";
                 activated => { root.show-statistics(); }
@@ -305,9 +339,76 @@ export component AppWindow inherits Window {
             }
             MenuSeparator { }
             MenuItem {
+                title: "Show Diffs";
+                enabled: root.diff-enabled;
+                activated => { root.diff(); }
+            }
+            MenuItem {
                 title: "Detailed Information";
                 enabled: root.detail-enabled;
                 activated => { root.details(); }
+            }
+        }
+        Menu {
+            title: "Ignore";
+            MenuItem {
+                title: "Permanently Ignore This Path";
+                enabled: root.actions-enabled;
+                activated => { root.ignore("path"); }
+            }
+            MenuItem {
+                title: "Permanently Ignore Files with this Extension";
+                enabled: root.actions-enabled;
+                activated => { root.ignore("ext"); }
+            }
+            MenuItem {
+                title: "Permanently Ignore Files with this Name (in any Dir)";
+                enabled: root.actions-enabled;
+                activated => { root.ignore("name"); }
+            }
+        }
+        Menu {
+            title: "Sort";
+            MenuItem {
+                title: "Sort by Name";
+                enabled: root.rescan-enabled;
+                activated => { root.sort("name"); }
+            }
+            MenuItem {
+                title: "Sort by Size";
+                enabled: root.rescan-enabled;
+                activated => { root.sort("size"); }
+            }
+            MenuItem {
+                title: "Sort New Entries First (toggle)";
+                enabled: root.rescan-enabled;
+                activated => { root.sort("new-first"); }
+            }
+            MenuItem {
+                title: "Default Ordering";
+                enabled: root.rescan-enabled;
+                activated => { root.sort("default"); }
+            }
+        }
+        if root.expert: Menu {
+            title: "Expert";
+            MenuItem {
+                title: "Debug 'all'";
+                checkable: true;
+                checked: root.debug-all;
+                activated => { root.debug("all", !root.debug-all); }
+            }
+            MenuItem {
+                title: "Debug 'verbose'";
+                checkable: true;
+                checked: root.debug-verbose;
+                activated => { root.debug("verbose", !root.debug-verbose); }
+            }
+            MenuItem {
+                title: "Debug 'update'";
+                checkable: true;
+                checked: root.debug-update;
+                activated => { root.debug("update", !root.debug-update); }
             }
         }
     }
@@ -338,6 +439,11 @@ export component AppWindow inherits Window {
                 clicked => { root.action("merge"); table-scope.focus(); }
             }
             Rectangle { width: 8px; }
+            Button {
+                text: "Diff";
+                enabled: root.diff-enabled;
+                clicked => { root.diff(); }
+            }
             Button {
                 text: "Details";
                 enabled: root.detail-enabled;
@@ -429,6 +535,26 @@ export component AppWindow inherits Window {
                 }
                 if event.text == "i" {
                     root.details();
+                    return accept;
+                }
+                if event.text == "d" {
+                    root.diff();
+                    return accept;
+                }
+                if event.text == "I" {
+                    root.ignore("path");
+                    return accept;
+                }
+                if event.text == "E" {
+                    root.ignore("ext");
+                    return accept;
+                }
+                if event.text == "N" {
+                    root.ignore("name");
+                    return accept;
+                }
+                if event.text >= "0" && event.text <= "9" && event.text.character-count == 1 {
+                    root.select-profile(event.text.to-float());
                     return accept;
                 }
                 if event.text == "g" {
@@ -831,6 +957,43 @@ export component StatsWindow inherits Window {
                     horizontal-alignment: right;
                     accessible-label: (r == 0 ? "Reception rate" : r == 1 ? "Data received" : "File data written")
                         + ", " + (c == 0 ? "client" : c == 1 ? "server" : "total");
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            Button {
+                text: "Close";
+                clicked => { root.close(); }
+            }
+        }
+    }
+}
+
+// A diff (`diffCmd`'s `messageBox`), a window of its own: added lines
+// green, removed ones red, locations cyan.
+export component DiffWindow inherits Window {
+    in property <string> window-title;
+    title: root.window-title;
+    preferred-width: 640px;
+    preferred-height: 420px;
+
+    in property <[DiffLine]> lines;
+    in property <string> mono-font: "Menlo";
+
+    callback close();
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 8px;
+        ScrollView {
+            VerticalLayout {
+                alignment: start;
+                for line in root.lines: Text {
+                    text: line.text;
+                    font-family: root.mono-font;
+                    font-weight: line.kind == 3 ? 700 : 400;
+                    color: line.kind == 1 ? #00a000 : line.kind == 2 ? #d00000 : line.kind == 3 ? #008b8b : Palette.foreground;
                 }
             }
         }

@@ -13,8 +13,7 @@
 //!
 //! What `uigtk3` does that isn't here yet (milestone 4's plan): the
 //! profile manager, so a profile must be named on the command line (or
-//! roots given); diffs, ignoring, sorting, the Expert menu and the
-//! profile keys; ssh's prompts.
+//! roots given); the Help menu; ssh's prompts.
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 
@@ -33,8 +32,8 @@ use std::time::{Duration, Instant};
 use gemel_ui_api::clroot::{self, Clroot};
 use gemel_ui_api::exit_code::ExitCode;
 use gemel_ui_api::session::{
-    self, Command, Config, Event, Favor, ItemView, LogKind, Overrides, Progress, Question, Reply,
-    RootNames, SetAction, Settings, Summary, Traffic, Updates,
+    self, Command, Config, Event, Favor, IgnoreKind, ItemView, LogKind, Overrides, Progress,
+    Question, Reply, RootNames, SetAction, Settings, SortKind, Summary, Traffic, Updates,
 };
 use gemel_ui_api::{MY_NAME, Subpaths, Trace, padto};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
@@ -49,7 +48,7 @@ pub mod ui {
     slint::include_modules!();
 }
 
-use ui::{AppWindow, RowData, StatsWindow, SummaryEntry};
+use ui::{AppWindow, DiffLine, DiffWindow, ProfileKey, RowData, StatsWindow, SummaryEntry};
 
 /// How the window starts its session.
 pub struct Startup {
@@ -247,6 +246,14 @@ struct State {
     rescan: bool,
     /// `grStop`: a sync is running.
     stop: bool,
+    /// `getLock`'s: a diff, an ignore or a sort is waiting for its reply,
+    /// and nothing else may be done meanwhile (the items' indices may be
+    /// about to change).
+    locked: bool,
+    /// The profile to load once the profiles have been scanned.
+    pending_profile: Option<String>,
+    /// The profiles bound to the keys 0 to 9 (`profileKeymap`).
+    keymap: [Option<String>; 10],
     /// The profile is being loaded again: no "contacting server" message
     /// (`loadProfile`'s `reload`).
     reloading: bool,
@@ -292,6 +299,11 @@ pub struct App {
     stats: RefCell<Stats>,
     stats_timer: slint::Timer,
     stats_window: StatsWindow,
+    /// The diffs shown, each a window of its own.
+    diffs: RefCell<Vec<DiffWindow>>,
+    /// The Unison directory, where the profiles are; none without a
+    /// session.
+    unison_dir: Option<PathBuf>,
     /// This, for the timers.
     weak: RefCell<std::rc::Weak<App>>,
 }
@@ -305,6 +317,7 @@ impl App {
         trace.send_log_msgs_to_stderr = false;
         trace.set_status_formatter(Some(Box::new(format_status)));
         let traffic = Arc::new(Traffic::default());
+        let unison_dir = startup.unison_dir.clone();
         let session = session::spawn(Config {
             unison_dir: startup.unison_dir,
             args: startup.args,
@@ -318,7 +331,7 @@ impl App {
             traffic: Some(traffic.clone()),
         })
         .map_err(|e| slint::PlatformError::Other(format!("Can't start the session: {e}")))?;
-        let app = App::create(Some(session), traffic)?;
+        let app = App::create(Some(session), traffic, Some(unison_dir))?;
         app.send(Command::Start);
         Ok(app)
     }
@@ -327,12 +340,13 @@ impl App {
     /// [`App::handle`], and the commands it would send are kept
     /// ([`App::sent`]). For tests, and fake sources of events.
     pub fn detached() -> Result<Rc<Self>, slint::PlatformError> {
-        App::create(None, Arc::default())
+        App::create(None, Arc::default(), None)
     }
 
     fn create(
         session: Option<session::Handle>,
         traffic: Arc<Traffic>,
+        unison_dir: Option<PathBuf>,
     ) -> Result<Rc<Self>, slint::PlatformError> {
         let ui = AppWindow::new()?;
         let model = Rc::new(RowsModel {
@@ -361,6 +375,8 @@ impl App {
             stats: RefCell::new(Stats::new(traffic)),
             stats_timer: slint::Timer::default(),
             stats_window: StatsWindow::new()?,
+            diffs: RefCell::default(),
+            unison_dir,
             weak: RefCell::default(),
         });
         *app.weak.borrow_mut() = Rc::downgrade(&app);
@@ -387,7 +403,13 @@ impl App {
 
     /// Working: the window is waiting for the session.
     pub fn busy(&self) -> bool {
-        self.state.borrow().busy
+        let s = self.state.borrow();
+        s.busy || s.locked
+    }
+
+    /// The diffs shown, each in a window of its own.
+    pub fn diff_windows(&self) -> std::cell::Ref<'_, Vec<DiffWindow>> {
+        self.diffs.borrow()
     }
 
     /// The first items have been shown.
@@ -465,22 +487,28 @@ impl App {
     fn refresh_groups(&self) {
         let (busy, go, rescan, stop) = {
             let s = self.state.borrow();
-            (s.busy, s.go, s.rescan, s.stop)
+            (s.busy || s.locked, s.go, s.rescan, s.stop)
         };
-        let (actions, detail) = if busy {
-            (false, false)
+        let (actions, detail, diff) = if busy {
+            (false, false, false)
         } else {
             let t = self.model.table.borrow();
-            match t.current() {
+            match t.current().map(|i| t.row(i)) {
                 None => (
                     t.selected().into_iter().any(|i| t.row(i).action_possible()),
                     false,
+                    false,
                 ),
-                Some(i) => (t.row(i).action_possible(), t.row(i).has_details()),
+                Some(r) => (
+                    r.action_possible(),
+                    r.has_details(),
+                    r.action_possible() && r.item.both_files,
+                ),
             }
         };
         self.ui.set_actions_enabled(actions);
         self.ui.set_detail_enabled(detail);
+        self.ui.set_diff_enabled(diff);
         self.ui.set_go_enabled(go && !busy);
         self.ui.set_rescan_enabled(rescan && !busy);
         self.ui.set_stop_enabled(stop);
@@ -711,7 +739,12 @@ impl App {
     /// Takes an event from the session.
     pub fn handle(&self, e: Event) {
         match e {
-            Event::Started(Some(profile)) => self.load_profile(&profile),
+            // `startGUI`: `updateProfileKeyMenu`, then `loadAndRunProfile`.
+            Event::Started(Some(profile)) => {
+                self.state.borrow_mut().pending_profile = Some(profile);
+                self.send(Command::ScanProfiles);
+            }
+            Event::Profiles(profiles) => self.profiles(&profiles),
             Event::Started(None) => self.error(
                 "Profiles can't be chosen in the window yet: \
                  name a profile, or two roots, on the command line.",
@@ -722,6 +755,7 @@ impl App {
                     s.settings = Some(settings);
                     s.after_configure.take()
                 };
+                self.update_expert();
                 match after {
                     // `loadProfile`'s `connectRoots`.
                     None => self.send(Command::Connect),
@@ -743,7 +777,7 @@ impl App {
                 };
                 self.update_from_profile();
                 if proceed {
-                    self.configure(true, AfterConfigure::Detect);
+                    self.configure_batch(true, AfterConfigure::Detect);
                 } else {
                     self.detect(None);
                 }
@@ -764,7 +798,12 @@ impl App {
             Event::Ask(q) => self.ask(q),
             Event::Updates(u) => self.detected(u),
             Event::Item(i, item) => self.set_item(i, item),
-            Event::Items { items, .. } => self.display_main(items),
+            // An ignore's or a sort's reply (`ignoreAndRedisplay`,
+            // `sortAndRedisplay`).
+            Event::Items { items, .. } => {
+                self.state.borrow_mut().locked = false;
+                self.display_main(items);
+            }
             Event::Progress(p) => self.show_progress(&p),
             Event::Synchronized(summary) => {
                 // `commitUpdates`.
@@ -793,7 +832,8 @@ impl App {
                 }
             }
             Event::ProfileUnchanged(unchanged) => self.reloaded(unchanged),
-            Event::Profiles(_) | Event::Changed | Event::Diff { .. } | Event::Interrupted => {}
+            Event::Diff { shown, errors } => self.diffs_shown(shown, &errors),
+            Event::Changed | Event::Interrupted => {}
             Event::Error(msg) => self.error(&msg),
             // The user chose to stop at a warning (`doExit`).
             Event::Exit(_) => self.quit(0),
@@ -837,6 +877,7 @@ impl App {
             s.after_configure = None;
             s.after_commit = None;
             s.busy = false;
+            s.locked = false;
             s.stop = false;
             s.reloading = false;
             s.proceed = false;
@@ -995,7 +1036,7 @@ impl App {
         }
         match u.dangerous_message {
             Some(msg) if confirm => {
-                self.configure(false, AfterConfigure::Nothing);
+                self.configure_batch(false, AfterConfigure::Nothing);
                 self.push_dialog(Dialog::message(
                     "Warning",
                     &msg,
@@ -1006,21 +1047,217 @@ impl App {
             }
             // "Detect Updates and Proceed": once, without waiting.
             _ if batch && !empty => {
-                self.configure(false, AfterConfigure::Synchronize);
+                self.configure_batch(false, AfterConfigure::Synchronize);
                 self.set_busy(true);
             }
-            _ if batch => self.configure(false, AfterConfigure::Nothing),
+            _ if batch => self.configure_batch(false, AfterConfigure::Nothing),
             _ => {}
         }
     }
 
-    /// `Prefs.set Globals.batch`, then `then`.
-    fn configure(&self, batch: bool, then: AfterConfigure) {
+    /// Sets `o`, then `then`: every `Configure` says what follows, since
+    /// its reply is `LoadProfile`'s too.
+    fn configure(&self, o: Overrides, then: AfterConfigure) {
         self.state.borrow_mut().after_configure = Some(then);
-        self.send(Command::Configure(Overrides {
-            batch: Some(batch),
-            ..Overrides::default()
-        }));
+        self.send(Command::Configure(o));
+    }
+
+    /// `Prefs.set Globals.batch`, then `then`.
+    fn configure_batch(&self, batch: bool, then: AfterConfigure) {
+        self.configure(
+            Overrides {
+                batch: Some(batch),
+                ..Overrides::default()
+            },
+            then,
+        );
+    }
+
+    // ---- The profile keys and the Expert menu ----
+
+    /// `updateProfileKeyMenu`: the profiles bound to keys; then the
+    /// profile the command line names is loaded.
+    fn profiles(&self, profiles: &[(String, gemel_ui_api::uicommon::startup::ProfileInfo)]) {
+        let mut keymap: [Option<String>; 10] = Default::default();
+        for (name, info) in profiles {
+            // The session has checked that keys are single digits, and
+            // each bound once.
+            if let Some(k) = info.key.as_deref().and_then(|k| k.parse::<usize>().ok())
+                && let Some(slot) = keymap.get_mut(k)
+            {
+                *slot = Some(name.clone());
+            }
+        }
+        let keys: Vec<ProfileKey> = (keymap.iter().enumerate())
+            .filter_map(|(k, n)| {
+                n.as_ref().map(|n| ProfileKey {
+                    key: k as i32,
+                    name: n.as_str().into(),
+                })
+            })
+            .collect();
+        self.ui.set_profile_keys(ModelRc::new(VecModel::from(keys)));
+        let pending = {
+            let mut s = self.state.borrow_mut();
+            s.keymap = keymap;
+            s.pending_profile.take()
+        };
+        if let Some(p) = pending {
+            self.load_profile(&p);
+        }
+    }
+
+    /// A profile key (`fastProf`): loads the profile bound to it, if its
+    /// file is still there.
+    fn select_profile(&self, key: usize) {
+        let Some(name) = self.state.borrow().keymap.get(key).cloned().flatten() else {
+            return;
+        };
+        // `Prefs.profilePathname`: the name as it is, else with `.prf`.
+        let exists = self.unison_dir.as_ref().is_none_or(|dir| {
+            let f = dir.join(&name);
+            f.exists() || dir.join(format!("{name}.prf")).exists()
+        });
+        if exists {
+            self.status(&format!("Loading profile {name}"));
+            self.load_profile(&name);
+        } else {
+            self.status(&format!("Profile {name} not found"));
+        }
+    }
+
+    /// The Expert menu, shown with `expert`, and its check marks
+    /// (`toggleExpertMenu`, `addDebugToggle`).
+    fn update_expert(&self) {
+        let s = self.state.borrow();
+        let Some(settings) = &s.settings else {
+            return;
+        };
+        let on = |m: &str| gemel_ui_api::debugging(&settings.debug, m);
+        self.ui.set_expert(settings.expert);
+        self.ui.set_debug_all(on("all"));
+        self.ui.set_debug_verbose(on("verbose"));
+        self.ui.set_debug_update(on("update"));
+    }
+
+    /// `Trace.enable`: debugging of `module` on or off.
+    fn debug(&self, module: &str, on: bool) {
+        let Some(mut debug) = self
+            .state
+            .borrow()
+            .settings
+            .as_ref()
+            .map(|s| s.debug.clone())
+        else {
+            return;
+        };
+        if on {
+            debug.insert(0, module.to_owned());
+        } else {
+            debug.retain(|m| m != module);
+        }
+        self.configure(
+            Overrides {
+                debug: Some(debug),
+                ..Overrides::default()
+            },
+            AfterConfigure::Nothing,
+        );
+    }
+
+    // ---- Diffs, ignoring and sorting ----
+
+    /// `getLock`: whether something else is going on (and if so, says so).
+    fn locked(&self) -> bool {
+        let busy = self.busy();
+        if busy {
+            self.status("Synchronizer is busy, please wait..");
+        }
+        busy
+    }
+
+    /// Takes `getLock` until the session replies.
+    fn lock(&self) {
+        self.state.borrow_mut().locked = true;
+        self.refresh_groups();
+    }
+
+    /// `diffCmd`: the diffs of the item selected.
+    fn diff(&self) {
+        let current = {
+            let t = self.model.table.borrow();
+            t.current()
+                .filter(|&i| t.row(i).action_possible() && t.row(i).item.both_files)
+        };
+        let Some(i) = current else {
+            return;
+        };
+        if self.locked() {
+            return;
+        }
+        self.lock();
+        self.start_stats();
+        self.send(Command::Diff(i));
+    }
+
+    /// The rest of `diffCmd`: each diff in a window of its own, and why
+    /// some couldn't be shown in the status line.
+    fn diffs_shown(&self, shown: Vec<(String, String)>, errors: &[String]) {
+        self.state.borrow_mut().locked = false;
+        for e in errors {
+            self.status(e);
+        }
+        for (title, text) in shown {
+            let Ok(w) = DiffWindow::new() else {
+                continue;
+            };
+            w.set_window_title(title.into());
+            w.set_mono_font(self.ui.get_mono_font());
+            let lines: Vec<DiffLine> = text
+                .lines()
+                .map(|l| DiffLine {
+                    text: l.into(),
+                    kind: match l.as_bytes().first() {
+                        Some(b'+') => 1,
+                        Some(b'-') => 2,
+                        Some(b'@') => 3,
+                        _ => 0,
+                    },
+                })
+                .collect();
+            w.set_lines(ModelRc::new(VecModel::from(lines)));
+            let weak = w.as_weak();
+            w.on_close(move || {
+                if let Some(w) = weak.upgrade() {
+                    let _ = w.hide();
+                }
+            });
+            let _ = w.show();
+            self.diffs.borrow_mut().push(w);
+        }
+        self.stop_stats();
+        self.display_global_progress(0., f64::NAN, "");
+        self.refresh_groups();
+    }
+
+    /// `addRegExpByPath`: ignores the paths, extensions or names of the
+    /// items selected, all of them.
+    fn ignore(&self, kind: IgnoreKind) {
+        let selected = self.model.table.borrow().selected();
+        if selected.is_empty() || self.locked() {
+            return;
+        }
+        self.lock();
+        self.send(Command::Ignore(selected, kind));
+    }
+
+    /// The Sort menu (`Sortri`, then `sortAndRedisplay`).
+    fn sort(&self, kind: SortKind) {
+        if self.locked() {
+            return;
+        }
+        self.lock();
+        self.send(Command::Sort(kind));
     }
 
     /// `displayMain`: shows `items`, keeping the rows selected, or
@@ -1053,7 +1290,7 @@ impl App {
     /// `doAction`: `a` on the item selected, then on to the next
     /// interesting one; or on every item selected.
     fn action(&self, a: SetAction) {
-        if self.state.borrow().busy {
+        if self.busy() {
             return;
         }
         let (current, selected) = {
@@ -1120,7 +1357,7 @@ impl App {
 
     /// `synchronize`.
     fn synchronize(&self) {
-        if self.state.borrow().busy {
+        if self.busy() {
             return;
         }
         if self.model.table.borrow().is_empty() {
@@ -1305,7 +1542,7 @@ impl App {
     /// Updates and Proceed (Without Waiting)", which syncs once the
     /// updates are found.
     fn rescan(&self, proceed: bool) {
-        if self.state.borrow().busy {
+        if self.busy() {
             return self.status("Synchronizer is busy, please wait..");
         }
         self.clear_main_window();
@@ -1336,7 +1573,7 @@ impl App {
     /// "Recheck Unsynchronized Items": detects updates in the paths of the
     /// items not propagated, failed, skipped or with a problem only.
     fn recheck(&self) {
-        if self.state.borrow().busy {
+        if self.busy() {
             return self.status("Synchronizer is busy, please wait..");
         }
         let paths = {
@@ -1372,7 +1609,7 @@ impl App {
         if asking {
             return;
         }
-        if !self.state.borrow().busy {
+        if !self.busy() {
             return self.quit(0);
         }
         self.push_dialog(Dialog::message(
@@ -1405,6 +1642,9 @@ impl App {
         }
         self.stats_timer.stop();
         let _ = self.stats_window.hide();
+        for w in self.diffs.borrow().iter() {
+            let _ = w.hide();
+        }
         let _ = self.ui.hide();
         let _ = slint::quit_event_loop();
     }
@@ -1493,6 +1733,54 @@ impl App {
                 let changed = s.model.table.borrow_mut().deselect_all();
                 s.model.changed(changed);
                 s.update_details();
+            })
+        });
+        let w = with.clone();
+        ui.on_diff(move || {
+            w(&|s| {
+                if s.ui.get_dialog() == 0 && s.ui.get_diff_enabled() {
+                    s.diff();
+                }
+            })
+        });
+        let w = with.clone();
+        ui.on_ignore(move |kind| {
+            w(&|s| {
+                if s.ui.get_dialog() != 0 {
+                    return;
+                }
+                if !s.ui.get_actions_enabled() {
+                    s.locked();
+                    return;
+                }
+                s.ignore(match kind.as_str() {
+                    "ext" => IgnoreKind::Ext,
+                    "name" => IgnoreKind::Name,
+                    _ => IgnoreKind::Path,
+                });
+            })
+        });
+        let w = with.clone();
+        ui.on_sort(move |kind| {
+            w(&|s| {
+                if s.ui.get_dialog() == 0 && s.ui.get_rescan_enabled() {
+                    s.sort(match kind.as_str() {
+                        "size" => SortKind::Size,
+                        "new-first" => SortKind::NewFirst,
+                        "default" => SortKind::Default,
+                        _ => SortKind::Name,
+                    });
+                }
+            })
+        });
+        let w = with.clone();
+        ui.on_debug(move |module, on| w(&|s| s.debug(&module, on)));
+        let w = with.clone();
+        ui.on_select_profile(move |key| {
+            w(&|s| {
+                if s.ui.get_dialog() == 0 && s.ui.get_rescan_enabled() {
+                    s.select_profile(key as usize);
+                }
             })
         });
         let w = with.clone();
