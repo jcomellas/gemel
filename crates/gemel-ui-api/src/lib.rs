@@ -11,6 +11,15 @@ pub mod exit_code;
 pub mod session;
 pub mod uicommon;
 
+// What a frontend needs of the crates below, so that it depends on this
+// one alone.
+pub use gemel_base::clroot;
+pub use gemel_base::path::{Global, Path};
+pub use gemel_base::trace::{StatusFormatter, Trace};
+pub use gemel_base::util::{MY_NAME, MY_VERSION, padto};
+pub use gemel_engine::update::Subpaths;
+pub use gemel_fs::os::unison_dir;
+
 use gemel_base::features::Features;
 use gemel_base::prefs::Prefs;
 use gemel_base::util::Error;
