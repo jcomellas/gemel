@@ -9,8 +9,10 @@
 //! `copy_file_range` and `sendfile64` on Linux, and for the text interface
 //! the terminal's modes (`tcgetattr`/`tcsetattr`, the Windows console's)
 //! and catching signals (`sigaction`, `SetConsoleCtrlHandler`), and for
-//! the file watcher, Windows' long path names (`GetLongPathNameW`), and
-//! for sockets `getaddrinfo`.
+//! the file watcher, Windows' long path names (`GetLongPathNameW`), for
+//! sockets `getaddrinfo`, and for ssh under a pseudo-terminal `openpty`,
+//! `fcntl` and the child's session (`setsid`, `ioctl(TIOCSCTTY)`, its
+//! terminal's modes), and sending a child `SIGTERM`.
 //!
 //! Not ported yet: AppleDouble files (resource forks on volumes without
 //! them), reading and setting xattrs and ACLs, and block cloning on
@@ -24,6 +26,8 @@ pub mod net;
 pub mod os;
 pub mod osx;
 pub mod props;
+#[cfg(unix)]
+pub mod pty;
 pub mod reflink;
 pub mod signal;
 pub mod system;
