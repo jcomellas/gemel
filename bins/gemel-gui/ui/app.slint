@@ -158,7 +158,7 @@ export component AppWindow inherits Window {
     in property <[SummaryEntry]> summary-entries;
 
     // The dialog shown, if any: 0 none, 1 a message, 2 the first root,
-    // 3 the second root, 4 the summary.
+    // 3 the second root, 4 the summary, 5 ssh's password.
     in property <int> dialog;
     in property <string> dialog-title;
     in property <string> dialog-message;
@@ -173,6 +173,11 @@ export component AppWindow inherits Window {
     in-out property <string> root-user;
     in-out property <string> root-port;
     in property <string> root-error;
+    // The password dialog's root, its entry, and whether it is still
+    // asked for.
+    in property <string> password-root;
+    in-out property <string> password-text;
+    in property <bool> password-editable;
 
     callback row-clicked(index: int, shift: bool, command: bool);
     callback move-cursor(delta: int, extend: bool);
@@ -821,6 +826,47 @@ export component AppWindow inherits Window {
                 primary: true;
                 clicked => { root.dialog-done(true); }
                 init => { self.focus(); }
+            }
+        }
+    }
+
+    // What ssh prints at its terminal, and the answer
+    // (`createPasswordDialog`): Quit ends the program.
+    if root.dialog == 5: Card {
+        title: root.dialog-title;
+        escape => { root.dialog-done(false); }
+        Text {
+            text: "Connecting to '" + root.password-root + "'...";
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+        ScrollView {
+            min-height: 40px;
+            preferred-height: min(ssh-text.preferred-height + 8px, 240px);
+            ssh-text := Text {
+                text: root.dialog-message;
+                wrap: word-wrap;
+                accessible-label: "Message";
+            }
+        }
+        if root.password-editable: LineEdit {
+            input-type: password;
+            text <=> root.password-text;
+            accessible-label: "Password";
+            accepted => { root.dialog-done(true); }
+            init => { self.focus(); }
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "Quit";
+                clicked => { root.dialog-done(false); }
+            }
+            Button {
+                text: "OK";
+                primary: true;
+                clicked => { root.dialog-done(true); }
             }
         }
     }
