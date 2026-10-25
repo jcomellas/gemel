@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 2b, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 2c, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -316,6 +316,22 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **A leak the harness found:** a registered connection's close handler held the connection, which holds its handlers. When a session ended in a process that goes on, the connection and its transport were never freed, and an ssh server never saw its input end. The handler holds a `WeakConnection` now, and a test checks that a client lets go of its connections.
 - **Window tests on Unix:** a shim asks for a password at its terminal, then runs `gemel-gui -server`. A wrong password is asked again, then the right one connects; and Quit.
 - **Left for 2c:** ConPTY on Windows.
+
+**Notes (phase 2c, 2026-10-25):**
+- **ConPTY** is in `gemel-fs` (`conpty.rs`; `pty.c`'s `win_openpty`, `win_closepty` and `w_create_process_pty`). Rust's `CommandExt::raw_attribute` is still unstable, so ssh is started with `CreateProcessW` directly. Its attributes:
+  - the pseudo-console, 80×25, on two pipes of its own (read-write pipes deadlock with one);
+  - standard input and output on pipes, which tokio wraps;
+  - standard error null, as OCaml has it, so that ssh built for Cygwin or MSYS2 finds its terminal;
+  - our priority.
+
+  The program is found with `SearchPathW`. The command line quotes arguments that have a space or a quote as OCaml's `Filename.quote` does (`make_cmdline`), trailing backslashes after the closing quote included. windows-sys gains `Win32_Security` and `Win32_System_Pipes`.
+- **`terminal::create_session`** returns the session's pieces: its terminal, standard input and output, and a process that, on Windows, isn't tokio's.
+  - The console closes with the session, while its output is still being read, since closing it can wait for that.
+  - The process is ended half a second on, as `safe_waitpid` does on Windows.
+  - Without a pseudo-console, ssh runs as a plain process.
+  - `win_alloc_console` isn't ported: gemel-gui is a console program.
+- **Tests:** the terminal tests run on Windows too, with a batch file that asks at the console (`set /p ... <CON >CON`). A pseudo-console may draw the screen again, so there the prompt may show more than twice. The GUI's scenarios over ssh run the oracle's shim on a pseudo-console on Windows.
+- **Not checked yet:** whether CI's Windows runner allows ConPTY, and whether the shim's console input ends a line with `"\n"`, which is what OCaml writes. This PR's Windows run is the first test of either.
 
 ### Phase 3: profiles (`uigtk3.ml`'s profile manager, wizard and editor, ~1.7k; `strings.ml` as data)
 
