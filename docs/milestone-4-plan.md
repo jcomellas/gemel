@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 1a, 2026-10-24) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 1b, 2026-10-24) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -203,6 +203,29 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **The fake engine** and its flags, `--rows` and `--rate`, are gone. Phase 4's development flag will feed fake session events, for the check of 500 updates a second.
 - **The real backend** started under Xvfb in the Linux image, on two roots, and was still running after 15 seconds, with nothing on standard error but Slint's note that the container has no D-Bus session. The testing backend never runs the event loop, the native menu bar or closing the window, so that is all this checks; looking at the window is phase 4's.
 - **The file watcher** is asked for on every detection. No test runs with one yet: none is found next to the tests' programs or on CI's `PATH`. Rescans that use it come with 1b's Rescan.
+
+**Notes (phase 1b, 2026-10-24):**
+- **The session's gaps:**
+  - **The bytes on the connection:** `uigtk3`'s statistics read `Remote.emittedBytes` and `receivedBytes` twice a second, even during a sync or a scan, when the session takes no commands. So the counts are kept where the window's thread can read them: a host's `Traffic`, in atomics, which every connection served on the host adds to. The client's host counts its connections to servers; `Config::traffic` names the `Traffic` to count into. OCaml keeps one count for the process; gemel's is per host, so that tests running in parallel keep theirs apart. Tested against the connections' own counts, and in the session locally (nothing), in loopback mode and against OCaml's server.
+  - **`Command::ProfileUnchanged`** (`Prefs.profileUnchanged`), for Rescan.
+  - **`Command::Update`'s `only`** scans only some paths, as `paths` would name them, then sets `paths` back, an interrupt included (`uigtk3`'s Recheck).
+- **The progress bar** (`displayGlobalProgress`) pulses while updates are detected, then shows the fraction transferred, with the time left and the rate twice a second.
+- **The statistics window** (`statistics`) is a window of its own:
+  - the graphs of the rates sent and received, drawn as filled paths, without `uigtk3`'s grey edges;
+  - the table of the reception rate, the data received and the file data written, on the client, the server and in all;
+  - sampled from when a scan or a sync starts until 10 samples after it ends, with `uigtk3`'s smoothing.
+
+  The file data written is worked out from each item's progress, by its direction and whether that root is local, as `showProgress` does.
+- **The summary box** (`summaryBox`) comes when the replicas aren't fully synchronized, with its items under "Show details". Its message is `uigtk3`'s, checked case by case. The count of items not started is the session's: when a sync is aborted, `uigtk3` also counts conflicts it never reached.
+- **Stop** aborts the sync. Without a session, a test checks that it is enabled only while a sync runs; the session's tests check what an abort does.
+- **Rescan** loads the profile again only if it has changed (or never loaded), which scans everything again; otherwise it connects the roots and keeps the paths left unsynchronised. With `watch` set (off by default, as in OCaml), only those and what the watcher reports are scanned. The engine's tests check the watcher's scans. No window test runs with a watcher, since none is found next to the tests' programs.
+- **"Detect Updates and Proceed (Without Waiting)"** sets batch mode once the profile is loaded again, and syncs after detecting. **"Recheck Unsynchronized Items"** looks only at the items not propagated, failed, skipped or with a problem. Big deletions aren't confirmed then, and the next detection is a whole one.
+- **Working:** Rescan and Recheck while working say "Synchronizer is busy, please wait..", as `getLock` does. The busy cursor isn't ported: Slint has no cursor for the whole window that leaves clicks to the widgets under it, and Stop must stay clickable.
+- **The harness** presses OK at the summary, as a user would.
+- **New window tests:**
+  - a sync without a session: Stop, the progress bar's fraction and text, the file data written, and the summary;
+  - Rescan and Recheck on a real session;
+  - the statistics against a server on a socket.
 
 ### Phase 2: ssh's prompts in the GUI (`terminal.ml`, `pty.c`, ~0.6k; `uigtk3`'s password dialogs)
 
