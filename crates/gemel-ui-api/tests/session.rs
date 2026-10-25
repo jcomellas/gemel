@@ -783,6 +783,79 @@ fn conflicts_are_resolved_only_if_they_are_conflicts() {
     }
 }
 
+/// `uigtk3`'s actions: preferring a version changes only an item whose
+/// default is a conflict, merging only a path to merge, and its skip
+/// gives no reason. Its column headings name the roots in 15 characters.
+#[test]
+fn uigtk3s_actions_prefer_merge_and_skip() {
+    for (pair, loopback) in ways("session-uigtk3") {
+        let pair = synced_pair_on(
+            pair,
+            &["times = true", "merge = Name mergeable -> cp CURRENT1 NEW"],
+            |r| {
+                write(r, "both", "same", T0);
+                write(r, "mergeable", "same", T0);
+            },
+            loopback,
+        );
+        write(&pair.a(), "both", "a's", T0 + 10.0);
+        write(&pair.b(), "both", "b's, newer", T0 + 20.0);
+        write(&pair.a(), "mergeable", "a's", T0 + 10.0);
+        write(&pair.b(), "mergeable", "b's, newer", T0 + 20.0);
+        write(&pair.a(), "new", "new in a", T0 + 10.0);
+        settle(&[&pair.a(), &pair.b()]);
+        let (mut s, _) = start(&pair, &["p", "-batch"], loopback);
+        load(&mut s, &mut no_questions);
+        let Event::Connected(names) = ok(&mut s, Command::Connect, &mut no_questions) else {
+            panic!()
+        };
+        let narrow = if pair.is_remote() {
+            ("local".to_owned(), ui_support::SERVER.to_owned())
+        } else {
+            ("a".to_owned(), "b".to_owned())
+        };
+        assert_eq!(names.narrow, narrow);
+        let u = updates(&mut s, &mut no_questions);
+        let set = |s: &mut Session, i, a| match ok(s, Command::SetAction(i, a), &mut no_questions) {
+            Event::Item(_, v) => v,
+            e => panic!("{e:?}"),
+        };
+        let (both, _) = item(&u.items, "both");
+        let (mergeable, m) = item(&u.items, "mergeable");
+        assert_eq!(m.action, Action::Merge);
+        let (new, _) = item(&u.items, "new");
+        use session::Favor;
+        for (f, action) in [
+            (Favor::First, Action::LtoR(false)),
+            (Favor::Second, Action::RtoL(false)),
+            (Favor::Older, Action::LtoR(false)),
+            (Favor::Newer, Action::RtoL(false)),
+        ] {
+            assert_eq!(set(&mut s, both, SetAction::Prefer(f)).action, action);
+            // Not a conflict by default: left alone.
+            assert_eq!(
+                set(&mut s, new, SetAction::Prefer(Favor::Second)).action,
+                Action::LtoR(false)
+            );
+        }
+        let skipped = set(&mut s, mergeable, SetAction::Conflict);
+        assert_eq!(
+            (skipped.action, skipped.skip_reason.as_deref()),
+            (Action::Skip(false), Some(""))
+        );
+        assert_eq!(
+            set(&mut s, mergeable, SetAction::MergeDefault).action,
+            Action::Merge
+        );
+        // Not a path to merge: left alone.
+        assert_eq!(
+            set(&mut s, both, SetAction::MergeDefault).action,
+            Action::RtoL(false)
+        );
+        s.join().unwrap();
+    }
+}
+
 /// What the matching conditions and "in favour of the changed" need: only
 /// properties changed, and contents changed on one side only.
 #[cfg(unix)]
