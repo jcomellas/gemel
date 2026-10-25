@@ -15,7 +15,7 @@ pub mod uicommon;
 // one alone.
 pub use gemel_base::clroot;
 pub use gemel_base::path::{Global, Path};
-pub use gemel_base::trace::{StatusFormatter, Trace};
+pub use gemel_base::trace::{StatusFormatter, Trace, enabled as debugging};
 pub use gemel_base::util::{MY_NAME, MY_VERSION, padto};
 pub use gemel_engine::update::Subpaths;
 pub use gemel_fs::os::unison_dir;

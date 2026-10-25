@@ -844,6 +844,27 @@ fn only_some_paths_can_be_rechecked() {
     s.join().unwrap();
 }
 
+/// The modules debugged can be changed, as the Expert menu does.
+#[test]
+fn what_is_debugged_can_be_changed() {
+    let pair = Pair::new("session-debug");
+    pair.profile("p", &[]);
+    let (mut s, _) = start(&pair, &["p", "-batch"], false);
+    load(&mut s, &mut no_questions);
+    let o = session::Overrides {
+        debug: Some(vec!["update".to_owned()]),
+        ..session::Overrides::default()
+    };
+    let Event::ProfileLoaded(settings) = ok(&mut s, Command::Configure(o), &mut no_questions)
+    else {
+        panic!()
+    };
+    assert_eq!(settings.debug, ["update"]);
+    assert!(gemel_ui_api::debugging(&settings.debug, "update"));
+    assert!(!gemel_ui_api::debugging(&settings.debug, "verbose"));
+    s.join().unwrap();
+}
+
 /// Whether the profile is as it was loaded: not once its file changes.
 #[test]
 fn a_changed_profile_is_told() {
