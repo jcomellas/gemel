@@ -880,9 +880,10 @@ impl Rpc {
     pub fn register_connection(&self, clroot: Clroot, root: Root, conn: Connection) {
         let conns: Weak<RefCell<ClientConns>> = Rc::downgrade(&self.conns);
         let client = Rc::downgrade(&self.client);
-        let c = conn.clone();
+        // Weak: the connection keeps its handlers, which mustn't keep it.
+        let c = conn.downgrade();
         conn.at_close(move || {
-            if let Some(conns) = conns.upgrade() {
+            if let (Some(conns), Some(c)) = (conns.upgrade(), c.upgrade()) {
                 conns.borrow_mut().unregister(&c);
             }
             if let Some(client) = client.upgrade() {

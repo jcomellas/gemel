@@ -428,6 +428,21 @@ fn the_client_keeps_one_connection_per_server() {
     });
 }
 
+/// Once the client and its engine's tasks are gone, so are its
+/// connections, and with them the transports they hold: a connection's
+/// close handlers mustn't keep it.
+#[test]
+fn a_client_lets_go_of_its_connections() {
+    let weak = block_on(async {
+        let rpc = client(false);
+        let (clroot, root) = remote("server");
+        let conn = rpc.connect_in_memory(clroot, root.clone(), host("server", false));
+        rpc.call_host(&NAME, &root.host, ()).await.unwrap();
+        conn.downgrade()
+    });
+    assert!(weak.upgrade().is_none());
+}
+
 /// What the client's connections write and read is counted on its host,
 /// all together, as each connection counts it; the servers' ends count
 /// on their own hosts.
