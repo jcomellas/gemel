@@ -284,6 +284,7 @@ impl App {
             log_warnings: false,
             print_wait_message: false,
             complete_progress: true,
+            traffic: None,
         })
         .map_err(|e| slint::PlatformError::Other(format!("Can't start the session: {e}")))?;
         let app = App::create(Some(session))?;

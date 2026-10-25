@@ -6,12 +6,14 @@
 mod support;
 mod ui_support;
 
+use std::sync::Arc;
+
 use gemel_base::trace::Trace;
 use gemel_rpc::runtime::EngineThread;
 use gemel_ui_api::exit_code::ExitCode;
 use gemel_ui_api::session::{
     self, Command, Config, Event, IgnoreKind, ItemView, Outcome, Question, SetAction, SortKind,
-    Summary, Updates,
+    Summary, Traffic, Updates,
 };
 use gemel_ui_api::uicommon::Action;
 use support::sync::{Output, T0};
@@ -22,6 +24,16 @@ type Session = EngineThread<Command, Event>;
 
 /// A session on `pair`, with `args`; its trace prints to the output.
 fn start(pair: &Pair, args: &[&str], loopback: bool) -> (Session, Output) {
+    start_counting(pair, args, loopback, None)
+}
+
+/// [`start`], counting the connections' bytes in `traffic`.
+fn start_counting(
+    pair: &Pair,
+    args: &[&str],
+    loopback: bool,
+    traffic: Option<Arc<Traffic>>,
+) -> (Session, Output) {
     let output = Output::default();
     let trace = Trace::with_sinks(Box::new(output.clone()), Box::new(output.clone()));
     let s = session::spawn(Config {
@@ -34,6 +46,7 @@ fn start(pair: &Pair, args: &[&str], loopback: bool) -> (Session, Output) {
         log_warnings: false,
         print_wait_message: false,
         complete_progress: true,
+        traffic,
     })
     .unwrap();
     (s, output)
@@ -780,6 +793,31 @@ fn conflicts_are_resolved_only_if_they_are_conflicts() {
             Action::LtoR(false)
         );
         s.join().unwrap();
+    }
+}
+
+/// The bytes the client's connections write and read are counted where
+/// the frontend says: over the loopback or to a server; locally, nothing
+/// goes over a connection.
+#[test]
+fn traffic_is_counted() {
+    for (pair, loopback) in ways("session-traffic") {
+        let pair = synced_pair_on(pair, &[], |r| write(r, "f", "same", T0), loopback);
+        write(&pair.a(), "new", "new in a", T0 + 10.0);
+        settle(&[&pair.a(), &pair.b()]);
+        let traffic = Arc::new(Traffic::default());
+        let (mut s, _) = start_counting(&pair, &["p", "-batch"], loopback, Some(traffic.clone()));
+        load(&mut s, &mut no_questions);
+        updates(&mut s, &mut no_questions);
+        synchronize(&mut s, &mut no_questions);
+        ok(&mut s, Command::Commit, &mut no_questions);
+        s.join().unwrap();
+        let counted = (traffic.emitted(), traffic.received());
+        if loopback || pair.is_remote() {
+            assert!(counted.0 > 0 && counted.1 > 0, "{counted:?}");
+        } else {
+            assert_eq!(counted, (0, 0));
+        }
     }
 }
 

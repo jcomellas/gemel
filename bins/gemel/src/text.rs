@@ -281,6 +281,7 @@ pub fn start(args: Vec<String>, interface: Interface) -> i32 {
         log_warnings: false,
         print_wait_message: true,
         complete_progress: false,
+        traffic: None,
     })
     .and_then(|mut s| {
         let events = tx.clone();

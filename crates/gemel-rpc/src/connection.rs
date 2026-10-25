@@ -46,13 +46,14 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
 use gemel_base::util::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{Notify, oneshot};
 
-use crate::host::Host;
+use crate::host::{Host, Traffic};
 use crate::protocol::{self, HEADER_TAG, Header, INT_SIZE};
 use crate::registry::{Registry, ServerCmd};
 use crate::runtime;
@@ -266,6 +267,8 @@ struct Inner {
     stream_errors: RefCell<HashMap<u32, Error>>,
     emitted: Cell<u64>,
     received: Cell<u64>,
+    /// The endpoint's host's, which counts every connection's.
+    traffic: Arc<Traffic>,
 }
 
 /// A connection with the other side (`Remote.connection`). Clones are the
@@ -304,6 +307,7 @@ impl Connection {
     ///
     /// Outside the engine thread's runtime.
     pub fn new(endpoint: Rc<Endpoint>, is_server: bool, input: Input, output: Output) -> Self {
+        let traffic = endpoint.host.traffic();
         let conn = Connection(Rc::new(Inner {
             endpoint,
             is_server,
@@ -334,6 +338,7 @@ impl Connection {
             stream_errors: RefCell::default(),
             emitted: Cell::new(0),
             received: Cell::new(0),
+            traffic,
         }));
         runtime::spawn_local(conn.clone().close_output());
         conn
@@ -561,6 +566,7 @@ impl Connection {
         self.put_output(output);
         let n = n?;
         self.0.emitted.set(self.0.emitted.get() + n as u64);
+        self.0.traffic.add_emitted(n as u64);
         Ok(())
     }
 
@@ -705,7 +711,7 @@ impl Connection {
     }
 
     async fn receive_message(&self, input: &mut Input) -> Result<(), Error> {
-        let mut input = Counted(input, &self.0.received);
+        let mut input = Counted(input, &self.0.received, &self.0.traffic);
         let input = &mut input;
         let mut id = [0; INT_SIZE];
         read(input, &mut id).await?;
@@ -901,13 +907,14 @@ impl Connection {
 }
 
 /// The input, counting what is read from it.
-struct Counted<'a>(&'a mut Input, &'a Cell<u64>);
+struct Counted<'a>(&'a mut Input, &'a Cell<u64>, &'a Traffic);
 
 /// Reads exactly `buf.len()` bytes (`grab`); the end of the input, or any
 /// error reading it, is a lost connection.
 async fn read(input: &mut Counted<'_>, buf: &mut [u8]) -> Result<(), Error> {
     input.0.read_exact(buf).await.map_err(|_| lost())?;
     input.1.set(input.1.get() + buf.len() as u64);
+    input.2.add_received(buf.len() as u64);
     Ok(())
 }
 
