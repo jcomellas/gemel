@@ -767,7 +767,7 @@ impl Text {
             return Ok(());
         };
         self.display("  ");
-        let items = match self.call(Command::Ignore(ri.i, kind))? {
+        let items = match self.call(Command::Ignore(vec![ri.i], kind))? {
             Event::Items { items, .. } => items,
             e => return Err(Stop::Error(format!("unexpected {e:?}"))),
         };

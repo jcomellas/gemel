@@ -558,7 +558,7 @@ fn a_sync_can_be_aborted_while_it_waits_for_the_user() {
     }
 }
 
-/// Ignoring an item drops it (and what else is now ignored), and adds the
+/// Ignoring items drops them (and what else is now ignored), and adds the
 /// pattern to the profile.
 #[test]
 fn ignoring_an_item_drops_it() {
@@ -573,7 +573,7 @@ fn ignoring_an_item_drops_it() {
     let (i, _) = item(&u.items, "b.txt");
     let Event::Items { items, next } = ok(
         &mut s,
-        Command::Ignore(i, IgnoreKind::Ext),
+        Command::Ignore(vec![i], IgnoreKind::Ext),
         &mut no_questions,
     ) else {
         panic!()
@@ -587,6 +587,20 @@ fn ignoring_an_item_drops_it() {
     let u = updates(&mut s, &mut no_questions);
     let names: Vec<_> = u.items.iter().map(|i| i.path_string.as_str()).collect();
     assert_eq!(names, ["a.log", "c.log"]);
+    // Several at once: each pattern once, in order.
+    let Event::Items { items, .. } = ok(
+        &mut s,
+        Command::Ignore(vec![1, 0, 1], IgnoreKind::Path),
+        &mut no_questions,
+    ) else {
+        panic!()
+    };
+    assert!(items.is_empty());
+    let text = std::fs::read_to_string(pair.u().join("p.prf")).unwrap();
+    assert!(
+        text.contains("ignore = Path {a.log}\nignore = Path {c.log}"),
+        "{text}"
+    );
     s.join().unwrap();
 }
 
