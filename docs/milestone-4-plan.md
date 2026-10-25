@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 1b, 2026-10-24) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 1c, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -226,6 +226,28 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - a sync without a session: Stop, the progress bar's fraction and text, the file data written, and the summary;
   - Rescan and Recheck on a real session;
   - the statistics against a server on a socket.
+
+**Notes (phase 1c, 2026-10-25):**
+- **The session's gaps:**
+  - `Command::Ignore` takes several items. `addRegExpByPath` folds the patterns of every item selected into a set (sorted, each once), adds each, then drops the items now ignored. One item at a time wouldn't do, since dropping items renumbers the rest.
+  - `Overrides::debug` sets the modules debugged, as `Trace.enable` changes them. `gemel-ui-api` re-exports `Trace.enabled` as `debugging`.
+  - `ItemView::both_files`: `uigtk3` enables Diff for an item whose replicas are both files, whatever changed. `ItemView::can_diff` (the Mac interface's) also leaves out changes to properties only.
+- **Show Diffs** (`diffCmd`) shows each diff in a window of its own: added lines green, removed ones red, locations cyan. Why one couldn't be shown goes to the status line. The progress bar doesn't move while a diff fetches a remote file, since the session reports no progress then.
+- **The Ignore menu** ignores the paths, extensions or names of every item selected. **The Sort menu** sorts by name or size, puts new entries first, or goes back to the default. Both keep the selected rows by index, as `displayMain` does.
+- **`getLock`:** a diff, an ignore or a sort holds it until the session replies, since the items' indices may be about to change. Nothing else that names an item is sent meanwhile, and the menus' keys say "Synchronizer is busy, please wait..".
+- **The Expert menu**, shown with `expert`, turns debugging of all, verbose and update on and off, without scanning the items again. Every `Configure` now says what follows its reply, since that reply is also `LoadProfile`'s. "Show memory/GC stats" isn't ported: Rust has no garbage collector.
+- **The profile keys** 0 to 9 (`profileKeymap`):
+  - the profiles are scanned before the first one is loaded, as `startGUI` does;
+  - the Synchronization menu lists the profiles bound to keys;
+  - a key loads its profile, unless its file has gone ("Profile NAME not found").
+- **New tests:**
+  - in the session: several items ignored at once, the modules debugged changed, `both_files`;
+  - in the window, without a session: an ignore and a sort hold the items until they are done;
+  - in the window, on a real session: the Expert menu, the profile keys, ignoring, and a diff window (on Unix).
+- **Phase 1 is done** apart from what other phases own:
+  - the profile manager, the way back to it after a fatal error, and the Help menu (phase 3);
+  - ssh's prompts and remote roots in the harness (phase 2);
+  - checking each system's conventions by eye (phase 4). Slint's menus already take `Control` as ⌘ on macOS.
 
 ### Phase 2: ssh's prompts in the GUI (`terminal.ml`, `pty.c`, ~0.6k; `uigtk3`'s password dialogs)
 
