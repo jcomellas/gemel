@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 2c, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 3a, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -349,6 +349,52 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - each written profile loaded by OCaml Unison and by `gemel`;
   - `gemel -doc` compared with OCaml's.
 - **Likely split:** 3a, the manager and the wizard; 3b, the editor and the manual.
+
+**Notes (phase 3a, 2026-10-25):**
+- **The session's gaps:**
+  - `CreateProfile` writes a profile as the assistant's `saveProfile` does: `# Unison preferences`, the label if any, the two roots, `sshargs = -C` and `fat = true` as chosen, in a file that mustn't exist, mode 0600.
+  - `DeleteProfile` removes one, an error doing so dropped, as there.
+  - `ForgetClRoots` is `clearClRoots`.
+
+  Each replies with the profiles, scanned again. Tests check:
+  - the text, with and without its optional lines;
+  - a profile not written over;
+  - loading it, and OCaml syncing with it (with `GEMEL_REFERENCE_UNISON`, checked against 2.54.0);
+  - deleting one;
+  - a profile loaded with its own roots once the command line's are forgotten.
+- **The profile manager** (`getProfile`) is a card over the window. It has:
+  - the profiles in byte order, with their descriptions, and the roots of the one selected if it has two;
+  - Open, by button, double click or the list's default action;
+  - Add, which opens the assistant and then selects what it made;
+  - Delete, which asks first;
+  - Quit or Cancel.
+
+  It opens:
+  - when the command line names no profile or roots (Quit exits 0);
+  - after an error before the first items, once its dialog is closed, with the command line's roots forgotten (`initLoop`);
+  - after a later error with no profile loaded (Quit exits 1);
+  - from Change Profile: the toolbar, the Synchronization menu and `p`, with Cancel.
+
+  Edit and Help come with 3b.
+- **Startup scans the profiles first** (`updateProfileKeyMenu`), as before. A profile chosen in the manager is loaded with the command line's roots unless they were forgotten, as `initPrefs` does.
+- **The assistant** (`createProfile`) is a card, a page at a time:
+  - the name and description;
+  - the connection (local, ssh or a TCP socket, with compression for ssh);
+  - the two directories or files;
+  - FAT, skipped under Windows;
+  - then Apply.
+
+  Its rules for when a page is complete, and for the second root (`makeRemoteRoot`), are ported as pure functions with unit tests. As in OCaml, a socket's port isn't checked once entered. Where its text names Unison, the program, it says Gemel, and the command to start a server is `gemel -socket xxx`. A text field next to `rfd`'s picker stands in for GTK's chooser buttons, so that a root can be typed, and tests can set it.
+- **What each profile command's reply is for** is kept in order: a profile that can't be saved is said so ("Could not save profile") rather than being a fatal error, and an error deleting one is dropped. The other commands' replies are told apart by the window's state, as in phase 1; the profile commands are sent only while the manager is open, when nothing else is waiting.
+- **Errors before the first items:** an error before the first items, the session's failing to start included, gets `fatalError`'s Quit and Close, and Close goes to the manager. If the session failed to start, Close ends the program, since there is no manager to go to.
+- **A bug fixed:** since phase 1a, once the items were shown, an error dialog's Close ended the program and its Quit carried on. A test now presses both.
+- **Window tests:**
+  - the manager with no profile: its order, the selected profile's roots, and Quit;
+  - the assistant making a profile, which opens and syncs;
+  - Delete;
+  - Change Profile to another profile;
+  - an unknown profile on the command line, whose error leads to the manager;
+  - a profile that can't be saved, and the error dialog's buttons.
 
 ### Phase 4: each system, and the rest
 
