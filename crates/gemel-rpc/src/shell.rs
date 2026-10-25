@@ -1,8 +1,8 @@
 //! Connections to a server through a remote shell: ssh, running the
 //! server's command on the other host.
 //!
-//! Ports Unison `src/remote.ml` (`buildShellConnection`, without a
-//! terminal, and `initConnection`).
+//! Ports Unison `src/remote.ml` (`buildShellConnection` and
+//! `initConnection`).
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 //!
@@ -15,6 +15,14 @@
 //! Since ssh doesn't get Ctrl-C, the client ends it as it exits
 //! ([`end_shells`]), should it still run: ssh ends when its input does,
 //! but not while it waits at the terminal for a password.
+//!
+//! A graphical interface, which has no terminal for ssh to ask at, runs it
+//! under a terminal of its own, whose prompts it answers ([`terminal`]):
+//! then ssh's standard error is that terminal, and SIGINT isn't blocked.
+//! Once the server has written something, the connection counts as up,
+//! and what ssh prints from then on goes to the client's standard error.
+//!
+//! [`terminal`]: crate::terminal
 
 use std::process::Stdio;
 use std::rc::Rc;
@@ -27,6 +35,7 @@ use gemel_fs::system::SysError;
 
 use crate::connection::{ADD_VERSION_NO, Connection, Endpoint, SERVER_CMD, SSH_ARGS, SSH_CMD};
 use crate::handshake::{self, RPC_SERVER_CMDLINE_OVERRIDE};
+use crate::terminal::{self, Interact};
 
 /// The server's command, as the shell runs it on the other host:
 /// `servercmd` (or `gemel`), with the major version if `addversionno`.
@@ -96,35 +105,88 @@ pub fn end_shells() {
 
 /// `buildShellConnection`: starts the shell for `host` and, over its input
 /// and output, the client's side of a connection served by `endpoint`,
-/// once the handshake is done. When the connection closes, the shell goes
-/// (tokio waits for it in the background, as OCaml's `safe_waitpid` does).
+/// once the handshake is done. With `interact`, the shell runs under a
+/// terminal of its own, whose prompts `interact` answers, if one can be
+/// had. When the connection closes, the shell goes (tokio waits for it in
+/// the background, as OCaml's `safe_waitpid` does).
 pub async fn connect(
     endpoint: Rc<Endpoint>,
     (program, args): (String, Vec<String>),
     half_duplex: bool,
+    interact: Option<Interact>,
 ) -> Result<Connection, Error> {
     let mut cmd = std::process::Command::new(&program);
-    cmd.args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    gemel_fs::signal::block_interrupt_in_child(&mut cmd);
-    let mut child = tokio::process::Command::from(cmd).spawn().map_err(|e| {
+    cmd.args(&args).stdin(Stdio::piped()).stdout(Stdio::piped());
+    let starting = |e| {
         SysError::new("create_process", program.as_bytes(), e).to_fatal("starting shell connection")
-    })?;
+    };
+    let host = endpoint.host().clone();
+    let (term, mut child) = match &interact {
+        Some(_) => terminal::create_session(cmd).map_err(starting)?,
+        None => {
+            cmd.stderr(Stdio::inherit());
+            gemel_fs::signal::block_interrupt_in_child(&mut cmd);
+            let child = tokio::process::Command::from(cmd)
+                .spawn()
+                .map_err(starting)?;
+            (None, child)
+        }
+    };
     if let Some(shell) = child.id().and_then(Started::new) {
         SHELLS.lock().unwrap_or_else(|e| e.into_inner()).push(shell);
     }
     let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         return Err(Error::Fatal("Internal error: the shell's pipes".into()));
     };
+    let requests = match (&term, interact) {
+        (Some(term), Some(interact)) => {
+            Some(terminal::handle_password_requests(term.clone(), interact))
+        }
+        _ => None,
+    };
+    let ready = || {
+        if let Some(r) = &requests {
+            use std::io::Write;
+            let _ = std::io::stderr().write_all(r.ready().as_bytes());
+        }
+    };
     // If the handshake fails, closing the pipes ends the shell.
-    let conn = handshake::init_connection(endpoint, Box::new(stdout), Box::new(stdin), half_duplex)
-        .await?;
-    // Kept until the connection closes. (Its handlers may run as the
-    // engine thread ends, so this one starts nothing.)
-    conn.at_close(move || drop(child));
-    Ok(conn)
+    match handshake::init_connection(
+        endpoint,
+        Box::new(stdout),
+        Box::new(stdin),
+        half_duplex,
+        ready,
+    )
+    .await
+    {
+        Ok(conn) => {
+            // Kept until the connection closes. (Its handlers may run as
+            // the engine thread ends, so this one starts nothing: a shell
+            // left running is ended as the program exits.)
+            conn.at_close(move || {
+                if let Some(term) = term {
+                    term.close();
+                }
+                drop(child);
+            });
+            Ok(conn)
+        }
+        Err(e) => {
+            // ssh's last words, before the terminal closes.
+            if let Some(r) = &requests {
+                let s = r.remaining().await;
+                if !s.is_empty() {
+                    host.warn(&s);
+                }
+            }
+            if let Some(term) = term {
+                term.close();
+                terminal::end_session(child);
+            }
+            Err(e)
+        }
+    }
 }
 
 #[cfg(test)]

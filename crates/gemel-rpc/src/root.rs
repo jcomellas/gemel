@@ -123,7 +123,8 @@ fn read_text(r: &mut Reader<'_>) -> umarshal::Result<String> {
     Ok(String::from_utf8_lossy(&r.string()?).into_owned())
 }
 
-/// `Remote.canonizeRoot`: the canonical root for a root specification.
+/// `Remote.canonizeRoot`: the canonical root for a root specification,
+/// `name` as the user wrote it.
 ///
 /// A local root is canonicalised through `canonizeOnServer`, so that in
 /// loopback mode the command and its codecs are exercised as they will be
@@ -133,7 +134,7 @@ fn read_text(r: &mut Reader<'_>) -> umarshal::Result<String> {
 /// (`canonizeOnServer`), over the connection the client already has to it
 /// (`ClientConn.ofClrootConncheck`) or one it opens, which is then
 /// registered under the canonical root.
-pub async fn canonize_root(rpc: &Rpc, clroot: &Clroot) -> Result<Root, Error> {
+pub async fn canonize_root(rpc: &Rpc, name: &str, clroot: &Clroot) -> Result<Root, Error> {
     let path = match clroot {
         Clroot::ConnectLocal(s) => {
             let arg = (s.as_ref().map(|s| s.as_bytes().to_vec()), true);
@@ -146,7 +147,7 @@ pub async fn canonize_root(rpc: &Rpc, clroot: &Clroot) -> Result<Root, Error> {
     };
     let (conn, opened) = match rpc.connection_checked(clroot).await {
         Some(conn) => (conn, false),
-        None => (rpc.open_connection(clroot).await?, true),
+        None => (rpc.open_connection(name, clroot).await?, true),
     };
     let arg = (path.as_ref().map(|s| s.as_bytes().to_vec()), true);
     let (host, fspath) = match conn.call_host(&CANONIZE_ON_SERVER, arg).await {

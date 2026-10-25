@@ -459,17 +459,19 @@ const NEGOTIATION_TIMEOUT: Duration = Duration::from_secs(120);
 /// `input` and `output`, within OCaml's 120 seconds, then the client's
 /// side of a connection over them, served by `endpoint` (see
 /// [`connection::start_client`]). If the handshake fails, the transport is
-/// dropped, which closes it.
+/// dropped, which closes it. `ready` runs once the server has written
+/// something, before it is checked (`connReady`).
 pub async fn init_connection(
     endpoint: Rc<Endpoint>,
     input: Input,
     mut output: Output,
     half_duplex: bool,
+    ready: impl FnOnce(),
 ) -> Result<Connection, Error> {
     let mut input = reader(input);
     let version = tokio::time::timeout(
         NEGOTIATION_TIMEOUT,
-        client_handshake(&mut input, &mut output, || {}),
+        client_handshake(&mut input, &mut output, ready),
     )
     .await
     .unwrap_or_else(|_| {

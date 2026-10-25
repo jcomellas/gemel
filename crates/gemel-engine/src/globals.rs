@@ -110,7 +110,7 @@ impl Roots {
         let mut roots = Vec::new();
         for r in raw {
             let clroot = clroot::parse_root(r).map_err(clroot_error)?;
-            roots.push(root::canonize_root(rpc, &clroot).await?);
+            roots.push(root::canonize_root(rpc, r, &clroot).await?);
         }
         if roots[0] == roots[1] {
             return Err(Error::Fatal(format!(
