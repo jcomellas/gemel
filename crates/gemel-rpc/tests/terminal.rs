@@ -58,28 +58,34 @@ fn interact(answers: &[&str]) -> (Interact, Rc<RefCell<Seen>>) {
     (i, seen)
 }
 
-/// The same, as a batch file: `set /p` asks at the console (`CON`).
+/// The same, in Python, reading the answer at the console a key at a
+/// time until a return or a newline, as Windows OpenSSH reads a password
+/// (`_getch`); a line-at-a-time read (`set /p`) wants a return.
 #[cfg(windows)]
-const SHIM: &str = "\
-@echo off\r
-setlocal enabledelayedexpansion\r
-set n=0\r
-:ask\r
-set pw=\r
-set /p pw=me@server's password: <CON >CON\r
-if \"!pw!\"==\"secret\" goto up\r
-set /a n+=1\r
-if !n! geq 2 (\r
-  echo Permission denied ^(publickey,password^).>CON\r
-  exit /b 255\r
-)\r
-echo Permission denied, please try again.>CON\r
-goto ask\r
-:up\r
-echo UP\r
-echo Welcome, this is a banner>CON\r
-ping -n 3 127.0.0.1 >NUL\r
-";
+const SHIM: &str = r#"import msvcrt, sys, time
+def say(s):
+    with open("CONOUT$", "w") as c:
+        c.write(s)
+def ask():
+    say("me@server's password: ")
+    pw = ""
+    while True:
+        ch = msvcrt.getwch()
+        if ch in "\r\n":
+            return pw
+        pw += ch
+n = 0
+while ask() != "secret":
+    n += 1
+    if n >= 2:
+        say("Permission denied (publickey,password).\r\n")
+        sys.exit(255)
+    say("Permission denied, please try again.\r\n")
+sys.stdout.write("UP")
+sys.stdout.flush()
+say("Welcome, this is a banner\r\n")
+time.sleep(2)
+"#;
 
 #[cfg(unix)]
 fn shim() -> std::process::Command {
@@ -95,14 +101,12 @@ fn shim() -> std::process::Command {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    let script = std::env::temp_dir().join(format!(
-        "gemel-terminal-shim-{}-{n}.cmd",
-        std::process::id()
-    ));
+    let script =
+        std::env::temp_dir().join(format!("gemel-terminal-shim-{}-{n}.py", std::process::id()));
     std::fs::write(&script, SHIM).unwrap();
-    let mut cmd = std::process::Command::new("cmd");
-    cmd.arg("/c")
-        .arg(script)
+    // GitHub's Windows runners have Python on PATH.
+    let mut cmd = std::process::Command::new("python");
+    cmd.arg(script)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped());
     cmd
@@ -130,7 +134,7 @@ fn a_password_is_asked_for_until_the_connection_is_up() {
         // The server's first bytes: the connection is up.
         let mut stdout = s.stdout;
         let mut b = [0; 2];
-        tokio::time::timeout(Duration::from_secs(10), stdout.read_exact(&mut b))
+        tokio::time::timeout(Duration::from_secs(30), stdout.read_exact(&mut b))
             .await
             .expect("connected")
             .unwrap();
@@ -171,7 +175,7 @@ fn what_ssh_said_last_is_kept_when_it_fails() {
         let s = terminal::create_session(shim()).unwrap();
         let term = s.term.expect("a terminal");
         let requests = terminal::handle_password_requests(term.clone(), i);
-        let code = tokio::time::timeout(Duration::from_secs(10), ended(s.child))
+        let code = tokio::time::timeout(Duration::from_secs(30), ended(s.child))
             .await
             .expect("ended");
         if cfg!(unix) {
@@ -198,6 +202,13 @@ fn without_answers_nothing_is_written() {
         let s = terminal::create_session(shim()).unwrap();
         let term = s.term.expect("a terminal");
         let requests = terminal::handle_password_requests(term.clone(), i);
+        // Until the prompt shows (Python may take its time to start).
+        for _ in 0..300 {
+            if !seen.borrow().shown.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         tokio::time::sleep(Duration::from_millis(300)).await;
         let shown = seen.borrow().shown.concat();
         assert!(
