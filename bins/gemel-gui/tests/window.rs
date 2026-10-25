@@ -554,3 +554,176 @@ fn statistics_count_what_comes_from_the_server() {
     assert_ne!(stat(&app, 1, 1), "0 B");
     app.quit(0);
 }
+
+/// Ignoring and sorting renumber the items: until the session's answer,
+/// nothing else that names an item is sent.
+#[test]
+fn ignore_and_sort_hold_the_items_until_they_are_done() {
+    init();
+    let app = App::detached().unwrap();
+    let ui = app.ui();
+    ui.show().unwrap();
+    let item = |p: &str| fake_item(p, Action::LtoR(false));
+    app.handle(Event::Updates(fake_updates(vec![
+        item("a"),
+        item("b"),
+        item("c"),
+        item("d"),
+    ])));
+    let rows = items(ui);
+    click(ui, rows[1].centre, None);
+    type_text(ui, "I");
+    let sent = |app: &App| format!("{:?}", app.sent());
+    assert!(sent(&app).ends_with("Ignore([1], Path)]"), "{}", sent(&app));
+    let before = app.sent().len();
+    type_text(ui, ">");
+    type_text(ui, "N");
+    assert_eq!(app.sent().len(), before);
+    assert_eq!(
+        ui.get_status_text().trim_end(),
+        "Synchronizer is busy, please wait.."
+    );
+    // The answer: the selection stays on the same row, as `displayMain`
+    // keeps it.
+    app.handle(Event::Items {
+        items: vec![item("a"), item("c"), item("d")],
+        next: 1,
+    });
+    assert_eq!(app.table().selected(), [1]);
+    type_text(ui, ">");
+    assert!(
+        sent(&app).ends_with("SetAction(1, Right)]"),
+        "{}",
+        sent(&app)
+    );
+    ui.invoke_sort("size".into());
+    assert!(sent(&app).ends_with("Sort(Size)]"), "{}", sent(&app));
+    assert!(app.busy());
+}
+
+/// The Expert menu, with `expert`: debugging a module, without the items
+/// being scanned again.
+#[test]
+fn the_expert_menu_changes_what_is_debugged() {
+    let work = support::Work::new("window-expert");
+    let dir = &work.0;
+    synced(dir, &["f"]);
+    std::fs::write(dir.join("a/new"), "new in a").unwrap();
+    let mut args = roots(dir);
+    args.push("-expert".to_owned());
+    let (app, out) = support::window(&dir.join("unison"), args);
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(
+        wait_until(WAIT, || app.started() && !app.busy()),
+        "{}",
+        out.text()
+    );
+    assert!(ui.get_expert() && !ui.get_debug_update());
+    ui.invoke_debug("update".into(), true);
+    assert!(wait_until(WAIT, || ui.get_debug_update()));
+    assert!(!app.busy() && !ui.get_debug_all());
+    assert_eq!(app.table().len(), 1);
+    ui.invoke_debug("update".into(), false);
+    assert!(wait_until(WAIT, || !ui.get_debug_update()));
+    assert_eq!(app.table().len(), 1);
+    app.quit(0);
+}
+
+/// A profile's key loads it (`profileKeymap`), unless its file has gone.
+#[test]
+fn profile_keys_load_profiles() {
+    let work = support::Work::new("window-keys");
+    let dir = &work.0;
+    synced(dir, &["f"]);
+    let roots = format!(
+        "root = {}\nroot = {}\nlog = false\n",
+        dir.join("a").display(),
+        dir.join("b").display()
+    );
+    std::fs::write(dir.join("unison/p.prf"), &roots).unwrap();
+    std::fs::write(dir.join("unison/q.prf"), format!("{roots}key = 2\n")).unwrap();
+    let (app, out) = support::window(&dir.join("unison"), vec!["p".to_owned()]);
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    let ready = || app.started() && !app.busy() && ui.get_dialog() == 0;
+    assert!(wait_until(WAIT, ready), "{}", out.text());
+    assert_eq!(ui.get_profile_text(), "Profile: p");
+    let keys = ui.get_profile_keys();
+    assert_eq!(keys.row_count(), 1);
+    assert_eq!(keys.row_data(0).unwrap().name, "q");
+    type_text(ui, "2");
+    assert!(
+        wait_until(WAIT, || ui.get_profile_text() == "Profile: q" && ready()),
+        "{}",
+        out.text()
+    );
+    std::fs::remove_file(dir.join("unison/q.prf")).unwrap();
+    type_text(ui, "2");
+    assert_eq!(ui.get_status_text().trim_end(), "Profile q not found");
+    app.quit(0);
+}
+
+/// Ignoring the items selected drops them, and writes the patterns to
+/// the profile.
+#[test]
+fn ignoring_drops_the_items() {
+    let work = support::Work::new("window-ignore");
+    let dir = &work.0;
+    synced(dir, &["f"]);
+    std::fs::write(dir.join("a/one"), "new in a").unwrap();
+    std::fs::write(dir.join("a/two"), "new in a").unwrap();
+    let (app, out) = support::window(&dir.join("unison"), roots(dir));
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(
+        wait_until(WAIT, || app.started() && !app.busy()),
+        "{}",
+        out.text()
+    );
+    ui.invoke_select_all();
+    type_text(ui, "I");
+    assert!(wait_until(WAIT, || app.table().is_empty() && !app.busy()));
+    let profile = std::fs::read_to_string(dir.join("unison/default.prf")).unwrap();
+    assert!(
+        profile.contains("ignore = Path {one}\nignore = Path {two}"),
+        "{profile}"
+    );
+    app.quit(0);
+}
+
+/// Diffs open windows of their own (`diffCmd`'s `messageBox`).
+#[cfg(unix)]
+#[test]
+fn diffs_open_windows_of_their_own() {
+    let work = support::Work::new("window-diff");
+    let dir = &work.0;
+    synced(dir, &["both"]);
+    std::fs::write(dir.join("a/both"), "a's").unwrap();
+    std::fs::write(dir.join("b/both"), "b's").unwrap();
+    let mut args = roots(dir);
+    args.extend(["-diff", "echo"].map(String::from));
+    let (app, out) = support::window(&dir.join("unison"), args);
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(
+        wait_until(WAIT, || app.started() && !app.busy()),
+        "{}",
+        out.text()
+    );
+    assert!(ui.get_diff_enabled());
+    type_text(ui, "d");
+    assert!(
+        wait_until(WAIT, || !app.diff_windows().is_empty() && !app.busy()),
+        "{}",
+        out.text()
+    );
+    let w = &app.diff_windows()[0];
+    assert!(
+        w.get_window_title().contains("both"),
+        "{}",
+        w.get_window_title()
+    );
+    assert!(w.get_lines().row_count() > 0);
+    app.quit(0);
+}
