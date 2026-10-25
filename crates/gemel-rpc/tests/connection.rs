@@ -5,6 +5,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gemel_base::clroot::Clroot;
 use gemel_base::features::Features;
@@ -12,7 +13,7 @@ use gemel_base::prefs::Prefs;
 use gemel_base::util::Error;
 use gemel_fs::fspath::Fspath;
 use gemel_rpc::connection::{self, Connection, Endpoint, HALF_DUPLEX, LOST_CONNECTION};
-use gemel_rpc::host::Host;
+use gemel_rpc::host::{Host, Traffic};
 use gemel_rpc::protocol::{self, Header};
 use gemel_rpc::registry::{Dispatch, HostCmd, Registry, RootCmd, Rpc, ServerCmd, StreamCmd};
 use gemel_rpc::root::{self, CANONIZE_ON_SERVER, Root};
@@ -424,6 +425,31 @@ fn the_client_keeps_one_connection_per_server() {
             rpc.call_host(&NAME, &root.host, ()).await.unwrap(),
             "server"
         );
+    });
+}
+
+/// What the client's connections write and read is counted on its host,
+/// all together, as each connection counts it; the servers' ends count
+/// on their own hosts.
+#[test]
+fn a_host_counts_its_connections_traffic() {
+    block_on(async {
+        let rpc = client(false);
+        let traffic = Arc::new(Traffic::default());
+        rpc.client_host().set_traffic(traffic.clone());
+        let server = host("server", false);
+        let (clroot, root) = remote("server");
+        let a = rpc.connect_in_memory(clroot, root.clone(), server.clone());
+        let (clroot2, root2) = remote("another");
+        let b = rpc.connect_in_memory(clroot2, root2.clone(), host("another", false));
+        rpc.call_host(&NAME, &root.host, ()).await.unwrap();
+        rpc.call_host(&NAME, &root2.host, ()).await.unwrap();
+        a.call(&ASK_BACK, ()).await.unwrap();
+        assert!(a.bytes_emitted() > 0 && b.bytes_received() > 0);
+        assert_eq!(traffic.emitted(), a.bytes_emitted() + b.bytes_emitted());
+        assert_eq!(traffic.received(), a.bytes_received() + b.bytes_received());
+        assert!(server.traffic().received() > 0);
+        assert!(!Arc::ptr_eq(&server.traffic(), &traffic));
     });
 }
 

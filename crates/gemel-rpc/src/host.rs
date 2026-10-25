@@ -22,6 +22,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gemel_base::features::Features;
 use gemel_base::prefs::Prefs;
@@ -32,6 +34,36 @@ pub type WarnPrinter = Rc<dyn Fn(&str)>;
 
 /// Runs when a connection closes (`Remote.at_conn_close`).
 pub type CloseHandler = Rc<dyn Fn()>;
+
+/// What a host's connections have written and read so far, all together
+/// (`Remote.emittedBytes` and `Remote.receivedBytes`, which OCaml keeps
+/// for the whole process). It can be read from any thread, for a
+/// frontend's statistics.
+#[derive(Debug, Default)]
+pub struct Traffic {
+    emitted: AtomicU64,
+    received: AtomicU64,
+}
+
+impl Traffic {
+    /// The bytes written.
+    pub fn emitted(&self) -> u64 {
+        self.emitted.load(Ordering::Relaxed)
+    }
+
+    /// The bytes read.
+    pub fn received(&self) -> u64 {
+        self.received.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn add_emitted(&self, n: u64) {
+        self.emitted.fetch_add(n, Ordering::Relaxed);
+    }
+
+    pub(crate) fn add_received(&self, n: u64) {
+        self.received.fetch_add(n, Ordering::Relaxed);
+    }
+}
 
 /// A host's state (one per process).
 pub struct Host {
@@ -44,6 +76,7 @@ pub struct Host {
     warn_printer: RefCell<Option<WarnPrinter>>,
     close_handlers: RefCell<Vec<(bool, CloseHandler)>>,
     slots: RefCell<HashMap<TypeId, Rc<dyn Any>>>,
+    traffic: RefCell<Arc<Traffic>>,
 }
 
 impl std::fmt::Debug for Host {
@@ -88,6 +121,7 @@ impl Host {
             warn_printer: RefCell::new(Some(default_printer)),
             close_handlers: RefCell::default(),
             slots: RefCell::default(),
+            traffic: RefCell::default(),
         }
     }
 
@@ -203,6 +237,18 @@ impl Host {
     /// Sets `Util.warnPrinter`; `None` drops warnings.
     pub fn set_warn_printer(&self, printer: Option<WarnPrinter>) {
         *self.warn_printer.borrow_mut() = printer;
+    }
+
+    /// What the connections this host's commands are served on have
+    /// written and read.
+    pub fn traffic(&self) -> Arc<Traffic> {
+        self.traffic.borrow().clone()
+    }
+
+    /// Counts what the connections made from now on write and read into
+    /// `traffic`.
+    pub fn set_traffic(&self, traffic: Arc<Traffic>) {
+        *self.traffic.borrow_mut() = traffic;
     }
 
     /// The slot of type `T`, created empty on first use. Don't hold a borrow

@@ -104,7 +104,13 @@ pub struct Config {
     /// length, as the Mac interface does; otherwise only once it has
     /// failed, as the text interface does (`doTransport`).
     pub complete_progress: bool,
+    /// Where the bytes the client's connections write and read are
+    /// counted, as they go (`Remote.emittedBytes`, `Remote.receivedBytes`),
+    /// for a frontend's statistics.
+    pub traffic: Option<Arc<Traffic>>,
 }
+
+pub use gemel_rpc::host::Traffic;
 
 /// What a frontend asks the session to do.
 #[derive(Debug, Clone)]
@@ -735,6 +741,9 @@ impl Session {
             })));
         }
         let rpc = client_rpc(&config.unison_dir, trace, config.loopback)?;
+        if let Some(t) = config.traffic {
+            rpc.client_host().set_traffic(t);
+        }
         // The engine warns synchronously, often holding the preferences:
         // kept for the end of the step. A loopback server's warnings too
         // (a real server's will come with remote roots).
