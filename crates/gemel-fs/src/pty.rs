@@ -115,24 +115,38 @@ mod tests {
         let mut child = cmd.spawn().unwrap();
         // Read as it comes: once the child has gone and the parent closes
         // its slave, what is left may be lost (or the read fail with EIO).
+        // The master is kept until the child has gone: closing it hangs
+        // the child up.
         let mut master = std::fs::File::from(pty.master);
         let reader = std::thread::spawn(move || {
             let mut out = Vec::new();
             let mut buf = [0; 4096];
+            // How the reading ended, for the assertions.
+            let mut end = "with the child's last words".to_owned();
             while !String::from_utf8_lossy(&out).contains("done") {
                 match master.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => {
+                        end = "at the end of the file".to_owned();
+                        break;
+                    }
                     Ok(n) => out.extend_from_slice(&buf[..n]),
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(e) => {
+                        end = format!("with {e}");
+                        break;
+                    }
                 }
             }
-            out
+            (out, end, master)
         });
         let status = child.wait().unwrap();
-        let out = reader.join().unwrap();
+        let (out, end, master) = reader.join().unwrap();
+        drop(master);
         drop(pty.slave);
         let out = String::from_utf8_lossy(&out);
-        assert!(status.success(), "{out}");
-        assert!(out.contains("-echo"), "{out}");
-        assert!(out.contains("done"), "{out}");
+        let what = format!("{status}, reading ended {end}:\n{out}");
+        assert!(status.success(), "{what}");
+        assert!(out.contains("-echo"), "{what}");
+        assert!(out.contains("done"), "{what}");
     }
 }
