@@ -2794,7 +2794,10 @@ pub fn prepare_commit_local(
     let (name, root) = archive::archive_name(host, fspath, ArchiveVersion::ScratchArch)?;
     let file = host.file_in_unison_dir(&name);
     let mode = case::mode(&host.prefs().borrow());
-    let c = gemel_fs::props::PropsConfig::default().with_features(&host.features().borrow());
+    // The hash counts xattrs and ACLs only when they are synchronised, as
+    // `Props.hash` reads the preferences.
+    let c = gemel_fs::props::PropsConfig::from_prefs(&host.prefs().borrow())
+        .with_features(&host.features().borrow());
     let mut props =
         archive::archive_props(host, &root).unwrap_or_else(|| ArchiveProps::empty(mode));
     archive::with_archive(host, &root, |a| {
