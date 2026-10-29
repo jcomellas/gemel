@@ -145,6 +145,15 @@ component Card inherits Rectangle {
     }
 }
 
+// A paragraph: word-wrapped text, as tall as its lines. In a layout in a
+// card, Slint 1.18 counts a wrapped text as one line, so that the card
+// cut off what came after it; the text's own preferred height, for its
+// width, is right.
+component Para inherits Text {
+    wrap: word-wrap;
+    min-height: self.preferred-height;
+}
+
 // The documentation of a preference (`documentPreference`), greyed out
 // with none selected.
 component DocPane inherits VerticalLayout {
@@ -164,9 +173,8 @@ component DocPane inherits VerticalLayout {
                 text: "Short description:";
                 color: root.shown ? Palette.foreground : Palette.border;
             }
-            Text {
+            Para {
                 text: root.short;
-                wrap: word-wrap;
                 accessible-label: "Short description";
             }
         }
@@ -1084,9 +1092,8 @@ export component AppWindow inherits Window {
         card-width: 520px;
         escape => { root.dialog-done(true); }
         property <bool> details;
-        Text {
+        Para {
             text: root.dialog-message;
-            wrap: word-wrap;
             accessible-label: "Message";
         }
         Button {
@@ -1101,14 +1108,12 @@ export component AppWindow inherits Window {
                 spacing: 2px;
                 alignment: start;
                 for entry in root.summary-entries: VerticalLayout {
-                    Text {
+                    Para {
                         text: entry.path + " — " + entry.description;
-                        wrap: word-wrap;
                     }
-                    for error in entry.errors: Text {
+                    for error in entry.errors: Para {
                         x: 16px;
                         text: "• " + error;
-                        wrap: word-wrap;
                     }
                 }
             }
@@ -1129,10 +1134,9 @@ export component AppWindow inherits Window {
     if root.dialog == 5: Card {
         title: root.dialog-title;
         escape => { root.dialog-done(false); }
-        Text {
+        Para {
             text: "Connecting to '" + root.password-root + "'...";
             font-weight: 700;
-            wrap: word-wrap;
         }
         ScrollView {
             min-height: 40px;
@@ -1285,15 +1289,13 @@ export component AppWindow inherits Window {
         title: root.wiz-title;
         card-width: 600px;
         escape => { root.wizard-cancel(); }
-        if root.wiz-page == 0: Text {
+        if root.wiz-page == 0: Para {
             text: "Welcome to the Gemel Profile Creation Assistant.\n\nClick \"Next\" to begin.";
-            wrap: word-wrap;
         }
         if root.wiz-page == 1: VerticalLayout {
             spacing: 6px;
-            Text {
+            Para {
                 text: "Please enter the name of the profile and possibly a short description.";
-                wrap: word-wrap;
             }
             HorizontalLayout {
                 spacing: 6px;
@@ -1324,13 +1326,11 @@ export component AppWindow inherits Window {
         }
         if root.wiz-page == 2: VerticalLayout {
             spacing: 6px;
-            Text {
+            Para {
                 text: "You can use Gemel to synchronize a local directory with another local directory, or with a remote directory.";
-                wrap: word-wrap;
             }
-            Text {
+            Para {
                 text: "Please select the kind of synchronization you want to perform.";
-                wrap: word-wrap;
             }
             HorizontalLayout {
                 spacing: 6px;
@@ -1342,15 +1342,14 @@ export component AppWindow inherits Window {
                     selected => { root.wizard-changed(); }
                 }
             }
-            Text {
+            Para {
                 text: root.wiz-kind-text;
-                wrap: word-wrap;
             }
             if root.wiz-kind != 0: VerticalLayout {
                 spacing: 6px;
                 Text { text: "Configuration"; font-weight: 700; }
-                Text { text: root.wiz-requirement; wrap: word-wrap; }
-                Text { text: root.wiz-connection; wrap: word-wrap; }
+                Para { text: root.wiz-requirement; }
+                Para { text: root.wiz-connection; }
                 HorizontalLayout {
                     spacing: 6px;
                     Text { text: "Host:"; vertical-alignment: center; width: 60px; }
@@ -1378,9 +1377,8 @@ export component AppWindow inherits Window {
                         edited => { root.wizard-changed(); }
                     }
                 }
-                if root.wiz-kind == 1: Text {
+                if root.wiz-kind == 1: Para {
                     text: "Data compression can greatly improve performance on slow connections.  However, it may slow down things on (fast) local networks.";
-                    wrap: word-wrap;
                 }
                 if root.wiz-kind == 1: CheckBox {
                     text: "Enable compression";
@@ -1401,9 +1399,8 @@ export component AppWindow inherits Window {
                 }
                 Text { text: "that you want to synchronize."; vertical-alignment: center; }
             }
-            if root.wiz-remote-note != "": Text {
+            if root.wiz-remote-note != "": Para {
                 text: root.wiz-remote-note;
-                wrap: word-wrap;
             }
             HorizontalLayout {
                 spacing: 6px;
@@ -1439,18 +1436,16 @@ export component AppWindow inherits Window {
         }
         if root.wiz-page == 4: VerticalLayout {
             spacing: 6px;
-            if root.wiz-fat-shown: Text {
+            if root.wiz-fat-shown: Para {
                 text: "Select the following option if one of your directory is on a FAT partition.  This is typically the case for a USB stick.";
-                wrap: word-wrap;
             }
             if root.wiz-fat-shown: CheckBox {
                 text: "Synchronization involving a FAT partition";
                 checked <=> root.wiz-fat;
             }
         }
-        if root.wiz-page == 5: Text {
+        if root.wiz-page == 5: Para {
             text: root.wiz-conclusion;
-            wrap: word-wrap;
         }
         HorizontalLayout {
             alignment: end;
@@ -1483,9 +1478,8 @@ export component AppWindow inherits Window {
         title: "Root selection";
         card-width: 560px;
         escape => { root.dialog-done(false); }
-        Text {
+        Para {
             text: root.dialog-message;
-            wrap: word-wrap;
         }
         HorizontalLayout {
             spacing: 6px;
@@ -1505,13 +1499,19 @@ export component AppWindow inherits Window {
                 clicked => { root.browse-root(); }
             }
         }
+        // uigtk3's rows: the kind (radio buttons there), then the host,
+        // the user and the port; here the user has a row of its own, so
+        // that the fields fit the card.
         if root.dialog == 3: HorizontalLayout {
-            spacing: 6px;
+            alignment: start;
             ComboBox {
                 model: ["Local", "SSH", "Socket"];
                 current-index <=> root.root-kind;
                 accessible-label: "Kind";
             }
+        }
+        if root.dialog == 3: HorizontalLayout {
+            spacing: 6px;
             Text {
                 text: "Host:";
                 vertical-alignment: center;
@@ -1522,6 +1522,19 @@ export component AppWindow inherits Window {
                 accessible-label: "Host";
             }
             Text {
+                text: "Port:";
+                vertical-alignment: center;
+            }
+            LineEdit {
+                width: 90px;
+                text <=> root.root-port;
+                enabled: root.root-kind == 2;
+                accessible-label: "Port";
+            }
+        }
+        if root.dialog == 3: HorizontalLayout {
+            spacing: 6px;
+            Text {
                 text: "(Optional) User:";
                 vertical-alignment: center;
             }
@@ -1530,20 +1543,10 @@ export component AppWindow inherits Window {
                 enabled: root.root-kind == 1;
                 accessible-label: "User";
             }
-            Text {
-                text: "Port:";
-                vertical-alignment: center;
-            }
-            LineEdit {
-                text <=> root.root-port;
-                enabled: root.root-kind == 2;
-                accessible-label: "Port";
-            }
         }
-        if root.root-error != "": Text {
+        if root.root-error != "": Para {
             text: root.root-error;
             color: #d23c3c;
-            wrap: word-wrap;
         }
         HorizontalLayout {
             alignment: end;
@@ -1674,7 +1677,7 @@ export component AppWindow inherits Window {
             }
             Row {
                 Text { text: "Description:"; }
-                Text { text: root.pe-description; wrap: word-wrap; accessible-label: "Description"; }
+                Para { text: root.pe-description; accessible-label: "Description"; }
             }
             Row {
                 Text { text: "Type:"; }
@@ -2031,10 +2034,10 @@ export component DocWindow inherits Window {
                             x: 4px;
                             width: parent.width - 8px;
                             text: name;
+                            wrap: word-wrap;
                             font-weight: 700;
                             horizontal-alignment: right;
                             vertical-alignment: center;
-                            wrap: word-wrap;
                             color: i == root.current ? Palette.selection-foreground : Palette.foreground;
                             accessible-role: none;
                         }

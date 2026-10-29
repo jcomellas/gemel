@@ -4,7 +4,8 @@
 //! without running it (CI keeps them). The menu bar is Slint's own, drawn
 //! in the window, as on Linux and Windows; macOS's native one and `rfd`'s
 //! pickers aren't drawn. Each test checks that what it drew isn't
-//! blank.
+//! blank, and that a card's controls lie within it, in the system's
+//! fonts.
 
 mod support;
 
@@ -61,9 +62,46 @@ fn shoot(w: &impl ComponentHandle, name: &str, size: (f32, f32)) {
 /// The main window's size: its preferred one, as it opens.
 const MAIN: (f32, f32) = (900., 640.);
 
-/// Draws the main window as `name.png`.
+/// Draws the main window as `name.png`, once its card's controls (its
+/// buttons, fields, lists and choices) are found to lie within it.
 fn shoot_main(ui: &AppWindow, name: &str) {
     shoot(ui, name, MAIN);
+    let rect = |e: &ElementHandle| {
+        let (p, s) = (e.absolute_position(), e.size());
+        (p.x, p.y, p.x + s.width, p.y + s.height)
+    };
+    let cards = ElementQuery::from_root(ui)
+        .match_descendants()
+        .match_accessible_role(AccessibleRole::Groupbox)
+        .find_all();
+    for card in cards {
+        let c = rect(&card);
+        let controls = card
+            .query_descendants()
+            .match_predicate(|e| {
+                matches!(
+                    e.accessible_role(),
+                    Some(
+                        AccessibleRole::Button
+                            | AccessibleRole::TextInput
+                            | AccessibleRole::Combobox
+                            | AccessibleRole::Checkbox
+                            | AccessibleRole::RadioButton
+                            | AccessibleRole::List
+                    )
+                )
+            })
+            .find_all();
+        for e in controls {
+            let r = rect(&e);
+            assert!(
+                r.0 >= c.0 - 0.5 && r.1 >= c.1 - 0.5 && r.2 <= c.2 + 0.5 && r.3 <= c.3 + 0.5,
+                "{name}: {:?} {:?} at {r:?} isn't within its card, at {c:?}",
+                e.accessible_role(),
+                e.accessible_label()
+            );
+        }
+    }
 }
 
 /// The top and the bottom of the text `label`.
