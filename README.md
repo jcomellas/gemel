@@ -51,8 +51,12 @@ served by OCaml Unison (2.52 on) or by gemel. A transfer that was
 interrupted resumes from what it left, and diff and merge work with a
 remote root. As with OCaml's text interface, ssh asks for passwords and
 passphrases at the terminal.
-Synchronising xattrs and ACLs, and the GUI (with its own password
-prompts), are still to come.
+Milestone 4 is done ([plan](docs/milestone-4-plan.md)): `gemel-gui`
+does what OCaml's GTK interface does, on macOS, Linux and Windows, with
+ssh's password prompts in the window and the profile manager, assistant
+and editor, and with `-ui text`, `-server` and `-socket` it is the same
+program as `gemel`. Synchronising xattrs and ACLs, and installers, are
+still to come.
 
 The socket method has no authentication or encryption, as in OCaml
 Unison: anyone who can reach the port can read and write the server's
@@ -90,7 +94,7 @@ Crates are layered; each depends only on the ones above it:
 | `crates/gemel-engine` | Update detection, reconciliation, propagation, archives |
 | `crates/gemel-ui-api` | The engine/frontend contract |
 | `bins/gemel` | The program: text UI and server modes, as a library and the `gemel` binary (no GUI dependencies, enforced in CI) |
-| `bins/gemel-gui` | Slint GUI frontend after `uigtk3`, on the session (milestone 4, in progress), and with `-ui text` or `-server` the same program as `gemel` |
+| `bins/gemel-gui` | Slint GUI frontend after `uigtk3`, on the session (milestone 4), and with `-ui text` or `-server` the same program as `gemel` |
 | `bins/gemel-fsmonitor` | File-watcher helper |
 
 Each module's doc comment names the Unison source files it ports.
