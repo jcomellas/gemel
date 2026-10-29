@@ -72,6 +72,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::cli;
 use crate::exit_code::ExitCode;
+use crate::profile_editor::{self, Setting};
 use crate::uicommon::startup::{ProfileInfo, Ui, client_rpc};
 use crate::uicommon::stats::Stats;
 use crate::uicommon::{self, Action, Format, Repeat};
@@ -147,6 +148,14 @@ pub enum Command {
     /// `getProfile`'s `deleteProfile`: removes the profile `name` (as
     /// there, an error removing it is dropped). Replies [`Event::Profiles`].
     DeleteProfile(String),
+    /// `editProfile`'s reading: the preferences the profile `name` sets
+    /// ([`profile_editor::read_settings`]). Replies
+    /// [`Event::ProfileSettings`].
+    ReadProfile(String),
+    /// `editProfile`'s `applyCommand`: writes these settings over the
+    /// profile `name` ([`profile_editor::profile_text`]), readable by its
+    /// owner only if it is made. Replies [`Event::Profiles`].
+    WriteProfile(String, Vec<Setting>),
     /// `clearClRoots`: the roots the command line gave are forgotten, so
     /// that the profile loaded next has its own (as after an error
     /// starting). Replies [`Event::Profiles`], which a frontend then shows.
@@ -351,6 +360,8 @@ pub enum Event {
     Started(Option<String>),
     /// The profiles found.
     Profiles(Vec<(String, ProfileInfo)>),
+    /// [`Command::ReadProfile`]'s reply.
+    ProfileSettings(Vec<Setting>),
     /// [`Command::LoadProfile`]'s and [`Command::Configure`]'s reply.
     ProfileLoaded(Settings),
     /// [`Command::ProfileUnchanged`]'s reply.
@@ -940,12 +951,26 @@ impl Session {
                     .prefs()
                     .borrow()
                     .profile_pathname(&p.name, true)?;
-                write_new_profile(&path, &p.text()).map_err(|e| {
-                    // As `Sys_error` has it.
-                    let e = e.to_string();
-                    let e = e.split(" (os error").next().unwrap_or(&e);
-                    Error::Transient(format!("{}: {e}", path.display()))
-                })?;
+                write_new_profile(&path, &p.text()).map_err(|e| sys_error(&path, &e))?;
+                self.ui.scan_profiles()?;
+                self.send(Event::Profiles(self.ui.profiles_and_roots.clone()));
+            }
+            Command::ReadProfile(name) => {
+                let settings = {
+                    let mut prefs = self.rpc().client_host().prefs().borrow_mut();
+                    profile_editor::read_settings(&mut prefs, &name)?
+                };
+                self.send(Event::ProfileSettings(settings));
+            }
+            Command::WriteProfile(name, settings) => {
+                let path = self
+                    .rpc()
+                    .client_host()
+                    .prefs()
+                    .borrow()
+                    .profile_pathname(&name, true)?;
+                write_profile(&path, &profile_editor::profile_text(&settings))
+                    .map_err(|e| sys_error(&path, &e))?;
                 self.ui.scan_profiles()?;
                 self.send(Event::Profiles(self.ui.profiles_and_roots.clone()));
             }
@@ -1836,6 +1861,24 @@ fn write_new_profile(path: &std::path::Path, text: &str) -> std::io::Result<()> 
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
     o.open(path)?.write_all(text.as_bytes())
+}
+
+/// `open_out_gen [Open_wronly; Open_creat; Open_trunc] 0o600`: writes a
+/// file over what it had, readable by its owner only if it is made.
+fn write_profile(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)?.write_all(text.as_bytes())
+}
+
+/// An error writing `path`, as OCaml's `Sys_error` has it.
+fn sys_error(path: &std::path::Path, e: &std::io::Error) -> Error {
+    let e = e.to_string();
+    let e = e.split(" (os error").next().unwrap_or(&e);
+    Error::Transient(format!("{}: {e}", path.display()))
 }
 
 /// `root2hostname`.
