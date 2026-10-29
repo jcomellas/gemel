@@ -4,10 +4,12 @@
 //! modelled on `uimacbridge.ml`: profile initialisation, update detection,
 //! per-item accessors and direction setters, synchronization, progress,
 //! ignore and diff. Commands go in and events come out over channels.
-//! [`uicommon`] is what the frontends share besides.
+//! [`uicommon`] is what the frontends share besides, and [`manual`] the
+//! manual they show.
 
 pub mod cli;
 pub mod exit_code;
+pub mod manual;
 pub mod session;
 pub mod uicommon;
 
