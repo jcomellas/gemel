@@ -18,8 +18,8 @@
 //! for and ending it).
 //!
 //! Not ported yet: AppleDouble files (resource forks on volumes without
-//! them), reading and setting xattrs and ACLs, and block cloning on
-//! Windows (see [`reflink`]).
+//! them), reading and setting ACLs, and block cloning on Windows (see
+//! [`reflink`]).
 
 #[cfg(windows)]
 pub mod conpty;
@@ -37,3 +37,4 @@ pub mod reflink;
 pub mod signal;
 pub mod system;
 pub mod terminal;
+pub mod xattr;
