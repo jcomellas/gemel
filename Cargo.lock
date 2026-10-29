@@ -1537,6 +1537,7 @@ dependencies = [
  "gemel-ui-api",
  "i-slint-backend-testing",
  "i-slint-core",
+ "png",
  "rfd",
  "slint",
  "slint-build",

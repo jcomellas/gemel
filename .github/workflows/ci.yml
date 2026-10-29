@@ -24,6 +24,14 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The window drawn on each system (bins/gemel-gui/tests/screenshots.rs),
+      # to look at.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ matrix.os }}
+          path: target/tmp/screenshots
+          if-no-files-found: ignore
       - run: ./scripts/check-no-gui-deps.sh
         shell: bash
       # There is no OCaml Unison on Windows, nor on the macOS runner: gemel

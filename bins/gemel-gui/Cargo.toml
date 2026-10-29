@@ -29,9 +29,12 @@ rfd = "0.17.2"
 [dev-dependencies]
 # The harness's scenarios, runs and comparisons (tests/support).
 gemel-oracle.workspace = true
-# Slint's headless testing backend: element queries by accessible role.
-# Must match the slint version exactly.
-i-slint-backend-testing = "=1.18.1"
+# Slint's headless testing backend: element queries by accessible role,
+# and the software renderer for the screenshots. Must match the slint
+# version exactly.
+i-slint-backend-testing = { version = "=1.18.1", features = ["renderer-software"] }
+# The screenshots' PNGs.
+png = "0.18.1"
 # StyledText's text, to check the documentation reads as markdown.
 i-slint-core = "=1.18.1"
 
