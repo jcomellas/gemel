@@ -332,6 +332,11 @@ fn the_manual_has_a_window_of_its_own() {
     tab.invoke_accessible_default_action();
     assert_eq!(w.get_current(), 7);
     assert_eq!(first_line(), "Tutorial");
+    // The keys.
+    type_text(w, &SharedString::from(Key::DownArrow));
+    assert_eq!(w.get_current(), 8);
+    type_text(w, &SharedString::from(Key::UpArrow));
+    assert_eq!(w.get_current(), 7);
     // Each page is shown as far down as it was.
     assert_eq!(w.get_scroll(), 0.);
     ui.invoke_documentation("nosuch".into());
@@ -339,7 +344,8 @@ fn the_manual_has_a_window_of_its_own() {
     w.invoke_select(10);
     // The list may move it a little as it lays the page out again.
     assert!(w.get_scroll() < -400., "{}", w.get_scroll());
-    assert!(press(w, "Close"));
+    // Escape closes, as Close does.
+    type_text(w, &SharedString::from(Key::Escape));
     assert!(!w.window().is_visible());
     ui.invoke_documentation("nosuch".into());
     assert!(w.window().is_visible());
@@ -368,7 +374,13 @@ fn the_profile_editor_writes_profiles_as_uigtk3_does() {
     let _ticks = app.start_ticks();
     assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
     assert!(!can_press(ui, "Edit"));
-    ui.invoke_profile_clicked(1);
+    // The manager's list takes Up and Down.
+    let down = SharedString::from(Key::DownArrow);
+    let up = SharedString::from(Key::UpArrow);
+    let enter = SharedString::from(Key::Return);
+    type_text(ui, &down);
+    type_text(ui, &down);
+    assert_eq!(ui.get_profile_selected(), 1);
     assert!(press(ui, "Edit"));
     assert!(wait_until(WAIT, || ui.get_dialog() == 8), "{}", out.text());
     assert_eq!(ui.get_editor_title(), "b - Profile Editor");
@@ -396,13 +408,16 @@ fn the_profile_editor_writes_profiles_as_uigtk3_does() {
     assert!(press(ui, "Name"));
     // Nothing selected, nothing documented.
     assert!(!ui.get_doc_shown() && !can_press(ui, "Edit"));
-    ui.invoke_editor_clicked(row("log"));
+    // Down twice, to `log`; Enter edits it.
+    type_text(ui, &down);
+    type_text(ui, &down);
+    assert_eq!(ui.get_editor_selected(), row("log"));
     assert!(ui.get_doc_shown());
     assert!(!ui.get_doc_short().is_empty());
     assert!(!app.documentation_markdown().is_empty());
 
     // A boolean.
-    assert!(press(ui, "Edit"));
+    type_text(ui, &enter);
     assert_eq!(ui.get_dialog(), 9);
     assert_eq!((ui.get_pe_name(), ui.get_pe_kind()), ("log".into(), 0));
     assert!(!ui.get_pe_truth());
@@ -430,9 +445,25 @@ fn the_profile_editor_writes_profiles_as_uigtk3_does() {
     assert!(ui.get_editor_modified());
 
     // A list, from the tree.
+    // Escape closes the tree, its list having the keys.
     assert!(press(ui, "Add"));
     assert_eq!(ui.get_dialog(), 10);
+    type_text(ui, &SharedString::from(Key::Escape));
+    assert_eq!(ui.get_dialog(), 8);
+    assert!(press(ui, "Add"));
     assert!(!ui.get_tree_can_add());
+    // The tree's keys: Left collapses the first group, Right expands it,
+    // then goes in.
+    let tree_len = || ui.get_tree_rows().row_count();
+    let expanded = tree_len();
+    type_text(ui, &down);
+    assert_eq!(ui.get_tree_selected(), 0);
+    type_text(ui, &SharedString::from(Key::LeftArrow));
+    assert!(tree_len() < expanded);
+    type_text(ui, &SharedString::from(Key::RightArrow));
+    assert_eq!((tree_len(), ui.get_tree_selected()), (expanded, 0));
+    type_text(ui, &SharedString::from(Key::RightArrow));
+    assert_eq!(ui.get_tree_selected(), 1);
     assert!(press(ui, "Expand all"));
     let ignore = ui
         .get_tree_rows()
@@ -447,6 +478,18 @@ fn the_profile_editor_writes_profiles_as_uigtk3_does() {
     ui.set_pe_entry("Name *.tmp".into());
     assert!(press(ui, "Add"));
     assert_eq!(ui.get_pe_items().row_data(0).unwrap(), "Name *.tmp");
+    ui.set_pe_entry("Name *.o".into());
+    assert!(press(ui, "Add"));
+    // Up goes to the value before, which is then the one edited.
+    assert_eq!(ui.get_pe_item(), 1);
+    type_text(ui, &up);
+    assert_eq!(
+        (ui.get_pe_item(), ui.get_pe_entry()),
+        (0, "Name *.tmp".into())
+    );
+    type_text(ui, &down);
+    assert!(press(ui, "Remove"));
+    assert_eq!(ui.get_pe_items().row_count(), 1);
     assert!(press(ui, "OK"));
     assert_eq!(rows()[row("ignore") as usize].2, "Name *.tmp");
 

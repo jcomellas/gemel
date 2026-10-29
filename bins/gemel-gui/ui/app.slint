@@ -197,6 +197,70 @@ component DocPane inherits VerticalLayout {
     }
 }
 
+// A list of rows 22px high, in a frame, with keys: Up and Down choose
+// the row before or after the one selected (`step`), Enter activates it,
+// and Left and Right are for a tree. Its `ListView` binds its `content-y`
+// to `scroll`, and gives its `visible-height`, so that the row selected
+// is kept in view.
+component KeyedList inherits FocusScope {
+    in property <int> count;
+    in property <int> selected: -1;
+    in property <length> list-height: 220px;
+    in-out property <length> scroll;
+    in property <length> view-height;
+    in property <bool> tree;
+    // Takes the keys when its card opens.
+    in property <bool> first-focus;
+    init => {
+        if root.first-focus { root.focus(); }
+    }
+    callback step(row: int);
+    callback activate(row: int);
+    callback left(row: int);
+    callback right(row: int);
+    key-pressed(event) => {
+        if event.modifiers.control || event.modifiers.meta || event.modifiers.alt {
+            return reject;
+        }
+        if event.text == Key.UpArrow {
+            if root.count > 0 { root.step(max(0, root.selected - 1)); }
+            return accept;
+        }
+        if event.text == Key.DownArrow {
+            if root.count > 0 { root.step(min(root.count - 1, root.selected + 1)); }
+            return accept;
+        }
+        if event.text == Key.Return && root.selected >= 0 {
+            root.activate(root.selected);
+            return accept;
+        }
+        if root.tree && event.text == Key.LeftArrow && root.selected >= 0 {
+            root.left(root.selected);
+            return accept;
+        }
+        if root.tree && event.text == Key.RightArrow && root.selected >= 0 {
+            root.right(root.selected);
+            return accept;
+        }
+        reject
+    }
+    changed selected => {
+        if root.selected >= 0 {
+            if root.selected * 22px < -root.scroll {
+                root.scroll = -root.selected * 22px;
+            } else if (root.selected + 1) * 22px > -root.scroll + root.view-height {
+                root.scroll = -((root.selected + 1) * 22px - root.view-height);
+            }
+        }
+    }
+    Rectangle {
+        height: root.list-height;
+        border-width: 1px;
+        border-color: root.has-focus ? Palette.accent-background : Palette.border;
+        @children
+    }
+}
+
 // A preference's row in a list: its cells, the row selected highlighted.
 component ListRow inherits Rectangle {
     in property <bool> selected;
@@ -395,6 +459,8 @@ export component AppWindow inherits Window {
     callback tree-clicked(row: int);
     callback tree-select(row: int);
     callback tree-activated(row: int);
+    callback tree-left(row: int);
+    callback tree-right(row: int);
     callback tree-toggle-all();
     callback tree-close(ok: bool);
     callback wizard-changed();
@@ -1104,12 +1170,16 @@ export component AppWindow inherits Window {
         Text { text: "Select a profile:"; }
         HorizontalLayout {
             spacing: 12px;
-            Rectangle {
-                height: 220px;
-                border-width: 1px;
-                border-color: Palette.border;
-                ListView {
+            profile-list := KeyedList {
+                count: root.profiles.length;
+                selected: root.profile-selected;
+                first-focus: true;
+                view-height: profile-view.visible-height;
+                step(r) => { root.profile-clicked(r); }
+                activate(r) => { root.profile-open(); }
+                profile-view := ListView {
                     accessible-label: "Profiles";
+                    content-y <=> profile-list.scroll;
                     for p[i] in root.profiles: Rectangle {
                         height: 22px;
                         background: i == root.profile-selected ? Palette.selection-background : transparent;
@@ -1120,7 +1190,7 @@ export component AppWindow inherits Window {
                         accessible-item-index: i;
                         accessible-action-default => { root.profile-clicked(i); }
                         TouchArea {
-                            clicked => { root.profile-clicked(i); }
+                            clicked => { root.profile-clicked(i); profile-list.focus(); }
                             double-clicked => { root.profile-clicked(i); root.profile-open(); }
                         }
                         HorizontalLayout {
@@ -1509,17 +1579,21 @@ export component AppWindow inherits Window {
                     HeaderCell { width: 90px; label: "Type"; }
                     HeaderCell { label: "Value"; }
                 }
-                Rectangle {
-                    height: 220px;
-                    border-width: 1px;
-                    border-color: Palette.border;
-                    ListView {
+                editor-list := KeyedList {
+                    count: root.editor-rows.length;
+                    selected: root.editor-selected;
+                    first-focus: true;
+                    view-height: editor-view.visible-height;
+                    step(r) => { root.editor-clicked(r); }
+                    activate(r) => { root.editor-activated(r); }
+                    editor-view := ListView {
                         accessible-label: "Preferences";
+                        content-y <=> editor-list.scroll;
                         for r[i] in root.editor-rows: ListRow {
                             selected: i == root.editor-selected;
                             label: r.name;
                             index: i;
-                            clicked => { root.editor-clicked(i); }
+                            clicked => { root.editor-clicked(i); editor-list.focus(); }
                             double-clicked => { root.editor-clicked(i); root.editor-activated(i); }
                             HorizontalLayout {
                                 padding-left: 4px;
@@ -1628,17 +1702,21 @@ export component AppWindow inherits Window {
                 }
                 if root.pe-kind == 2: HorizontalLayout {
                     spacing: 12px;
-                    Rectangle {
-                        height: 160px;
-                        border-width: 1px;
-                        border-color: Palette.border;
-                        ListView {
+                    value-list := KeyedList {
+                        count: root.pe-items.length;
+                        selected: root.pe-item;
+                        list-height: 160px;
+                        first-focus: true;
+                        view-height: value-view.visible-height;
+                        step(r) => { root.pe-item-clicked(r); }
+                        value-view := ListView {
                             accessible-label: "Value";
+                            content-y <=> value-list.scroll;
                             for v[i] in root.pe-items: ListRow {
                                 selected: i == root.pe-item;
                                 label: v;
                                 index: i;
-                                clicked => { root.pe-item-clicked(i); }
+                                clicked => { root.pe-item-clicked(i); value-list.focus(); }
                                 Text {
                                     x: 4px;
                                     text: v;
@@ -1724,13 +1802,21 @@ export component AppWindow inherits Window {
                 clicked => { root.tree-toggle-all(); }
             }
         }
-        Rectangle {
-            height: 240px;
-            border-width: 1px;
-            border-color: Palette.border;
-            ListView {
+        tree-list := KeyedList {
+            count: root.tree-rows.length;
+            selected: root.tree-selected;
+            list-height: 240px;
+            tree: true;
+            first-focus: true;
+            view-height: tree-view.visible-height;
+            step(r) => { root.tree-select(r); }
+            activate(r) => { root.tree-activated(r); }
+            left(r) => { root.tree-left(r); }
+            right(r) => { root.tree-right(r); }
+            tree-view := ListView {
                 accessible-role: tree;
                 accessible-label: "Preferences";
+                content-y <=> tree-list.scroll;
                 for r[i] in root.tree-rows: ListRow {
                     selected: i == root.tree-selected;
                     label: r.title;
@@ -1739,7 +1825,7 @@ export component AppWindow inherits Window {
                     accessible-expanded: r.expanded;
                     accessible-action-expand => { if r.parent && !r.expanded { root.tree-clicked(i); } }
                     accessible-action-default => { root.tree-select(i); }
-                    clicked => { root.tree-clicked(i); }
+                    clicked => { root.tree-clicked(i); tree-list.focus(); }
                     double-clicked => { root.tree-activated(i); }
                     Text {
                         x: 4px + r.depth * 18px;
@@ -1888,67 +1974,90 @@ export component DocWindow inherits Window {
     in property <int> current;
     // The lines of the section chosen, and how far down they are shown.
     in property <[string]> lines;
-    in-out property <length> scroll <=> text.viewport-y;
+    in-out property <length> scroll <=> text.content-y;
     in property <string> mono-font: "Menlo";
 
     callback select(page: int);
     callback close();
 
-    VerticalLayout {
-        padding: 8px;
-        spacing: 8px;
-        HorizontalLayout {
-            spacing: 8px;
-            VerticalLayout {
-                width: 170px;
-                alignment: start;
-                accessible-role: tab-list;
-                accessible-label: "Sections";
-                for name[i] in root.pages: Rectangle {
-                    height: tab-name.preferred-height + 8px;
-                    background: i == root.current ? Palette.selection-background : transparent;
-                    accessible-role: tab;
-                    accessible-label: name;
-                    accessible-item-selectable: true;
-                    accessible-item-selected: i == root.current;
-                    accessible-item-index: i;
-                    accessible-action-default => { root.select(i); }
-                    TouchArea {
-                        clicked => { root.select(i); }
-                    }
-                    tab-name := Text {
-                        x: 4px;
-                        width: parent.width - 8px;
-                        text: name;
-                        font-weight: 700;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                        wrap: word-wrap;
-                        color: i == root.current ? Palette.selection-foreground : Palette.foreground;
-                        accessible-role: none;
-                    }
-                }
+    // The keys: Up and Down (or Ctrl+Page Up and Page Down) go to the
+    // tab before or after; Escape closes.
+    FocusScope {
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.close();
+                return accept;
             }
-            Rectangle {
-                border-width: 1px;
-                border-color: Palette.border;
-                text := ListView {
-                    accessible-role: tab-panel;
-                    accessible-label: root.pages[root.current];
-                    for line in root.lines: Text {
-                        x: 4px;
-                        text: line;
-                        font-family: root.mono-font;
-                        wrap: no-wrap;
-                    }
-                }
+            if event.modifiers.alt || event.modifiers.meta {
+                return reject;
             }
+            if event.text == Key.UpArrow || (event.modifiers.control && event.text == Key.PageUp) {
+                root.select(max(0, root.current - 1));
+                return accept;
+            }
+            if event.text == Key.DownArrow || (event.modifiers.control && event.text == Key.PageDown) {
+                root.select(min(root.pages.length - 1, root.current + 1));
+                return accept;
+            }
+            reject
         }
-        HorizontalLayout {
-            alignment: end;
-            Button {
-                text: "Close";
-                clicked => { root.close(); }
+        VerticalLayout {
+            padding: 8px;
+            spacing: 8px;
+            HorizontalLayout {
+                spacing: 8px;
+                VerticalLayout {
+                    width: 170px;
+                    alignment: start;
+                    accessible-role: tab-list;
+                    accessible-label: "Sections";
+                    for name[i] in root.pages: Rectangle {
+                        height: tab-name.preferred-height + 8px;
+                        background: i == root.current ? Palette.selection-background : transparent;
+                        accessible-role: tab;
+                        accessible-label: name;
+                        accessible-item-selectable: true;
+                        accessible-item-selected: i == root.current;
+                        accessible-item-index: i;
+                        accessible-action-default => { root.select(i); }
+                        TouchArea {
+                            clicked => { root.select(i); }
+                        }
+                        tab-name := Text {
+                            x: 4px;
+                            width: parent.width - 8px;
+                            text: name;
+                            font-weight: 700;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                            color: i == root.current ? Palette.selection-foreground : Palette.foreground;
+                            accessible-role: none;
+                        }
+                    }
+                }
+                Rectangle {
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    text := ListView {
+                        accessible-role: tab-panel;
+                        accessible-label: root.pages[root.current];
+                        for line in root.lines: Text {
+                            x: 4px;
+                            text: line;
+                            font-family: root.mono-font;
+                            wrap: no-wrap;
+                        }
+                    }
+                }
+            }
+            HorizontalLayout {
+                alignment: end;
+                Button {
+                    text: "Close";
+                    clicked => { root.close(); }
+                }
             }
         }
     }

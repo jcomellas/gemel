@@ -146,8 +146,8 @@ pub fn click(ui: &AppWindow, at: LogicalPosition, modifier: Option<Key>) {
     }
 }
 
-/// Types `text`, as one key.
-pub fn type_text(ui: &AppWindow, text: &str) {
+/// Types `text`, as one key, in any window.
+pub fn type_text(ui: &impl ComponentHandle, text: &str) {
     let w = ui.window();
     w.dispatch_event(WindowEvent::KeyPressed { text: text.into() });
     w.dispatch_event(WindowEvent::KeyReleased { text: text.into() });
