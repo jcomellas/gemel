@@ -17,6 +17,7 @@
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 
 pub mod editor;
+pub mod fake;
 pub mod recon_view;
 pub mod stats;
 pub mod summary;

@@ -17,9 +17,7 @@ use gemel_gui::{App, Startup};
 use gemel_oracle::compare::{check_recheck, compare_state};
 use gemel_oracle::run::{self, How, Pairing, Remote, Step};
 use gemel_oracle::scenario::{Flavour, Scenario};
-use gemel_ui_api::session::{ItemView, RootNames, Updates};
-use gemel_ui_api::uicommon::Action;
-use gemel_ui_api::{Global, Trace};
+use gemel_ui_api::Trace;
 use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition};
@@ -157,59 +155,9 @@ pub fn type_text(ui: &AppWindow, text: &str) {
 
 // ---- Items without a session ----
 
-/// An item as the session would show a new file at `path` in the first
-/// replica, with `action`.
-pub fn fake_item(path: &str, action: Action) -> ItemView {
-    ItemView {
-        path: gemel_ui_api::Path::<Global>::from_bytes(path.as_bytes()).unwrap(),
-        path_string: path.to_owned(),
-        left: "Created",
-        right: "",
-        action,
-        conflict: matches!(action, Action::Skip(_)),
-        changed_from_default: false,
-        can_diff: false,
-        both_files: true,
-        length: 100,
-        file_type: "file",
-        line: String::new(),
-        details: format!("new file  {path}\n"),
-        problematic: matches!(action, Action::Skip(_)),
-        partially_problematic: false,
-        deletion: false,
-        transferred: 0,
-        progress: String::new(),
-        outcome: None,
-        status1: "new file",
-        status2: "        ",
-        shown_path: path.to_owned(),
-        problem: None,
-        skip_reason: None,
-        errors1: Vec::new(),
-        errors2: Vec::new(),
-        props_only: false,
-        favor_changed: None,
-    }
-}
-
-/// Update detection's result, with `items`.
-pub fn fake_updates(items: Vec<ItemView>) -> Updates {
-    let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
-    Updates {
-        items,
-        any_equal_updates: false,
-        dangerous: Vec::new(),
-        dangerous_message: None,
-        found_archives: true,
-        roots: RootNames {
-            short: pair("a", "b"),
-            narrow: pair("a", "b"),
-            full: pair("a", "b"),
-            headings: String::new(),
-            hosts: pair("local", "local"),
-        },
-    }
-}
+// Not every test uses them.
+#[allow(unused_imports)]
+pub use gemel_gui::fake::{item as fake_item, updates as fake_updates};
 
 // ---- Syncs through the window ----
 
