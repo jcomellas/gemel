@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 3a, 2026-10-25) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 3b, 2026-10-28) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -348,7 +348,7 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - the profiles written, compared with what `uigtk3`'s code writes (its format strings);
   - each written profile loaded by OCaml Unison and by `gemel`;
   - `gemel -doc` compared with OCaml's.
-- **Likely split:** 3a, the manager and the wizard; 3b, the editor and the manual.
+- **Split:** 3a, the manager and the wizard; 3b, the manual; 3c, the editor. The editor (~900 lines of `uigtk3`, and the session's commands for it) was too much to go with the manual in one PR.
 
 **Notes (phase 3a, 2026-10-25):**
 - **The session's gaps:**
@@ -375,7 +375,7 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - after a later error with no profile loaded (Quit exits 1);
   - from Change Profile: the toolbar, the Synchronization menu and `p`, with Cancel.
 
-  Edit and Help come with 3b.
+  Edit comes with 3c, and Help with 3b.
 - **Startup scans the profiles first** (`updateProfileKeyMenu`), as before. A profile chosen in the manager is loaded with the command line's roots unless they were forgotten, as `initPrefs` does.
 - **The assistant** (`createProfile`) is a card, a page at a time:
   - the name and description;
@@ -395,6 +395,29 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - Change Profile to another profile;
   - an unknown profile on the command line, whose error leads to the manager;
   - a profile that can't be saved, and the error dialog's buttons.
+
+**Notes (phase 3b, 2026-10-28):**
+- **The manual as data** (design decision 5): `tools/ocaml-fixtures/gen_manual.ml`, linked against `strings.ml`, writes `Strings.docs` as Rust source, `gemel-ui-api/src/manual/docs.rs`, which `scripts/gen-ocaml-fixtures.sh` regenerates. It is OCaml's own list that is written out, not `strings.ml`'s text that is parsed: its escapes and its continued lines are OCaml's to read. Every section is UTF-8, so the texts are raw string literals. `.gitattributes` keeps the file's bytes as generated.
+- **About** names gemel and its version (`Gemel File Synchronizer`, `Version 0.1.0`), and is titled "About Gemel": upstream makes it from the version it builds. The rest is Unison's manual as it is, Unison named in it.
+- **`gemel -doc`**, as `main.ml` prints it:
+  - `topics` lists the sections with a topic;
+  - `all` prints the manual but for the Junk;
+  - a topic prints the first section it names, `""` the Overview;
+  - a topic that isn't one is said so, with exit code 0.
+
+  A closed pipe ends the output quietly, as in OCaml. `verify_stdout` matters only for a Windows build without a console, which gemel doesn't have.
+- **Compared with OCaml:** every topic, but for the program's name and About. Against `8772d26`'s build (in the Linux image, `target/oracle`) the rest is the same. Homebrew's 2.54.0 still has a paragraph on `mergebatch`, which `8772d26` removed with the preference; the test leaves that paragraph out of OCaml's output when it is there.
+- **The documentation window** (`documentation`) is a window of its own:
+  - a tab for each section with a topic, About first;
+  - the section chosen, in the monospaced font, unwrapped, in a list that shows only the lines in view (Running Unison is over 2,000 lines), each page as far down as it was, as a page of GTK's notebook keeps it;
+  - Close.
+
+  There is one window. Asked for again while it is open, it goes to the section asked for, or stays where it is for a section it hasn't. Once closed, it starts again at About, each page at its top.
+
+  Unlike GTK's, its text can't be selected, as it is a list of lines, and its tabs are chosen with the pointer or a screen reader, not the keyboard. It hasn't been looked at on a real renderer yet (phase 4): the testing backend's fonts are fake, so empty lines' heights and the wrapped tabs are still to be seen.
+- **The Help menu** (`addDocSection`) has an item for each of those sections. **Help in the profile manager** opens the window at About, the page that `uigtk3`'s `""` finds.
+- **Window test:** the Help menu's sections; Help in the manager; a section asked for; a tab chosen as a screen reader chooses it; each page's place; a section the window hasn't; and Close.
+- **A test fixed:** `gemel-fs`'s pseudo-terminal test (phase 2a) closed the master once the child's last words had come, which hung the child up if it hadn't exited yet. It failed now and then on macOS, with the child's output whole; the master is now kept until the child has gone. Another failure was seen once, before that fix, and isn't explained: the output stopped short of the child's last words, so the reading ended early. The test now retries an interrupted read, and its assertions say how the reading ended, should it happen again.
 
 ### Phase 4: each system, and the rest
 
