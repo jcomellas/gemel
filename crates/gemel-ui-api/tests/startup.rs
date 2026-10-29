@@ -456,9 +456,8 @@ fn diffs_are_of_where_the_files_are() {
 
 /// `xattrs`, `xattrignore`, `xattrignorenot` and `acl` are sent only with
 /// their features, in OCaml's order, so a server without them (2.52) isn't
-/// sent preferences it doesn't know. Setting `xattrs` is refused without
-/// its feature, as OCaml refuses it; setting `acl` is refused until gemel
-/// synchronises ACLs.
+/// sent preferences it doesn't know. Setting `xattrs` or `acl` is refused
+/// without its feature, as OCaml refuses it.
 #[test]
 fn xattr_and_acl_preferences_follow_their_features() {
     use gemel_fs::props::{FEATURE_ACL, FEATURE_XATTR, SYNC_ACL, SYNC_XATTRS};
@@ -490,20 +489,19 @@ fn xattr_and_acl_preferences_follow_their_features() {
         let message = format!("You have requested synchronization of {what} but the server");
         assert!(e.contains(&message), "{e}");
     };
-    // With the feature, xattrs are synchronised.
+    // With the features, xattrs and ACLs are synchronised.
     prefs.set(&SYNC_XATTRS, true);
-    assert_eq!(features.validate_enabled(&prefs), Ok(()));
-    prefs.set(&SYNC_XATTRS, false);
-    // ACLs aren't yet, whether or not the feature is enabled.
     prefs.set(&SYNC_ACL, true);
-    refused(&prefs, &features, "ACLs (the \"acl\" preference)");
-    prefs.set(&SYNC_ACL, false);
-    // Without the feature, as with a 2.52 server.
+    assert_eq!(features.validate_enabled(&prefs), Ok(()));
+    // Without them, as with a 2.52 server.
     features.reset_enabled();
-    prefs.set(&SYNC_XATTRS, true);
+    prefs.set(&SYNC_ACL, false);
     refused(
         &prefs,
         &features,
         "extended attributes (the \"xattrs\" preference)",
     );
+    prefs.set(&SYNC_XATTRS, false);
+    prefs.set(&SYNC_ACL, true);
+    refused(&prefs, &features, "ACLs (the \"acl\" preference)");
 }

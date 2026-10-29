@@ -24,9 +24,10 @@
 //!   property lists themselves.
 //! - The `"props data"` property (data shared between xattrs and ACLs) is
 //!   kept in the host's stores (`Propsdata`): the xattr store that the
-//!   host's scans share ([`crate::xattrs::store`]), and the ACL store in
-//!   the archive cache. gemel doesn't synchronise ACLs yet, so it adds no
-//!   ACL data of its own.
+//!   host's scans share ([`crate::xattrs::store`]), and the ACL store
+//!   ([`crate::xattrs::acl_store`]). The ACL texts it loads or receives
+//!   are also recorded for the whole process, where props look them up
+//!   (`propsdata::acl_text`).
 //! - An archive is decoded with the features its file records, without
 //!   enabling them on the host meanwhile.
 //! - A truncated archive is reported as damaged, where OCaml stops with an
@@ -1029,11 +1030,6 @@ struct ArchiveCache {
     info: HashMap<String, Option<Stats>>,
 }
 
-/// The host's ACL texts by key (`Propsdata.ACL`), apart from the archive
-/// cache, whose archives may be borrowed while the store changes.
-#[derive(Default)]
-struct AclStore(propsdata::Store);
-
 fn cache(host: &Host) -> Rc<std::cell::RefCell<ArchiveCache>> {
     host.state::<ArchiveCache>()
 }
@@ -1094,9 +1090,11 @@ fn with_xattr_store<R>(host: &Host, f: impl FnOnce(&mut propsdata::Store) -> R) 
     f(&mut store)
 }
 
-/// Runs `f` on the host's ACL store.
+/// Runs `f` on the host's ACL store (`Propsdata.ACL`).
 fn with_acl_store<R>(host: &Host, f: impl FnOnce(&mut propsdata::Store) -> R) -> R {
-    f(&mut host.state::<AclStore>().borrow_mut().0)
+    let store = crate::xattrs::acl_store(host);
+    let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut store)
 }
 
 /// `Props.Data.extern`: the host's data of `kind`, as OCaml lists it (ACLs
@@ -1158,6 +1156,7 @@ pub fn extern_archive_propsdata(host: &Host, archive: &Archive, props: &mut Prop
 /// host's. A key must not have two values.
 pub fn merge_props_data(host: &Host, data: &PropsData) -> Result<(), Error> {
     with_xattr_store(host, |s| s.merge(extract(data, b"xattr"))).map_err(Error::Fatal)?;
+    propsdata::remember_acl(extract(data, b"ACL"));
     with_acl_store(host, |s| s.merge(extract(data, b"ACL"))).map_err(Error::Fatal)
 }
 
@@ -1202,6 +1201,7 @@ fn intern_archive_propsdata(host: &Host, props: &Proplist) {
     let data = props.find(&PROPS_DATA_KEY).cloned().unwrap_or_default();
     with_xattr_store(host, |s| s.set(extract(&data, b"xattr")));
     with_acl_store(host, |s| s.set(extract(&data, b"ACL")));
+    propsdata::remember_acl(extract(&data, b"ACL"));
 }
 
 // ---- Case conversion ----

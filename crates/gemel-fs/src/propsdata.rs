@@ -123,6 +123,34 @@ impl Store {
     }
 }
 
+/// Every ACL text known in this process, by its MD5 (`ACL.inflate`).
+///
+/// OCaml looks a key up in the host's store, of which a process has one.
+/// Here a process may run several hosts (a client and its in-process
+/// servers), each with its own [`Store`] for what it adds, keeps and sends.
+/// A key is the digest of its text, so a text one host knows is the text
+/// for every host, and lookups go here instead: texts are added as hosts
+/// make, load or receive them ([`remember_acl`]), and never removed.
+static ACL_TEXTS: std::sync::LazyLock<std::sync::Mutex<HashMap<Vec<u8>, Vec<u8>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Records ACL texts by key, for [`acl_text`].
+pub fn remember_acl(entries: &[Entry]) {
+    let mut t = ACL_TEXTS.lock().unwrap_or_else(|e| e.into_inner());
+    for (k, v) in entries {
+        t.entry(k.clone()).or_insert_with(|| v.clone());
+    }
+}
+
+/// The ACL text of `key`, if a host in this process has known it.
+pub fn acl_text(key: &[u8]) -> Option<Vec<u8>> {
+    ACL_TEXTS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(key)
+        .cloned()
+}
+
 /// `Props.Data`'s stores on one host.
 #[derive(Debug, Clone, Default)]
 pub struct PropsData {

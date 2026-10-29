@@ -1,7 +1,8 @@
-//! A host's extended-attribute settings and store, for gemel-fs's
+//! A host's extended-attribute settings and its stores, for gemel-fs's
 //! [`XattrCtx`]: the compiled `xattrignore` and `xattrignorenot`
-//! (`Props.skipIgnoredXattr`), and the host's attribute values by MD5
-//! (`Propsdata.Xattr`), which its scans share.
+//! (`Props.skipIgnoredXattr`), the host's attribute values by MD5
+//! (`Propsdata.Xattr`), and its ACL texts by MD5 (`Propsdata.ACL`), which
+//! its scans share.
 
 use std::sync::{Arc, Mutex};
 
@@ -24,12 +25,22 @@ pub fn store(host: &Host) -> Arc<Mutex<Store>> {
     host.state::<HostStore>().borrow().0.clone()
 }
 
+/// The host's ACL store, in its state.
+#[derive(Default)]
+struct HostAclStore(Arc<Mutex<Store>>);
+
+/// The host's ACL texts by MD5 (`Propsdata.ACL`).
+pub fn acl_store(host: &Host) -> Arc<Mutex<Store>> {
+    host.state::<HostAclStore>().borrow().0.clone()
+}
+
 /// What reading and setting a host's xattrs needs.
 #[derive(Debug, Clone)]
 pub struct XattrState {
     ignore: Arc<Compiled>,
     ignore_not: Arc<Compiled>,
     store: Arc<Mutex<Store>>,
+    acl_store: Arc<Mutex<Store>>,
 }
 
 impl XattrState {
@@ -39,10 +50,11 @@ impl XattrState {
             ignore: XATTR_IGNORE.compiled(prefs, mode)?,
             ignore_not: XATTR_IGNORE_NOT.compiled(prefs, mode)?,
             store: store(host),
+            acl_store: acl_store(host),
         })
     }
 
-    /// Every attribute kept, and a store of its own: without a host, as in
+    /// Every attribute kept, and stores of its own: without a host, as in
     /// tests.
     pub fn standalone() -> XattrState {
         let none = || Arc::new(Compiled::new(Vec::new(), Mode::Sensitive).expect("no patterns"));
@@ -50,6 +62,7 @@ impl XattrState {
             ignore: none(),
             ignore_not: none(),
             store: Arc::default(),
+            acl_store: Arc::default(),
         }
     }
 
@@ -58,6 +71,7 @@ impl XattrState {
         XattrCtx {
             filter: self,
             store: &self.store,
+            acl_store: &self.acl_store,
         }
     }
 

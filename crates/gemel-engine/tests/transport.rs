@@ -796,6 +796,107 @@ fn fspath_of(p: &StdPath) -> gemel_fs::fspath::Fspath {
     gemel_fs::fspath::Fspath::canonize(Some(p.to_str().unwrap().as_bytes())).unwrap()
 }
 
+/// The ACL of `rel` under `root`, as text (empty if trivial).
+#[cfg(target_os = "macos")]
+fn acl_of(root: &StdPath, rel: &str) -> String {
+    let t = gemel_fs::acl::get_text(&fspath_of(&root.join(rel))).unwrap();
+    String::from_utf8(t.unwrap()).unwrap()
+}
+
+/// Adds an ACL entry to `rel` under `root`, as `chmod +a` does.
+#[cfg(target_os = "macos")]
+fn chmod_a(root: &StdPath, rel: &str, entry: &str) {
+    let ok = std::process::Command::new("chmod")
+        .args(["+a", entry])
+        .arg(root.join(rel))
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "chmod +a {entry:?} {rel}");
+}
+
+/// ACLs set, changed and removed on files and directories, a new file's,
+/// and one changed the other way, as OCaml propagates them. With OCaml
+/// Unison, it syncs a twin to the same ACLs, then finds nothing to do on
+/// ours, and gemel finds nothing to do on OCaml's.
+#[cfg(target_os = "macos")]
+#[test]
+fn acls_propagate_like_ocaml() {
+    const PREFS: [&str; 1] = ["acl = true"];
+    let build: fn(&StdPath) = |r| {
+        build_tree(r);
+        chmod_a(r, "README", "group:staff allow read");
+        chmod_a(r, "src/main.c", "group:everyone allow read");
+        chmod_a(r, "src", "group:staff allow list,add_file,file_inherit");
+    };
+    let change = |a: &StdPath, b: &StdPath| {
+        chmod_a(a, "README", "group:everyone allow write");
+        let none = std::process::Command::new("chmod")
+            .arg("-N")
+            .arg(a.join("src/main.c"))
+            .status()
+            .unwrap();
+        assert!(none.success());
+        write(a, "new-a", "new in a", T0 + 20.0);
+        chmod_a(a, "new-a", "group:staff allow read,write");
+        chmod_a(b, "src/deep/x", "group:staff allow read");
+    };
+    let expect = |a: &StdPath, b: &StdPath, what: &str| {
+        let readme = acl_of(a, "README");
+        assert!(
+            readme.contains(":everyone:12:allow:write") && readme.contains(":staff:20:allow:read"),
+            "{what}: {readme}"
+        );
+        for rel in ["README", "src", "src/main.c", "src/deep/x", "new-a"] {
+            assert_eq!(acl_of(a, rel), acl_of(b, rel), "{what}: {rel}");
+        }
+        assert_eq!(acl_of(b, "src/main.c"), "", "{what}");
+        assert!(
+            acl_of(b, "new-a").contains(":staff:20:allow:read,write"),
+            "{what}"
+        );
+        assert!(
+            acl_of(a, "src/deep/x").contains(":staff:20:allow:read"),
+            "{what}"
+        );
+    };
+    for via in Via::ALL {
+        let what = format!("{via:?}");
+        let dir = TempDir::new("acls");
+        let s = synced(&dir, via, &PREFS, build);
+        assert_eq!(acl_of(&s.a(), "src"), acl_of(&s.b(), "src"), "{what}");
+        // ACLs are read again only when the change time differs, which
+        // macOS gives in whole seconds.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        change(&s.a(), &s.b());
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new(), "{what}");
+        expect(&s.a(), &s.b(), &what);
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new(), "{what}");
+        if let Some(unison) = std::env::var_os("GEMEL_REFERENCE_UNISON") {
+            ocaml_agrees(&s, &PREFS);
+            let twin_dir = TempDir::new("acls-ocaml");
+            let twin = synced(&twin_dir, via, &PREFS, build);
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            change(&twin.a(), &twin.b());
+            settle(&[&twin.a(), &twin.b()]);
+            let all = ocaml_run(&unison, &twin, &flags_of(&PREFS));
+            expect(&twin.a(), &twin.b(), &format!("OCaml, {what}: {all}"));
+            let fresh = setup(&twin_dir, via);
+            fresh.init(&PREFS);
+            for (fa, fb) in fresh.find() {
+                assert_eq!(
+                    (&fa.1, &fb.1),
+                    (
+                        &common::UpdateItem::NoUpdates,
+                        &common::UpdateItem::NoUpdates
+                    ),
+                    "{what}: {all}"
+                );
+            }
+        }
+    }
+}
+
 /// The values a host's scan cached go to the other hosts after update
 /// detection (`mergePropsdataOnRoot`), so that a copy finds them there
 /// without asking for them (`propsExtData`). Those of 32 bytes or less are
