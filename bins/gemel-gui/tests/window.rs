@@ -90,6 +90,41 @@ fn items_are_virtualised_selectable_and_accessible() {
     assert_eq!(ui.get_dialog(), 0);
 }
 
+/// The window's close button quits as Quit does (`safeExit`): at once
+/// while nothing is going on, after asking while the window works.
+#[test]
+fn closing_the_window_quits_as_quit_does() {
+    init();
+    let close = |app: &App| {
+        app.ui()
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::CloseRequested)
+    };
+    let app = App::detached().unwrap();
+    app.handle(Event::Updates(fake_updates(vec![fake_item(
+        "f",
+        Action::LtoR(false),
+    )])));
+    close(&app);
+    assert_eq!(app.exit_code(), Some(0));
+
+    let app = App::detached().unwrap();
+    let ui = app.ui();
+    app.handle(Event::Updates(fake_updates(vec![fake_item(
+        "f",
+        Action::LtoR(false),
+    )])));
+    assert!(press(ui, "Go"));
+    assert!(app.busy());
+    close(&app);
+    assert_eq!(ui.get_dialog_title(), "Premature exit");
+    assert!(press(ui, "No"));
+    assert_eq!(app.exit_code(), None);
+    close(&app);
+    assert!(press(ui, "Yes"));
+    assert_eq!(app.exit_code(), Some(0));
+}
+
 /// Replicas `a` and `b` and a Unison directory in `dir`, with `files` in
 /// `a` and `b`, synced once through the window.
 fn synced(dir: &Path, files: &[&str]) {
