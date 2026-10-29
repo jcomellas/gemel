@@ -1536,6 +1536,7 @@ dependencies = [
  "gemel-oracle",
  "gemel-ui-api",
  "i-slint-backend-testing",
+ "i-slint-core",
  "rfd",
  "slint",
  "slint-build",

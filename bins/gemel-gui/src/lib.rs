@@ -16,6 +16,7 @@
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 
+pub mod editor;
 pub mod recon_view;
 pub mod stats;
 pub mod summary;
@@ -32,6 +33,7 @@ use std::time::{Duration, Instant};
 use gemel_ui_api::clroot::{self, Clroot};
 use gemel_ui_api::exit_code::ExitCode;
 use gemel_ui_api::manual::{self, Section};
+use gemel_ui_api::profile_editor::{Catalog, Setting};
 use gemel_ui_api::session::{
     self, Command, Config, Event, Favor, IgnoreKind, ItemView, LogKind, NewProfile, Overrides,
     Progress, Question, Reply, RootNames, SetAction, Settings, SortKind, Summary, Traffic, Updates,
@@ -40,6 +42,7 @@ use gemel_ui_api::uicommon::startup::ProfileInfo;
 use gemel_ui_api::{MY_NAME, Subpaths, Trace, padto};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
+use crate::editor::{PrefEdit, Target, ValueKind};
 use crate::recon_view::{Arrow, ClickMods, Done, ReconTable, Row};
 use crate::stats::Stats;
 use crate::summary::Entry;
@@ -51,8 +54,8 @@ pub mod ui {
 }
 
 use ui::{
-    AppWindow, DiffLine, DiffWindow, DocTopic, DocWindow, ProfileKey, ProfileRow, RowData,
-    StatsWindow, SummaryEntry,
+    AppWindow, DiffLine, DiffWindow, DocTopic, DocWindow, EditorRow, PrefTreeRow, ProfileKey,
+    ProfileRow, RowData, StatsWindow, SummaryEntry,
 };
 
 /// How the window starts its session.
@@ -200,6 +203,12 @@ enum OnAnswer {
     Wizard,
     /// Deletes the profile (Delete), or not.
     DeleteProfile(String),
+    /// The profile editor (`editProfile`), its preference edited
+    /// (`editPreference`), and the tree a preference is added from
+    /// (`addPreference`): buttons of their own.
+    Editor,
+    /// Deletes the editor's setting at this place (Delete), or not.
+    DeleteSetting(usize),
     /// Ends the program while it works (Yes), or not (`safeExit`).
     PrematureExit,
     /// The first root, typed or picked (`getFirstRoot`).
@@ -266,6 +275,13 @@ enum ProfileOp {
     Created(String),
     /// A profile was deleted (an error doing so is dropped).
     Deleted,
+    /// A profile is read, for the editor (an error doing so is shown).
+    Read(String),
+    /// The editor's profile is written, then the editor closes if `close`
+    /// (an error doing so is shown over the editor, which stays).
+    Written { name: String, close: bool },
+    /// The editor has closed: the manager, with its profile selected.
+    Edited(String),
 }
 
 /// What happens once [`Command::Configure`] has been applied.
@@ -308,6 +324,13 @@ struct State {
     profile_ops: VecDeque<ProfileOp>,
     /// The profile manager's exit code on Quit; none: Cancel.
     manager_quit: Option<i32>,
+    /// The profile editor's profile, its preference edited, and the tree
+    /// a preference is added from, while they are open.
+    editor: Option<editor::Profile>,
+    pref_edit: Option<editor::PrefEdit>,
+    tree: Option<editor::Tree>,
+    /// The documentation shown, as markdown.
+    doc_markdown: String,
     /// The profile is being loaded again: no "contacting server" message
     /// (`loadProfile`'s `reload`).
     reloading: bool,
@@ -357,6 +380,9 @@ pub struct App {
     diffs: RefCell<Vec<DiffWindow>>,
     /// The manual's window.
     doc_window: DocWindow,
+    /// The preferences, with their types and documentation, for the
+    /// profile editor.
+    catalog: Catalog,
     /// How far down each of its pages was shown, as a page of GTK's
     /// notebook keeps it.
     doc_scrolls: RefCell<Vec<f32>>,
@@ -438,6 +464,9 @@ impl App {
             stats_window: StatsWindow::new()?,
             diffs: RefCell::default(),
             doc_window: DocWindow::new()?,
+            catalog: Catalog::new().map_err(|e| {
+                slint::PlatformError::Other(format!("Can't list the preferences: {e}"))
+            })?,
             doc_scrolls: RefCell::default(),
             unison_dir,
             weak: RefCell::default(),
@@ -835,7 +864,13 @@ impl App {
                     self.quit(1);
                 }
             }
-            OnAnswer::Manager | OnAnswer::Wizard => {}
+            OnAnswer::Manager | OnAnswer::Wizard | OnAnswer::Editor => {}
+            OnAnswer::DeleteSetting(i) => {
+                if ok && let Some(p) = self.state.borrow_mut().editor.as_mut() {
+                    p.remove(i);
+                }
+                self.refresh_editor();
+            }
             OnAnswer::DeleteProfile(name) => {
                 if ok {
                     self.state
@@ -1019,7 +1054,13 @@ impl App {
             Event::ProfileUnchanged(unchanged) => self.reloaded(unchanged),
             Event::Diff { shown, errors } => self.diffs_shown(shown, &errors),
             Event::InputEnded(root) => self.input_ended(&root),
-            Event::Changed | Event::Interrupted | Event::ProfileSettings(_) => {}
+            Event::ProfileSettings(settings) => {
+                let op = self.state.borrow_mut().profile_ops.pop_front();
+                if let Some(ProfileOp::Read(name)) = op {
+                    self.open_editor(&name, settings);
+                }
+            }
+            Event::Changed | Event::Interrupted => {}
             Event::Error(msg) => {
                 let op = self.state.borrow_mut().profile_ops.pop_front();
                 match op {
@@ -1032,6 +1073,21 @@ impl App {
                         OnAnswer::Close,
                     )),
                     Some(ProfileOp::Deleted) => {}
+                    // `applyCommand`'s error.
+                    Some(ProfileOp::Written { .. }) => self.push_dialog_front(Dialog::message(
+                        "Could not save profile",
+                        &format!("Error when saving profile: {msg}"),
+                        "OK",
+                        "",
+                        OnAnswer::Close,
+                    )),
+                    Some(ProfileOp::Read(_)) => self.push_dialog_front(Dialog::message(
+                        "Error",
+                        &msg,
+                        "OK",
+                        "",
+                        OnAnswer::Close,
+                    )),
                     _ => self.error(&msg),
                 }
             }
@@ -1382,8 +1438,20 @@ impl App {
             Some(ProfileOp::Startup(Some(p))) => self.load_profile(&p),
             Some(ProfileOp::Startup(None)) => self.open_manager(Some(0), None),
             Some(ProfileOp::Manager(quit, select)) => self.open_manager(quit, select),
-            Some(ProfileOp::Created(name)) => self.refresh_manager(Some(&name)),
-            Some(ProfileOp::Deleted) | None => self.refresh_manager(None),
+            Some(ProfileOp::Created(name) | ProfileOp::Edited(name)) => {
+                self.refresh_manager(Some(&name))
+            }
+            Some(ProfileOp::Written { name, close }) => {
+                if let Some(p) = self.state.borrow_mut().editor.as_mut() {
+                    p.saved();
+                }
+                if close {
+                    self.close_editor();
+                }
+                self.refresh_editor();
+                self.refresh_manager(Some(&name));
+            }
+            Some(ProfileOp::Deleted | ProfileOp::Read(_)) | None => self.refresh_manager(None),
         }
     }
 
@@ -1497,6 +1565,335 @@ impl App {
             return self.status("Synchronizer is busy, please wait..");
         }
         self.scan_profiles(ProfileOp::Manager(None, None));
+    }
+
+    // ---- The profile editor ----
+
+    /// Edit (`editProfile`): the profile selected, once it is read.
+    fn manager_edit(&self) {
+        let Some(name) = self.manager_selection() else {
+            return;
+        };
+        self.state
+            .borrow_mut()
+            .profile_ops
+            .push_back(ProfileOp::Read(name.clone()));
+        self.send(Command::ReadProfile(name));
+    }
+
+    /// The editor, on profile `name`'s settings.
+    fn open_editor(&self, name: &str, settings: Vec<Setting>) {
+        self.state.borrow_mut().editor = Some(editor::Profile::new(name, settings));
+        self.ui
+            .set_editor_title(format!("{name} - Profile Editor").into());
+        self.push_dialog_front(Dialog {
+            kind: 8,
+            title: format!("{name} - Profile Editor"),
+            message: String::new(),
+            ok: "OK",
+            cancel: "Cancel",
+            on: OnAnswer::Editor,
+            entries: Vec::new(),
+        });
+        self.refresh_editor();
+    }
+
+    /// The editor's rows, as its profile has them, and the documentation of
+    /// the one selected.
+    fn refresh_editor(&self) {
+        let (rows, selected, modified, descending, doc) = {
+            let s = self.state.borrow();
+            let Some(p) = s.editor.as_ref() else {
+                return;
+            };
+            let rows: Vec<EditorRow> = (p.rows().into_iter())
+                .map(|(name, typ, value)| EditorRow {
+                    name: name.into(),
+                    r#type: typ.into(),
+                    value: value.into(),
+                })
+                .collect();
+            let doc = p.selected().map(|i| p.setting(i).name.clone());
+            let selected = p.selected_row().map_or(-1, |r| r as i32);
+            (rows, selected, p.modified(), p.descending(), doc)
+        };
+        self.ui.set_editor_rows(ModelRc::new(VecModel::from(rows)));
+        self.ui.set_editor_selected(selected);
+        self.ui.set_editor_modified(modified);
+        self.ui.set_editor_descending(descending);
+        self.show_documentation(doc.as_deref());
+    }
+
+    /// `documentPreference`'s: preference `name`'s documentation, or none.
+    fn show_documentation(&self, name: Option<&str>) {
+        let (short, long) = match name {
+            Some(n) => editor::documentation(&self.catalog, n),
+            None => (String::new(), String::new()),
+        };
+        self.ui.set_doc_shown(name.is_some());
+        self.ui.set_doc_short(short.into());
+        self.ui.set_doc_long(
+            slint::StyledText::from_markdown(&long)
+                .unwrap_or_else(|_| slint::StyledText::from_plain_text(&long)),
+        );
+        self.state.borrow_mut().doc_markdown = long;
+    }
+
+    /// The documentation shown, as markdown.
+    pub fn documentation_markdown(&self) -> String {
+        self.state.borrow().doc_markdown.clone()
+    }
+
+    fn with_editor(&self, f: impl FnOnce(&mut editor::Profile)) {
+        if let Some(p) = self.state.borrow_mut().editor.as_mut() {
+            f(p);
+        }
+        self.refresh_editor();
+    }
+
+    /// Edit, or a double click: the setting selected, edited.
+    fn editor_edit(&self) {
+        let edit = {
+            let s = self.state.borrow();
+            let Some((p, i)) = s.editor.as_ref().and_then(|p| Some((p, p.selected()?))) else {
+                return;
+            };
+            let set = p.setting(i);
+            PrefEdit::new(&set.name, set.typ, set.values.clone(), Target::Setting(i))
+        };
+        self.open_pref_edit(edit);
+    }
+
+    /// Delete (`deletePref`): the setting at `i`, once asked.
+    fn editor_delete(&self, i: usize) {
+        let name = {
+            let s = self.state.borrow();
+            match s.editor.as_ref() {
+                Some(p) => p.setting(i).name.clone(),
+                None => return,
+            }
+        };
+        self.push_dialog_front(Dialog::message(
+            "Preference Deletion",
+            &format!("Do you really want to delete preference {name}?"),
+            "Delete",
+            "Cancel",
+            OnAnswer::DeleteSetting(i),
+        ));
+    }
+
+    /// Apply (`applyCommand`): writes the profile, if it was modified.
+    fn editor_apply(&self, close: bool) {
+        let (name, settings) = {
+            let s = self.state.borrow();
+            match s.editor.as_ref() {
+                Some(p) if p.modified() => (p.name.clone(), p.settings().to_vec()),
+                Some(_) if close => {
+                    drop(s);
+                    return self.close_editor_to_manager();
+                }
+                _ => return,
+            }
+        };
+        self.state
+            .borrow_mut()
+            .profile_ops
+            .push_back(ProfileOp::Written {
+                name: name.clone(),
+                close,
+            });
+        self.send(Command::WriteProfile(name, settings));
+    }
+
+    /// OK (Apply, then closes) or Cancel.
+    fn editor_close(&self, ok: bool) {
+        if ok {
+            self.editor_apply(true);
+        } else {
+            self.close_editor_to_manager();
+        }
+    }
+
+    /// Closes the editor, back to the manager, which lists the profiles
+    /// again (`fillLst`).
+    fn close_editor_to_manager(&self) {
+        let name = self.close_editor();
+        if let Some(name) = name {
+            self.scan_profiles(ProfileOp::Edited(name));
+        }
+    }
+
+    /// Closes the editor: its profile's name.
+    fn close_editor(&self) -> Option<String> {
+        let name = self.state.borrow_mut().editor.take().map(|p| p.name);
+        self.pop_dialog(8);
+        name
+    }
+
+    /// Add (`addPreference`): the tree of preferences, nothing selected.
+    fn editor_add(&self) {
+        self.state.borrow_mut().tree = Some(editor::Tree::new(self.catalog.tree()));
+        self.push_dialog_front(Dialog {
+            kind: 10,
+            title: "Add a Preference".to_owned(),
+            message: String::new(),
+            ok: "Add",
+            cancel: "Cancel",
+            on: OnAnswer::Editor,
+            entries: Vec::new(),
+        });
+        self.refresh_tree();
+    }
+
+    /// The tree's rows, and the documentation of the preference selected.
+    fn refresh_tree(&self) {
+        let (rows, selected, all, pref) = {
+            let s = self.state.borrow();
+            let Some(t) = s.tree.as_ref() else {
+                return;
+            };
+            let rows: Vec<PrefTreeRow> = (t.rows().into_iter())
+                .map(|r| PrefTreeRow {
+                    title: r.title.into(),
+                    kind: r.kind as i32,
+                    depth: r.depth as i32,
+                    parent: r.parent,
+                    expanded: r.expanded,
+                })
+                .collect();
+            let selected = t.selected_row().map_or(-1, |r| r as i32);
+            (rows, selected, t.all_expanded(), t.selected_pref())
+        };
+        self.ui.set_tree_rows(ModelRc::new(VecModel::from(rows)));
+        self.ui.set_tree_selected(selected);
+        self.ui.set_tree_all(all);
+        self.ui.set_tree_can_add(pref.is_some());
+        self.show_documentation(pref.as_deref());
+    }
+
+    fn with_tree(&self, f: impl FnOnce(&mut editor::Tree)) {
+        if let Some(t) = self.state.borrow_mut().tree.as_mut() {
+            f(t);
+        }
+        self.refresh_tree();
+    }
+
+    /// Add (or a double click on a preference), or Cancel: the preference
+    /// chosen is edited, as it is if the profile sets it, else from its
+    /// type's default (`defaultValue`).
+    fn tree_close(&self, ok: bool) {
+        let pref = {
+            let s = self.state.borrow();
+            s.tree.as_ref().and_then(editor::Tree::selected_pref)
+        };
+        if ok && pref.is_none() {
+            return;
+        }
+        self.state.borrow_mut().tree = None;
+        self.pop_dialog(10);
+        self.refresh_editor();
+        let Some(name) = pref.filter(|_| ok) else {
+            return;
+        };
+        let existing = {
+            let s = self.state.borrow();
+            s.editor.as_ref().and_then(|p| {
+                let i = p.position(&name)?;
+                Some((i, p.setting(i).clone()))
+            })
+        };
+        let edit = match existing {
+            Some((i, set)) => PrefEdit::new(&name, set.typ, set.values, Target::Setting(i)),
+            None => {
+                let typ = self.catalog.typ(&name);
+                PrefEdit::new(&name, typ, typ.default_value(), Target::New)
+            }
+        };
+        self.open_pref_edit(edit);
+    }
+
+    /// `editPreference`: preference `edit.name`, edited.
+    fn open_pref_edit(&self, edit: PrefEdit) {
+        let ui = &self.ui;
+        ui.set_pe_name(edit.name.as_str().into());
+        ui.set_pe_description(self.catalog.documentation(&edit.name).0.into());
+        ui.set_pe_type(edit.typ.name().into());
+        ui.set_pe_kind(match edit.kind() {
+            ValueKind::Bool => 0,
+            ValueKind::Text => 1,
+            ValueKind::List => 2,
+        });
+        ui.set_pe_truth(edit.truth);
+        ui.set_pe_text(edit.text.as_str().into());
+        ui.set_pe_entry(SharedString::new());
+        self.state.borrow_mut().pref_edit = Some(edit);
+        self.push_dialog_front(Dialog {
+            kind: 9,
+            title: "Edit the Preference".to_owned(),
+            message: String::new(),
+            ok: "OK",
+            cancel: "Cancel",
+            on: OnAnswer::Editor,
+            entries: Vec::new(),
+        });
+        self.refresh_pref_edit();
+    }
+
+    /// The values of the preference edited, as a list.
+    fn refresh_pref_edit(&self) {
+        let (items, item, entry) = {
+            let s = self.state.borrow();
+            let Some(e) = s.pref_edit.as_ref() else {
+                return;
+            };
+            let items: Vec<SharedString> = e.items.iter().map(|v| v.as_str().into()).collect();
+            (items, e.item.map_or(-1, |i| i as i32), e.entry.clone())
+        };
+        self.ui.set_pe_items(ModelRc::new(VecModel::from(items)));
+        self.ui.set_pe_item(item);
+        self.ui.set_pe_entry(entry.into());
+    }
+
+    /// Applies `f` to the preference edited, with what was typed.
+    fn with_pref_edit(&self, f: impl FnOnce(&mut PrefEdit)) {
+        if let Some(e) = self.state.borrow_mut().pref_edit.as_mut() {
+            e.entry = self.ui.get_pe_entry().into();
+            e.text = self.ui.get_pe_text().into();
+            e.truth = self.ui.get_pe_truth();
+            f(e);
+        }
+        self.refresh_pref_edit();
+    }
+
+    /// OK or Cancel. OK takes the values: none deletes the setting (once
+    /// asked); a setting added needs some.
+    fn pref_edit_close(&self, ok: bool) {
+        self.with_pref_edit(|_| {});
+        let Some(edit) = self.state.borrow_mut().pref_edit.take() else {
+            return;
+        };
+        self.pop_dialog(9);
+        if ok {
+            let values = edit.values();
+            match edit.target {
+                Target::Setting(i) if values.is_empty() => {
+                    self.refresh_editor();
+                    return self.editor_delete(i);
+                }
+                Target::Setting(i) => self.with_editor(|p| {
+                    p.set_values(i, values);
+                }),
+                Target::New if values.is_empty() => {}
+                Target::New => self.with_editor(|p| {
+                    p.add(Setting {
+                        name: edit.name,
+                        typ: edit.typ,
+                        values,
+                    })
+                }),
+            }
+        }
+        self.refresh_editor();
     }
 
     // ---- The profile creation assistant ----
@@ -2419,6 +2816,60 @@ impl App {
         ui.on_profile_add(move || w(&|s| s.open_wizard()));
         let w = with.clone();
         ui.on_profile_delete(move || w(&|s| s.manager_delete()));
+        let w = with.clone();
+        ui.on_profile_edit(move || w(&|s| s.manager_edit()));
+        let w = with.clone();
+        ui.on_editor_clicked(move |r| w(&|s| s.with_editor(|p| p.select_row(r as usize))));
+        let w = with.clone();
+        ui.on_editor_activated(move |_| w(&|s| s.editor_edit()));
+        let w = with.clone();
+        ui.on_editor_sort(move || w(&|s| s.with_editor(editor::Profile::toggle_order)));
+        let w = with.clone();
+        ui.on_editor_add(move || w(&|s| s.editor_add()));
+        let w = with.clone();
+        ui.on_editor_edit(move || w(&|s| s.editor_edit()));
+        let w = with.clone();
+        ui.on_editor_delete(move || {
+            w(&|s| {
+                let i = s.state.borrow().editor.as_ref().and_then(|p| p.selected());
+                if let Some(i) = i {
+                    s.editor_delete(i);
+                }
+            })
+        });
+        let w = with.clone();
+        ui.on_editor_apply(move || w(&|s| s.editor_apply(false)));
+        let w = with.clone();
+        ui.on_editor_close(move |ok| w(&|s| s.editor_close(ok)));
+        let w = with.clone();
+        ui.on_pe_item_clicked(move |i| w(&|s| s.with_pref_edit(|e| e.select_item(i as usize))));
+        let w = with.clone();
+        ui.on_pe_add(move || w(&|s| s.with_pref_edit(PrefEdit::add_item)));
+        let w = with.clone();
+        ui.on_pe_remove(move || w(&|s| s.with_pref_edit(PrefEdit::remove_item)));
+        let w = with.clone();
+        ui.on_pe_edit(move || w(&|s| s.with_pref_edit(PrefEdit::edit_item)));
+        let w = with.clone();
+        ui.on_pe_up(move || w(&|s| s.with_pref_edit(PrefEdit::go_up)));
+        let w = with.clone();
+        ui.on_pe_down(move || w(&|s| s.with_pref_edit(PrefEdit::go_down)));
+        let w = with.clone();
+        ui.on_pe_close(move |ok| w(&|s| s.pref_edit_close(ok)));
+        let w = with.clone();
+        ui.on_tree_clicked(move |r| w(&|s| s.with_tree(|t| t.click(r as usize))));
+        let w = with.clone();
+        ui.on_tree_select(move |r| w(&|s| s.with_tree(|t| t.select(r as usize))));
+        let w = with.clone();
+        ui.on_tree_activated(move |r| {
+            w(&|s| {
+                s.with_tree(|t| t.select(r as usize));
+                s.tree_close(true);
+            })
+        });
+        let w = with.clone();
+        ui.on_tree_toggle_all(move || w(&|s| s.with_tree(editor::Tree::toggle_all)));
+        let w = with.clone();
+        ui.on_tree_close(move |ok| w(&|s| s.tree_close(ok)));
         let w = with.clone();
         ui.on_wizard_changed(move || w(&|s| s.wizard_changed()));
         let w = with.clone();

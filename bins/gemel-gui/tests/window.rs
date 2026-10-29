@@ -14,7 +14,7 @@ use gemel_ui_api::session::{Command, Event, Progress, SetAction, Summary};
 use gemel_ui_api::uicommon::Action;
 use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery};
 use slint::platform::Key;
-use slint::{ComponentHandle, LogicalSize, Model};
+use slint::{ComponentHandle, LogicalSize, Model, SharedString};
 
 use support::{
     can_press, click, fake_item, fake_updates, init, items, press, type_text, wait_until,
@@ -347,6 +347,181 @@ fn the_manual_has_a_window_of_its_own() {
     assert_eq!(w.get_scroll(), 0.);
     ui.invoke_documentation("running".into());
     assert_eq!(w.get_scroll(), 0.);
+    app.quit(0);
+}
+
+/// The profile editor (`editProfile`), from Edit in the manager:
+/// - the profile's preferences, by name, either way;
+/// - a boolean changed (`editPreference`);
+/// - a list added from the tree (`addPreference`);
+/// - a preference deleted, once asked;
+/// - Apply, which writes the profile as `uigtk3` does, then OK, back to
+///   the manager with the profile selected;
+/// - a profile that can't be saved, which is said so over the editor.
+#[test]
+fn the_profile_editor_writes_profiles_as_uigtk3_does() {
+    let work = support::Work::new("window-editor");
+    let dir = &work.0;
+    profiles(dir, &["a", "b"]);
+    let (app, out) = support::window(&dir.join("unison"), Vec::new());
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
+    assert!(!can_press(ui, "Edit"));
+    ui.invoke_profile_clicked(1);
+    assert!(press(ui, "Edit"));
+    assert!(wait_until(WAIT, || ui.get_dialog() == 8), "{}", out.text());
+    assert_eq!(ui.get_editor_title(), "b - Profile Editor");
+    let rows = || -> Vec<(String, String, String)> {
+        ui.get_editor_rows()
+            .iter()
+            .map(|r| (r.name.into(), r.r#type.into(), r.value.into()))
+            .collect()
+    };
+    let row = |name: &str| rows().iter().position(|r| r.0 == name).unwrap() as i32;
+    let (ra, rb) = (
+        dir.join("b-a").display().to_string(),
+        dir.join("b-b").display().to_string(),
+    );
+    assert_eq!(
+        rows(),
+        [
+            ("label".into(), "text".into(), "Label of b".into()),
+            ("log".into(), "boolean".into(), "false".into()),
+            ("root".into(), "text list".into(), format!("{ra}, {rb}")),
+        ]
+    );
+    assert!(press(ui, "Name"));
+    assert_eq!(rows()[0].0, "root");
+    assert!(press(ui, "Name"));
+    // Nothing selected, nothing documented.
+    assert!(!ui.get_doc_shown() && !can_press(ui, "Edit"));
+    ui.invoke_editor_clicked(row("log"));
+    assert!(ui.get_doc_shown());
+    assert!(!ui.get_doc_short().is_empty());
+    assert!(!app.documentation_markdown().is_empty());
+
+    // A boolean.
+    assert!(press(ui, "Edit"));
+    assert_eq!(ui.get_dialog(), 9);
+    assert_eq!((ui.get_pe_name(), ui.get_pe_kind()), ("log".into(), 0));
+    assert!(!ui.get_pe_truth());
+    // As a screen reader chooses them.
+    let radio = |label: &str| {
+        ElementHandle::find_by_accessible_label(ui, label)
+            .find(|e| e.accessible_role() == Some(AccessibleRole::RadioButton))
+            .unwrap()
+    };
+    let checked = || {
+        (
+            ui.get_pe_truth(),
+            radio("True").accessible_checked(),
+            radio("False").accessible_checked(),
+        )
+    };
+    assert_eq!(checked(), (false, Some(false), Some(true)));
+    for (label, truth) in [("True", true), ("False", false), ("True", true)] {
+        radio(label).invoke_accessible_default_action();
+        assert_eq!(checked(), (truth, Some(truth), Some(!truth)), "{label}");
+    }
+    assert!(press(ui, "OK"));
+    assert_eq!(ui.get_dialog(), 8);
+    assert_eq!(rows()[row("log") as usize].2, "true");
+    assert!(ui.get_editor_modified());
+
+    // A list, from the tree.
+    assert!(press(ui, "Add"));
+    assert_eq!(ui.get_dialog(), 10);
+    assert!(!ui.get_tree_can_add());
+    assert!(press(ui, "Expand all"));
+    let ignore = ui
+        .get_tree_rows()
+        .iter()
+        .position(|r| r.title == "ignore")
+        .unwrap();
+    ui.invoke_tree_clicked(ignore as i32);
+    assert!(ui.get_tree_can_add() && ui.get_doc_shown());
+    assert!(press(ui, "Add"));
+    assert_eq!((ui.get_dialog(), ui.get_pe_kind()), (9, 2));
+    assert_eq!(ui.get_pe_items().row_count(), 0);
+    ui.set_pe_entry("Name *.tmp".into());
+    assert!(press(ui, "Add"));
+    assert_eq!(ui.get_pe_items().row_data(0).unwrap(), "Name *.tmp");
+    assert!(press(ui, "OK"));
+    assert_eq!(rows()[row("ignore") as usize].2, "Name *.tmp");
+
+    // A line of text, which Enter takes.
+    ui.invoke_editor_clicked(row("label"));
+    assert!(press(ui, "Edit"));
+    assert_eq!(
+        (ui.get_pe_kind(), ui.get_pe_text()),
+        (1, "Label of b".into())
+    );
+    ui.set_pe_text("Another".into());
+    support::type_text(ui, &SharedString::from(Key::Return));
+    assert_eq!(ui.get_dialog(), 8);
+    assert_eq!(rows()[row("label") as usize].2, "Another");
+
+    // Deleted, once asked.
+    ui.invoke_editor_clicked(row("label"));
+    assert!(press(ui, "Delete"));
+    assert_eq!(ui.get_dialog(), 1);
+    assert_eq!(
+        ui.get_dialog_message(),
+        "Do you really want to delete preference label?"
+    );
+    assert!(press(ui, "Delete"));
+    assert_eq!(ui.get_dialog(), 8);
+    assert!(!rows().iter().any(|r| r.0 == "label"));
+
+    // Help: the manual, at Running Unison.
+    assert!(press(ui, "Help"));
+    assert_eq!(app.doc_window().get_current(), 10);
+    let _ = app.doc_window().hide();
+
+    // Written in the order read, then added.
+    assert!(press(ui, "Apply"));
+    assert!(
+        wait_until(WAIT, || !ui.get_editor_modified()),
+        "{}",
+        out.text()
+    );
+    let prf = dir.join("unison/b.prf");
+    assert_eq!(
+        std::fs::read_to_string(&prf).unwrap(),
+        format!(
+            "# Unison preferences\nlog = true\nroot = {ra}\nroot = {rb}\nignore = Name *.tmp\n"
+        )
+    );
+    assert_eq!(ui.get_dialog(), 8);
+    assert!(press(ui, "OK"));
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
+    assert_eq!(ui.get_profile_selected(), 1);
+
+    // A profile that can't be saved: once read, it is a directory (which
+    // even root can't write as a file).
+    assert!(press(ui, "Edit"));
+    assert!(wait_until(WAIT, || ui.get_dialog() == 8), "{}", out.text());
+    std::fs::remove_file(&prf).unwrap();
+    std::fs::create_dir(&prf).unwrap();
+    ui.invoke_editor_clicked(row("log"));
+    assert!(press(ui, "Edit"));
+    ui.set_pe_truth(false);
+    assert!(press(ui, "OK"));
+    assert!(press(ui, "OK"));
+    assert!(wait_until(WAIT, || ui.get_dialog() == 1), "{}", out.text());
+    assert_eq!(ui.get_dialog_title(), "Could not save profile");
+    assert!(
+        ui.get_dialog_message()
+            .starts_with("Error when saving profile: "),
+        "{}",
+        ui.get_dialog_message()
+    );
+    assert!(press(ui, "OK"));
+    assert_eq!(ui.get_dialog(), 8);
+    assert!(ui.get_editor_modified());
+    assert!(press(ui, "Cancel"));
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
     app.quit(0);
 }
 
