@@ -374,6 +374,9 @@ pub struct App {
     state: RefCell<State>,
     /// The program is quitting: no more events are taken.
     quitting: Cell<bool>,
+    /// The details pane is to be shown again once the events taken with
+    /// this tick are applied.
+    details_due: Cell<bool>,
     stats: RefCell<Stats>,
     stats_timer: slint::Timer,
     stats_window: StatsWindow,
@@ -460,6 +463,7 @@ impl App {
             session: RefCell::new(session),
             state: RefCell::new(State::default()),
             quitting: Cell::new(false),
+            details_due: Cell::new(false),
             stats: RefCell::new(Stats::new(traffic)),
             stats_timer: slint::Timer::default(),
             stats_window: StatsWindow::new()?,
@@ -2218,8 +2222,23 @@ impl App {
         let changed = self.model.table.borrow_mut().set_item(i, item);
         self.model.changed(changed);
         if self.model.table.borrow().is_selected(i) {
-            self.update_details();
+            self.update_details_soon();
         }
+    }
+
+    /// The details pane, once the events at hand are applied: once for
+    /// the replies to an action on many items, not once for each.
+    fn update_details_soon(&self) {
+        if self.details_due.replace(true) {
+            return;
+        }
+        let weak = self.weak.borrow().clone();
+        slint::Timer::single_shot(Duration::ZERO, move || {
+            if let Some(s) = weak.upgrade() {
+                s.details_due.set(false);
+                s.update_details();
+            }
+        });
     }
 
     // ---- Actions ----
