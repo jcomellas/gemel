@@ -47,6 +47,12 @@ export struct DiffLine {
     kind: int,
 }
 
+// A section of the manual that has a topic, for the Help menu.
+export struct DocTopic {
+    short: string,
+    name: string,
+}
+
 // An item the summary box lists (`summaryBox`).
 export struct SummaryEntry {
     path: string,
@@ -154,6 +160,8 @@ export component AppWindow inherits Window {
     in property <bool> debug-update;
     // The profiles bound to keys.
     in property <[ProfileKey]> profile-keys;
+    // The Help menu's sections of the manual.
+    in property <[DocTopic]> doc-topics;
     in property <bool> stop-enabled;
     // The overall progress (`displayGlobalProgress`), pulsing while
     // updates are detected.
@@ -259,6 +267,8 @@ export component AppWindow inherits Window {
     callback quit();
     callback dialog-done(ok: bool);
     callback browse-root();
+    // The manual's window, at a section ("" for the first).
+    callback documentation(topic: string);
 
     // Scrolls so that row `index` is visible.
     public function bring-into-view(index: int) {
@@ -472,6 +482,13 @@ export component AppWindow inherits Window {
                 checkable: true;
                 checked: root.debug-update;
                 activated => { root.debug("update", !root.debug-update); }
+            }
+        }
+        Menu {
+            title: "Help";
+            for t in root.doc-topics: MenuItem {
+                title: t.name;
+                activated => { root.documentation(t.short); }
             }
         }
     }
@@ -989,7 +1006,6 @@ export component AppWindow inherits Window {
                 }
             }
             VerticalLayout {
-                alignment: start;
                 spacing: 6px;
                 Button {
                     text: "Add";
@@ -999,6 +1015,11 @@ export component AppWindow inherits Window {
                     text: "Delete";
                     enabled: root.profile-selected >= 0;
                     clicked => { root.profile-delete(); }
+                }
+                Rectangle { vertical-stretch: 1; }
+                Button {
+                    text: "Help";
+                    clicked => { root.documentation(""); }
                 }
             }
         }
@@ -1408,6 +1429,85 @@ export component DiffWindow inherits Window {
                     font-family: root.mono-font;
                     font-weight: line.kind == 3 ? 700 : 400;
                     color: line.kind == 1 ? #00a000 : line.kind == 2 ? #d00000 : line.kind == 3 ? #008b8b : Palette.foreground;
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: end;
+            Button {
+                text: "Close";
+                clicked => { root.close(); }
+            }
+        }
+    }
+}
+
+// The manual (`documentation`), a window of its own: a tab for each of
+// its sections with a topic, and the section chosen, as laid out on 80
+// columns.
+export component DocWindow inherits Window {
+    title: "Documentation";
+    preferred-width: 900px;
+    preferred-height: 520px;
+
+    // The sections' names.
+    in property <[string]> pages;
+    in property <int> current;
+    // The lines of the section chosen, and how far down they are shown.
+    in property <[string]> lines;
+    in-out property <length> scroll <=> text.viewport-y;
+    in property <string> mono-font: "Menlo";
+
+    callback select(page: int);
+    callback close();
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 8px;
+        HorizontalLayout {
+            spacing: 8px;
+            VerticalLayout {
+                width: 170px;
+                alignment: start;
+                accessible-role: tab-list;
+                accessible-label: "Sections";
+                for name[i] in root.pages: Rectangle {
+                    height: tab-name.preferred-height + 8px;
+                    background: i == root.current ? Palette.selection-background : transparent;
+                    accessible-role: tab;
+                    accessible-label: name;
+                    accessible-item-selectable: true;
+                    accessible-item-selected: i == root.current;
+                    accessible-item-index: i;
+                    accessible-action-default => { root.select(i); }
+                    TouchArea {
+                        clicked => { root.select(i); }
+                    }
+                    tab-name := Text {
+                        x: 4px;
+                        width: parent.width - 8px;
+                        text: name;
+                        font-weight: 700;
+                        horizontal-alignment: right;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                        color: i == root.current ? Palette.selection-foreground : Palette.foreground;
+                        accessible-role: none;
+                    }
+                }
+            }
+            Rectangle {
+                border-width: 1px;
+                border-color: Palette.border;
+                text := ListView {
+                    accessible-role: tab-panel;
+                    accessible-label: root.pages[root.current];
+                    for line in root.lines: Text {
+                        x: 4px;
+                        text: line;
+                        font-family: root.mono-font;
+                        wrap: no-wrap;
+                    }
                 }
             }
         }
