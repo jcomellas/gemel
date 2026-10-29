@@ -28,7 +28,9 @@
 #   control sequences, copied out of terminal.ml, with rx.ml) writes the
 #   vectors for gemel-rpc's terminal;
 # - gen_unicode.ml also writes Unison's Unicode tables as Rust source, to
-#   crates/gemel-compat/src/unicode/tables.rs.
+#   crates/gemel-compat/src/unicode/tables.rs;
+# - gen_manual.ml (strings.ml) writes Unison's manual as Rust source, to
+#   crates/gemel-ui-api/src/manual/docs.rs.
 # With an output directory, everything goes there instead (for comparing
 # OCaml versions). The Unison commit and OCaml version are recorded in each
 # file's header.
@@ -38,17 +40,19 @@ unison=$(cd "${1:?usage: $0 /path/to/unison}" && pwd)
 commit=$(git -C "$unison" rev-parse --short HEAD)
 out=${2:-"$root/crates/gemel-compat/tests/fixtures"}
 tables=${2:-"$root/crates/gemel-compat/src/unicode"}
+manual=${2:-"$root/crates/gemel-ui-api/src/manual"}
 base=${OCAML_BASE:-debian:trixie-slim}
 image=gemel-ocaml-fixtures-$(echo "$base" | tr -c 'a-z0-9.\n' -)
 
 docker build --build-arg OCAML_BASE="$base" -t "$image" "$root/tools/ocaml-fixtures"
-mkdir -p "$out" "$tables"
+mkdir -p "$out" "$tables" "$manual"
 docker run --rm \
     -e UNISON_COMMIT="bcpierce00/unison@$commit" \
     -v "$unison/src":/unison:ro \
     -v "$root/tools/ocaml-fixtures":/gen:ro \
     -v "$out":/out \
     -v "$tables":/tables \
+    -v "$manual":/manual \
     "$image" sh -c '
         cp /unison/ubase/umarshal.mli /unison/ubase/umarshal.ml \
            /unison/bytearray_stubs.c /unison/hash_compat.c \
@@ -57,9 +61,10 @@ docker run --rm \
            /unison/clroot.mli /unison/clroot.ml /unison/pred.ml \
            /unison/bytearray.mli /unison/bytearray.ml /unison/checksum.ml \
            /unison/transfer.ml /unison/lwt/lwt.mli /unison/lwt/lwt.ml \
-           /gen/gen_transfer.ml /unison/terminal.ml \
+           /gen/gen_transfer.ml /unison/terminal.ml /unison/strings.ml \
            /gen/gen_fixtures.ml /gen/gen_unicode.ml /gen/gen_names.ml \
-           /gen/gen_base.ml /gen/gen_rx.ml /gen/gen_pred.ml /gen/stubs/*.ml . &&
+           /gen/gen_base.ml /gen/gen_rx.ml /gen/gen_pred.ml /gen/gen_manual.ml \
+           /gen/stubs/*.ml . &&
         { cat /gen/uicommon_prelude.ml &&
           grep "^let mapSeparator" /unison/pred.ml && echo end &&
           sed -n "/^let truncateString/,/^let findsubstring/p" /unison/ubase/util.ml |
@@ -98,5 +103,7 @@ docker run --rm \
         ocamlopt -o gen_terminal rx.mli rx.ml gen_terminal.ml &&
         ./gen_transfer /out &&
         ./gen_terminal /out &&
-        ./gen_unicode /out /tables'
-echo "wrote $out and $tables"
+        ./gen_unicode /out /tables &&
+        ocamlopt -o gen_manual strings.ml gen_manual.ml &&
+        ./gen_manual /manual'
+echo "wrote $out, $tables and $manual"
