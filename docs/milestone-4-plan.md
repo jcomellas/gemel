@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 4b, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 4c, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -529,6 +529,11 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - macOS's menu bar: the application menu (its name, About), and which Quit a typed Cmd-Q reaches (both are Cmd-Q, and both ask now);
   - `rfd`'s pickers (Browse… in the roots and the assistant);
   - a run on Windows, and on Linux under X11 and Wayland.
+
+**Notes (phase 4c, 2026-10-29):**
+- **The second root's Help** (`getSecondRoot`'s, left by phase 1a): "Picking roots", `helpmessage`, in a card over the root selection's. As in the assistant, the command it names to start a server is `gemel -socket xxx`. The root selection's fields are now emptied as a root is asked for, not each time its card is shown, so that what was typed is still there once Help is closed. Checked in the window test of the roots, and drawn.
+- **CI's screenshots** from phase 4b's PR, on Linux (DejaVu) and Windows (Segoe UI), were looked at: the cards fit and the text wraps as on macOS. Nothing to change.
+- **Left** before the milestone is done: phase 4b's checks by a person, on each system with the real backend.
 
 ## Verification
 
