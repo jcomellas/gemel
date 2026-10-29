@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 4d, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: done (2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -35,6 +35,17 @@ Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.m
    - `-server` and `-socket` serve.
 
    `gemel` stays without GUI dependencies (`check-no-gui-deps.sh`). With `-ui graphic`, it already does what OCaml's text-only build does: it says it only has the text interface, and runs it.
+
+**Met (close-out, 2026-10-29):**
+- **1, `uigtk3`'s flows:** phases 1 to 3 port them on the session, with the session's gaps filled in `gemel-ui-api`, each with tests there. `bins/gemel-gui/tests/window.rs` drives each flow headless on Slint's testing backend, on macOS, Linux and Windows in CI: starting and asking for roots, the items and their actions, syncing with progress, the statistics and the summary, the dialogs, diffs, ignoring, sorting, the Expert menu, the profile keys, Rescan and Recheck, the profile manager, the assistant, the editor, the manual, and closing the window. Phase 4a times the window through the session at 50,000 items, within the spike's pass lines. Phase 4b's screenshots draw every card and window on each system in CI, and check that a card's controls lie within it. A person looked at the real window on macOS, Linux and Windows (phases 4b to 4d; macOS's look and its own Quit were fixed on the way).
+  - **Scanning with the watcher** is asked for on every detection, and Rescan scans only what it reports. The engine's tests check the watcher's scans; no window test runs with a watcher, since none is found next to the tests' programs.
+- **2:** `bins/gemel-gui/tests/scenarios.rs` runs the oracle's generated scenarios through the window with the default actions, and through `gemel-gui -ui text -batch` (`gemel`'s program, phase 0), and compares what each leaves as the oracle compares it: 8 with local roots, 4 over ssh and 4 on a socket (phases 1a and 2b), on each system in CI.
+- **3:** the profile manager, the assistant, the editor and the manual's window (phases 3a to 3c, and 4c's Help for the second root). `gemel-ui-api`'s session tests check that profiles are written as `uigtk3` writes them, and that OCaml loads and syncs with them (with `GEMEL_REFERENCE_UNISON`, against 2.54.0). `gemel -doc` is compared with OCaml's (`bins/gemel/tests/batch.rs`).
+- **4:** the pseudo-terminal on Unix and ConPTY on Windows are in `gemel-fs`, `terminal.ml`'s parser and patterns in `gemel-ui-api` against golden vectors from `terminal.ml`, and the password dialog in the window (phases 2a to 2c). Window tests on Unix answer a shim's password prompt, wrongly then rightly, and Quit; the terminal tests run on Windows through ConPTY, and the scenarios over ssh run the shim on a pseudo-console there.
+- **5:** `bins/gemel-gui/tests/program.rs` checks `-ui text`, the fallback without a display, `-server` and `-socket`; `scripts/check-no-gui-deps.sh` keeps `gemel` without GUI dependencies (phase 0).
+- **Left, by decision:**
+  - not ported: GTK's type-ahead search in lists, dragging a list's values to reorder them (Up and Down do it), the busy cursor (Slint has none that leaves clicks to the widgets), and "Show memory/GC stats" (Rust has no garbage collector);
+  - on macOS, logging out is cancelled while gemel-gui works, as its Quit asks first (phase 4b).
 
 Out of scope, and how each behaves until it is done:
 
