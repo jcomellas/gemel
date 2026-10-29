@@ -1,6 +1,6 @@
 # Milestone 5: platform polish
 
-*Status: in progress (phase 1b, 2026-10-29) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 2a, 2026-10-29) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 5 is step 5 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): platform polish. It takes what earlier milestones moved here:
 - synchronising extended attributes and ACLs, cut since milestone 2;
@@ -129,6 +129,24 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **The preference** `acl`, and the feature's validation.
 - **The oracle:** ACLs on macOS against Homebrew's OCaml, locally, and in CI's macOS job if an OCaml can be built there. Windows has no OCaml build: there, gemel at both ends, round trips through the archive, and the vectors (see Risks).
 - **Likely split:** 2a, macOS; 2b, Windows.
+
+**Notes (phase 2a, 2026-10-29):**
+- **Design decision 2, for macOS's ACLs: system calls,** in `gemel-fs`'s `acl` module: `acl_get_file`, `acl_to_text`, `acl_from_text` and `acl_set_file`, declared from `<sys/acl.h>`, since the `libc` crate lacks them. The text must be what `acl_to_text` writes, and calling it is the shortest way to get that. The stubs' rework (`postprocess_acl_os`) only drops the trailing newline on macOS.
+- **No vectors from the stubs:** on macOS the text is the system's own, so the vectors would only repeat `acl_to_text`. It is checked end to end against OCaml instead: the same texts in both ways' archives, and the same ACLs on disk. Vectors stay for Windows (2b), where gemel builds the SDDL itself.
+- **Ported:**
+  - **`Props.ACL`:** get (read again only when the change time differs), set (last, after the permissions), check (first), `similar`, and the texts;
+  - **the props:** they hold the MD5 of the text (`deflate`), as in OCaml, and the text goes in the host's ACL store, which now sits beside the xattr store so that scans can add to it;
+  - **the `acl` preference,** refused only without the `Sync: ACL` feature.
+- **Texts are looked up in a table for the whole process** (`inflate`), as well as kept in each host's store. OCaml has one store per process; a gemel process may run several hosts (a client and its in-process servers). A key is its text's digest, so a text any of them makes, loads or receives is right for all of them, and the table needs no plumbing into `similar` or the details pane. An unknown key, where OCaml asserts, shows as itself in hexadecimal.
+- **`removeAclNames`** (comparing under `numericids`) is ported as OCaml's pattern has it. That pattern only matches FreeBSD's and Solaris's texts, whose entries end in a numeric id; macOS's end in the permissions, so there it never changes a text, as in OCaml.
+- **The oracle, `--acls`, on macOS:** scenarios add ACL entries with `chmod +a` and remove ACLs with `chmod -N`. The entries only allow, since a deny entry would stop the harness changing or removing what it is on; one is inherited by what a directory gets. Snapshots show each path's extended ACL.
+- **Against OCaml,** Homebrew's 2.54.0 on macOS, all agreeing:
+  - `gemel-engine`'s `acls_propagate_like_ocaml`: entries added and removed on files and directories, a new file's, and one changed the other way, directly, in loopback and with a remote root;
+  - the oracle with `--acls --xattrs`, locally, and with gemel as the client, the server and both, over ssh and on a socket.
+
+  A candidate that runs unison with `-acl=false` fails every scenario.
+- **CI's macOS job** now installs Homebrew's unison and runs these, since the runner has no build of the pinned source. They follow whatever release Homebrew has.
+- **Not run:** ACL pairings with 2.53.8 and 2.52.1, which CI builds only on Linux, where there are no ACLs. A 2.52 server's refusal of `acl` is checked by `gemel-ui-api`'s startup test, as OCaml's validator words it.
 
 ### Phase 3: packages
 
