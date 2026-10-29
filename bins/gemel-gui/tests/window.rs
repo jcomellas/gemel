@@ -683,6 +683,60 @@ fn another_profile_can_be_chosen() {
     app.quit(0);
 }
 
+/// While a card is up, the main window's menus don't take the keys from
+/// its text fields, as `uigtk3`'s modal dialogs leave the main window's
+/// alone: Ctrl-A (Cmd-A on macOS) is the field's, not Select All.
+#[test]
+fn a_cards_text_fields_keep_their_keys() {
+    let work = support::Work::new("window-card-keys");
+    profiles(&work.0, &["p"]);
+    std::fs::write(work.0.join("p-a/another"), "another").unwrap();
+    let (app, out) = support::window(&work.0.join("unison"), vec!["p".to_owned()]);
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(
+        wait_until(WAIT, || {
+            if ui.get_dialog() == 1 {
+                press(ui, "OK");
+            }
+            app.started() && !app.busy()
+        }),
+        "{}",
+        out.text()
+    );
+    let select_all = || {
+        let w = ui.window();
+        for (k, down) in [
+            (Key::Control.into(), true),
+            (SharedString::from("a"), true),
+            ("a".into(), false),
+            (Key::Control.into(), false),
+        ] {
+            w.dispatch_event(if down {
+                slint::platform::WindowEvent::KeyPressed { text: k }
+            } else {
+                slint::platform::WindowEvent::KeyReleased { text: k }
+            });
+        }
+    };
+    let selected = app.table().selected();
+    assert_eq!(selected.len(), 1);
+    // A text field, in the assistant's second page.
+    ui.invoke_change_profile();
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
+    assert!(press(ui, "Add"));
+    assert!(press(ui, "Next"));
+    select_all();
+    assert_eq!(app.table().selected(), selected);
+    assert!(press(ui, "Cancel"));
+    assert!(press(ui, "Cancel"));
+    assert_eq!(ui.get_dialog(), 0);
+    // Without a card, it is Select All.
+    select_all();
+    assert_eq!(app.table().selected(), [0, 1]);
+    app.quit(0);
+}
+
 /// An error starting is shown, and Close goes to the profile manager
 /// (`initLoop`).
 #[test]
