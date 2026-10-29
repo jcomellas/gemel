@@ -8,7 +8,7 @@
 // and what is enabled are worked out in Rust (src/lib.rs and
 // src/recon_view.rs); this file renders them and forwards input.
 
-import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, ProgressIndicator, ScrollView } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ListView, Palette, ProgressIndicator, RadioGroup, ScrollView } from "std-widgets.slint";
 
 export struct RowData {
     // The replicas' statuses (`reconItem2stringList`).
@@ -51,6 +51,23 @@ export struct DiffLine {
 export struct DocTopic {
     short: string,
     name: string,
+}
+
+// A preference a profile sets, as the profile editor lists it.
+export struct EditorRow {
+    name: string,
+    type: string,
+    value: string,
+}
+
+// A row of the tree a preference is added from: 0 a group, 1 a topic, 2
+// a preference.
+export struct PrefTreeRow {
+    title: string,
+    kind: int,
+    depth: int,
+    parent: bool,
+    expanded: bool,
 }
 
 // An item the summary box lists (`summaryBox`).
@@ -128,6 +145,80 @@ component Card inherits Rectangle {
     }
 }
 
+// The documentation of a preference (`documentPreference`), greyed out
+// with none selected.
+component DocPane inherits VerticalLayout {
+    in property <bool> shown;
+    in property <string> short;
+    in property <styled-text> long;
+    spacing: 6px;
+    Text {
+        text: "Documentation";
+        font-weight: 700;
+    }
+    GridLayout {
+        padding-left: 12px;
+        spacing: 6px;
+        Row {
+            Text {
+                text: "Short description:";
+                color: root.shown ? Palette.foreground : Palette.border;
+            }
+            Text {
+                text: root.short;
+                wrap: word-wrap;
+                accessible-label: "Short description";
+            }
+        }
+        Row {
+            Text {
+                colspan: 2;
+                text: "Long description:";
+                color: root.shown ? Palette.foreground : Palette.border;
+            }
+        }
+        Row {
+            Rectangle {
+                colspan: 2;
+                height: 128px;
+                border-width: 1px;
+                border-color: Palette.border;
+                ScrollView {
+                    VerticalLayout {
+                        padding: 4px;
+                        StyledText {
+                            text: root.long;
+                            default-color: Palette.foreground;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A preference's row in a list: its cells, the row selected highlighted.
+component ListRow inherits Rectangle {
+    in property <bool> selected;
+    in property <string> label;
+    in property <int> index;
+    callback clicked();
+    callback double-clicked();
+    height: 22px;
+    background: root.selected ? Palette.selection-background : transparent;
+    accessible-role: list-item;
+    accessible-label: root.label;
+    accessible-item-selectable: true;
+    accessible-item-selected: root.selected;
+    accessible-item-index: root.index;
+    accessible-action-default => { root.clicked(); }
+    TouchArea {
+        clicked => { root.clicked(); }
+        double-clicked => { root.double-clicked(); }
+    }
+    @children
+}
+
 export component AppWindow inherits Window {
     in property <string> window-title: "Gemel";
     title: root.window-title;
@@ -200,6 +291,34 @@ export component AppWindow inherits Window {
     in property <string> profile-root1;
     in property <string> profile-root2;
     in property <bool> manager-quit;
+    // The profile editor (`editProfile`): its rows, the one selected (-1
+    // for none), whether there is something to write, and the order.
+    in property <string> editor-title;
+    in property <[EditorRow]> editor-rows;
+    in property <int> editor-selected: -1;
+    in property <bool> editor-modified;
+    in property <bool> editor-descending;
+    // The documentation of the preference selected (`documentPreference`),
+    // in the editor and in the tree.
+    in property <bool> doc-shown;
+    in property <string> doc-short;
+    in property <styled-text> doc-long;
+    // A preference edited (`editPreference`), edited as a boolean (0), a
+    // line of text (1) or a list (2).
+    in property <string> pe-name;
+    in property <string> pe-description;
+    in property <string> pe-type;
+    in property <int> pe-kind;
+    in-out property <bool> pe-truth;
+    in-out property <string> pe-text;
+    in property <[string]> pe-items;
+    in property <int> pe-item: -1;
+    in-out property <string> pe-entry;
+    // The tree a preference is added from (`addPreference`).
+    in property <[PrefTreeRow]> tree-rows;
+    in property <int> tree-selected: -1;
+    in property <bool> tree-all;
+    in property <bool> tree-can-add;
     // The assistant (`createProfile`): its page, what is entered, and
     // what the pages say, which Rust works out on each change.
     in property <int> wiz-page;
@@ -257,6 +376,27 @@ export component AppWindow inherits Window {
     callback profile-close();
     callback profile-add();
     callback profile-delete();
+    callback profile-edit();
+    callback editor-clicked(row: int);
+    callback editor-activated(row: int);
+    callback editor-sort();
+    callback editor-add();
+    callback editor-edit();
+    callback editor-delete();
+    callback editor-apply();
+    callback editor-close(ok: bool);
+    callback pe-item-clicked(index: int);
+    callback pe-add();
+    callback pe-remove();
+    callback pe-edit();
+    callback pe-up();
+    callback pe-down();
+    callback pe-close(ok: bool);
+    callback tree-clicked(row: int);
+    callback tree-select(row: int);
+    callback tree-activated(row: int);
+    callback tree-toggle-all();
+    callback tree-close(ok: bool);
     callback wizard-changed();
     callback wizard-back();
     callback wizard-next();
@@ -1012,6 +1152,11 @@ export component AppWindow inherits Window {
                     clicked => { root.profile-add(); }
                 }
                 Button {
+                    text: "Edit";
+                    enabled: root.profile-selected >= 0;
+                    clicked => { root.profile-edit(); }
+                }
+                Button {
                     text: "Delete";
                     enabled: root.profile-selected >= 0;
                     clicked => { root.profile-delete(); }
@@ -1338,6 +1483,294 @@ export component AppWindow inherits Window {
                 text: "OK";
                 primary: true;
                 clicked => { root.dialog-done(true); }
+            }
+        }
+    }
+
+    // The profile editor (`editProfile`).
+    if root.dialog == 8: Card {
+        title: root.editor-title;
+        card-width: 680px;
+        escape => { root.editor-close(false); }
+        Text { text: "Preferences:"; }
+        HorizontalLayout {
+            spacing: 12px;
+            VerticalLayout {
+                HorizontalLayout {
+                    height: 22px;
+                    TouchArea {
+                        width: 180px;
+                        accessible-role: button;
+                        accessible-label: "Name";
+                        accessible-action-default => { root.editor-sort(); }
+                        clicked => { root.editor-sort(); }
+                        HeaderCell { label: "Name " + (root.editor-descending ? "▼" : "▲"); }
+                    }
+                    HeaderCell { width: 90px; label: "Type"; }
+                    HeaderCell { label: "Value"; }
+                }
+                Rectangle {
+                    height: 220px;
+                    border-width: 1px;
+                    border-color: Palette.border;
+                    ListView {
+                        accessible-label: "Preferences";
+                        for r[i] in root.editor-rows: ListRow {
+                            selected: i == root.editor-selected;
+                            label: r.name;
+                            index: i;
+                            clicked => { root.editor-clicked(i); }
+                            double-clicked => { root.editor-clicked(i); root.editor-activated(i); }
+                            HorizontalLayout {
+                                padding-left: 4px;
+                                for cell[c] in [r.name, r.type, r.value]: Text {
+                                    width: c == 0 ? 176px : c == 1 ? 90px : self.preferred-width;
+                                    text: cell;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    color: i == root.editor-selected ? Palette.selection-foreground : Palette.foreground;
+                                    accessible-role: none;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 6px;
+                Button {
+                    text: "Add";
+                    clicked => { root.editor-add(); }
+                }
+                Button {
+                    text: "Edit";
+                    enabled: root.editor-selected >= 0;
+                    clicked => { root.editor-edit(); }
+                }
+                Button {
+                    text: "Delete";
+                    enabled: root.editor-selected >= 0;
+                    clicked => { root.editor-delete(); }
+                }
+                Rectangle { vertical-stretch: 1; }
+                Button {
+                    text: "Help";
+                    clicked => { root.documentation("running"); }
+                }
+            }
+        }
+        DocPane {
+            shown: root.doc-shown;
+            short: root.doc-short;
+            long: root.doc-long;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "Apply";
+                enabled: root.editor-modified;
+                clicked => { root.editor-apply(); }
+            }
+            Button {
+                text: "Cancel";
+                clicked => { root.editor-close(false); }
+            }
+            Button {
+                text: "OK";
+                primary: true;
+                clicked => { root.editor-close(true); }
+            }
+        }
+    }
+
+    // A preference edited (`editPreference`).
+    if root.dialog == 9: Card {
+        title: "Edit the Preference";
+        card-width: 560px;
+        escape => { root.pe-close(false); }
+        GridLayout {
+            spacing: 6px;
+            Row {
+                Text { text: "Preference:"; }
+                Text { text: root.pe-name; accessible-label: "Preference"; }
+            }
+            Row {
+                Text { text: "Description:"; }
+                Text { text: root.pe-description; wrap: word-wrap; accessible-label: "Description"; }
+            }
+            Row {
+                Text { text: "Type:"; }
+                Text { text: root.pe-type; accessible-label: "Type"; }
+            }
+            Row {
+                Text { text: "Value:"; vertical-alignment: top; }
+                if root.pe-kind == 0: RadioGroup {
+                    orientation: horizontal;
+                    accessible-label: "Value";
+                    selected(value) => { root.pe-truth = value == "True"; }
+                    // The value as it is when the dialog opens; the group
+                    // has it from then on.
+                    RadioButton {
+                        text: "True";
+                        checked: root.pe-truth;
+                    }
+                    RadioButton {
+                        text: "False";
+                        checked: !root.pe-truth;
+                    }
+                }
+                if root.pe-kind == 1: LineEdit {
+                    text <=> root.pe-text;
+                    accessible-label: "Value";
+                    accepted => { root.pe-close(true); }
+                    init => { self.focus(); }
+                }
+                if root.pe-kind == 2: HorizontalLayout {
+                    spacing: 12px;
+                    Rectangle {
+                        height: 160px;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        ListView {
+                            accessible-label: "Value";
+                            for v[i] in root.pe-items: ListRow {
+                                selected: i == root.pe-item;
+                                label: v;
+                                index: i;
+                                clicked => { root.pe-item-clicked(i); }
+                                Text {
+                                    x: 4px;
+                                    text: v;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    color: i == root.pe-item ? Palette.selection-foreground : Palette.foreground;
+                                    accessible-role: none;
+                                }
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: start;
+                        spacing: 6px;
+                        Button {
+                            text: "Add";
+                            clicked => { root.pe-add(); }
+                        }
+                        Button {
+                            text: "Remove";
+                            enabled: root.pe-item >= 0;
+                            clicked => { root.pe-remove(); }
+                        }
+                        Button {
+                            text: "Edit";
+                            enabled: root.pe-item >= 0 && root.pe-items[root.pe-item] != root.pe-entry;
+                            clicked => { root.pe-edit(); }
+                        }
+                        Button {
+                            text: "Up";
+                            enabled: root.pe-item > 0;
+                            clicked => { root.pe-up(); }
+                        }
+                        Button {
+                            text: "Down";
+                            enabled: root.pe-item >= 0 && root.pe-item < root.pe-items.length - 1;
+                            clicked => { root.pe-down(); }
+                        }
+                    }
+                }
+            }
+            if root.pe-kind == 2: Row {
+                Text { text: "Edited item:"; }
+                LineEdit {
+                    text <=> root.pe-entry;
+                    accessible-label: "Edited item";
+                    accepted => { root.pe-add(); }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            Button {
+                text: "Help";
+                clicked => { root.documentation("running"); }
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: "Cancel";
+                clicked => { root.pe-close(false); }
+            }
+            Button {
+                text: "OK";
+                primary: true;
+                clicked => { root.pe-close(true); }
+            }
+        }
+    }
+
+    // The tree a preference is added from (`addPreference`).
+    if root.dialog == 10: Card {
+        title: "Add a Preference";
+        card-width: 600px;
+        escape => { root.tree-close(false); }
+        HorizontalLayout {
+            Text {
+                text: "Preferences:";
+                vertical-alignment: bottom;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Button {
+                text: root.tree-all ? "Collapse all" : "Expand all";
+                clicked => { root.tree-toggle-all(); }
+            }
+        }
+        Rectangle {
+            height: 240px;
+            border-width: 1px;
+            border-color: Palette.border;
+            ListView {
+                accessible-role: tree;
+                accessible-label: "Preferences";
+                for r[i] in root.tree-rows: ListRow {
+                    selected: i == root.tree-selected;
+                    label: r.title;
+                    index: i;
+                    accessible-expandable: r.parent;
+                    accessible-expanded: r.expanded;
+                    accessible-action-expand => { if r.parent && !r.expanded { root.tree-clicked(i); } }
+                    accessible-action-default => { root.tree-select(i); }
+                    clicked => { root.tree-clicked(i); }
+                    double-clicked => { root.tree-activated(i); }
+                    Text {
+                        x: 4px + r.depth * 18px;
+                        text: (r.parent ? (r.expanded ? "▾ " : "▸ ") : "") + r.title;
+                        vertical-alignment: center;
+                        overflow: elide;
+                        font-weight: r.kind == 0 ? 700 : 400;
+                        font-italic: r.kind == 1;
+                        color: i == root.tree-selected ? Palette.selection-foreground : Palette.foreground;
+                        accessible-role: none;
+                    }
+                }
+            }
+        }
+        DocPane {
+            shown: root.doc-shown;
+            short: root.doc-short;
+            long: root.doc-long;
+        }
+        HorizontalLayout {
+            alignment: end;
+            spacing: 8px;
+            Button {
+                text: "Cancel";
+                clicked => { root.tree-close(false); }
+            }
+            Button {
+                text: "Add";
+                primary: true;
+                enabled: root.tree-can-add;
+                clicked => { root.tree-close(true); }
             }
         }
     }
