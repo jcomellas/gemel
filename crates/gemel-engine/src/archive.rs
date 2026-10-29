@@ -23,8 +23,10 @@
 //!   Unison ≤ 2.53.3 can still read the archive, and its values are
 //!   property lists themselves.
 //! - The `"props data"` property (data shared between xattrs and ACLs) is
-//!   kept as loaded. gemel doesn't synchronise xattrs or ACLs yet, so it has
-//!   no data of its own to add.
+//!   kept in the host's stores (`Propsdata`): the xattr store that the
+//!   host's scans share ([`crate::xattrs::store`]), and the ACL store in
+//!   the archive cache. gemel doesn't synchronise ACLs yet, so it adds no
+//!   ACL data of its own.
 //! - An archive is decoded with the features its file records, without
 //!   enabling them on the host meanwhile.
 //! - A truncated archive is reported as damaged, where OCaml stops with an
@@ -50,6 +52,7 @@ use gemel_fs::fspath::Fspath;
 use gemel_fs::os::FullFingerprint;
 use gemel_fs::osx::RessStamp;
 use gemel_fs::props::{self, FEATURE_ACL, FEATURE_XATTR, Props, PropsConfig};
+use gemel_fs::propsdata;
 use gemel_fs::system::{self, Kind, Stats, SysError};
 use gemel_rpc::host::Host;
 use gemel_rpc::registry::{RootCmd, Rpc};
@@ -1018,14 +1021,18 @@ pub static POST_COMMIT_ARCHIVE: RootCmd<(), ()> = RootCmd::new(
 // ---- The archive cache ----
 
 /// A host's archives, by root (`archiveCache`, `archivePropCache`,
-/// `archiveInfoCache`, and `Props.Data`'s store).
+/// `archiveInfoCache`).
 #[derive(Default)]
 struct ArchiveCache {
     archives: HashMap<String, Archive>,
     props: HashMap<String, ArchiveProps>,
     info: HashMap<String, Option<Stats>>,
-    props_data: PropsData,
 }
+
+/// The host's ACL texts by key (`Propsdata.ACL`), apart from the archive
+/// cache, whose archives may be borrowed while the store changes.
+#[derive(Default)]
+struct AclStore(propsdata::Store);
 
 fn cache(host: &Host) -> Rc<std::cell::RefCell<ArchiveCache>> {
     host.state::<ArchiveCache>()
@@ -1068,11 +1075,6 @@ pub fn set_archive_props_local(host: &Host, this_root: &str, props: ArchiveProps
         .insert(this_root.to_owned(), props);
 }
 
-/// The host's shared props data (`Props.Data`), as last loaded.
-pub fn props_data(host: &Host) -> PropsData {
-    cache(host).borrow().props_data.clone()
-}
-
 /// Takes the root's archive out of the cache (leaving `NoArchive`), to
 /// update it off the engine thread; [`set_archive_local`] puts it back.
 pub fn take_archive(host: &Host, this_root: &str) -> Archive {
@@ -1085,9 +1087,41 @@ pub fn take_archive(host: &Host, this_root: &str) -> Archive {
         })
 }
 
+/// Runs `f` on the host's xattr store (`Propsdata.Xattr`).
+fn with_xattr_store<R>(host: &Host, f: impl FnOnce(&mut propsdata::Store) -> R) -> R {
+    let store = crate::xattrs::store(host);
+    let mut store = store.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut store)
+}
+
+/// Runs `f` on the host's ACL store.
+fn with_acl_store<R>(host: &Host, f: impl FnOnce(&mut propsdata::Store) -> R) -> R {
+    f(&mut host.state::<AclStore>().borrow_mut().0)
+}
+
+/// `Props.Data.extern`: the host's data of `kind`, as OCaml lists it (ACLs
+/// first), without kinds that have none.
+fn extern_props_data(host: &Host, kind: propsdata::Kind) -> PropsData {
+    let xattr = with_xattr_store(host, |s| s.get(kind));
+    let acl = with_acl_store(host, |s| s.get(kind));
+    [(&b"ACL"[..], acl), (&b"xattr"[..], xattr)]
+        .into_iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| (k.to_vec(), v))
+        .collect()
+}
+
+/// The entries of `kind` in `data`, if any (`extract`).
+fn extract<'a>(data: &'a PropsData, kind: &[u8]) -> &'a [(Vec<u8>, Vec<u8>)] {
+    data.iter()
+        .find(|(k, _)| k == kind)
+        .map_or(&[], |(_, v)| v.as_slice())
+}
+
 /// `externArchivePropsdata`: records in `props` the shared props data the
-/// archive still uses (`prunePropsdata`). Only ACLs keep data; keys with
-/// none are skipped (OCaml asserts there). If nothing is kept, `props` is
+/// archive still uses (`prunePropsdata`). Only ACLs are kept: the xattr
+/// store is a cache, which archives don't keep. A key the store doesn't
+/// know is skipped, where OCaml asserts. If nothing is kept, `props` is
 /// left as it was.
 pub fn extern_archive_propsdata(host: &Host, archive: &Archive, props: &mut Proplist) {
     fn keys<'a>(a: &'a Archive, out: &mut HashSet<&'a [u8]>) {
@@ -1105,62 +1139,32 @@ pub fn extern_archive_propsdata(host: &Host, archive: &Archive, props: &mut Prop
     }
     let mut used = HashSet::new();
     keys(archive, &mut used);
-    let cache = cache(host);
-    let cache = cache.borrow();
-    let kept: Vec<(Vec<u8>, Vec<u8>)> = cache
-        .props_data
-        .iter()
-        .filter(|(k, _)| k == b"ACL")
-        .flat_map(|(_, l)| l.iter())
-        .filter(|(k, _)| used.contains(k.as_slice()))
-        .cloned()
-        .collect();
+    with_xattr_store(host, propsdata::Store::clear_kept);
+    with_acl_store(host, |acl| {
+        acl.clear_kept();
+        for k in used {
+            if acl.exists(k) {
+                acl.keep(k);
+            }
+        }
+    });
+    let kept = extern_props_data(host, propsdata::Kind::Kept);
     if !kept.is_empty() {
-        props.add(&PROPS_DATA_KEY, vec![(b"ACL".to_vec(), kept)]);
+        props.add(&PROPS_DATA_KEY, kept);
     }
 }
 
 /// `Props.Data.merge`: adds another host's shared props data to this
 /// host's. A key must not have two values.
 pub fn merge_props_data(host: &Host, data: &PropsData) -> Result<(), Error> {
-    let cache = cache(host);
-    let mut cache = cache.borrow_mut();
-    for (kind, entries) in data {
-        if kind != b"xattr" && kind != b"ACL" {
-            continue;
-        }
-        let store = match cache.props_data.iter().position(|(k, _)| k == kind) {
-            Some(i) => &mut cache.props_data[i].1,
-            None => {
-                cache.props_data.push((kind.clone(), Vec::new()));
-                &mut cache.props_data.last_mut().expect("just pushed").1
-            }
-        };
-        for (key, value) in entries {
-            match store.iter().find(|(k, _)| k == key) {
-                None => store.push((key.clone(), value.clone())),
-                Some((_, v)) if v == value => {}
-                Some((_, v)) => {
-                    let s = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
-                    return Err(Error::Fatal(format!(
-                        "Internal integrity error (propsdata). Key {} returns different \
-                         results:\n  (existing) {}\nand\n  (new) {}\n",
-                        s(key),
-                        s(v),
-                        s(value)
-                    )));
-                }
-            }
-        }
-    }
-    Ok(())
+    with_xattr_store(host, |s| s.merge(extract(data, b"xattr"))).map_err(Error::Fatal)?;
+    with_acl_store(host, |s| s.merge(extract(data, b"ACL"))).map_err(Error::Fatal)
 }
 
 /// `Props.Data.extern \`New`: the shared props data this host added since
-/// it was loaded. gemel doesn't synchronise xattrs or ACLs yet, so there is
-/// none.
-pub fn new_props_data(_host: &Host) -> PropsData {
-    PropsData::new()
+/// its archives were loaded, for the other hosts.
+pub fn new_props_data(host: &Host) -> PropsData {
+    extern_props_data(host, propsdata::Kind::New)
 }
 
 /// `fileUnchanged`: whether two statuses are of the same regular file,
@@ -1192,9 +1196,12 @@ pub fn archive_unchanged(host: &Host, this_root: &str, new: Option<&Stats>) -> b
 }
 
 /// `internArchivePropsdata`: makes the archive's shared props data the
-/// host's.
+/// host's, and none of it new. This empties the xattr store, which
+/// archives don't keep.
 fn intern_archive_propsdata(host: &Host, props: &Proplist) {
-    cache(host).borrow_mut().props_data = props.find(&PROPS_DATA_KEY).cloned().unwrap_or_default();
+    let data = props.find(&PROPS_DATA_KEY).cloned().unwrap_or_default();
+    with_xattr_store(host, |s| s.set(extract(&data, b"xattr")));
+    with_acl_store(host, |s| s.set(extract(&data, b"ACL")));
 }
 
 // ---- Case conversion ----

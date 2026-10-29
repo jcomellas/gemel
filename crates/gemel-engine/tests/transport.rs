@@ -796,6 +796,36 @@ fn fspath_of(p: &StdPath) -> gemel_fs::fspath::Fspath {
     gemel_fs::fspath::Fspath::canonize(Some(p.to_str().unwrap().as_bytes())).unwrap()
 }
 
+/// The values a host's scan cached go to the other hosts after update
+/// detection (`mergePropsdataOnRoot`), so that a copy finds them there
+/// without asking for them (`propsExtData`). Those of 32 bytes or less are
+/// in the props themselves, and aren't cached.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn cached_xattr_values_go_to_the_other_host() {
+    use md5::{Digest, Md5};
+    let cached = |host: &gemel_rpc::host::Host, v: &[u8]| {
+        let store = gemel_engine::xattrs::store(host);
+        let key = Md5::digest(v).to_vec();
+        store.lock().unwrap().exists(&key)
+    };
+    let (va, vb) = (vec![b'a'; 100], vec![b'b'; 100]);
+    for via in [Via::Loopback, Via::Remote] {
+        let dir = TempDir::new("xattr-values");
+        let s = synced(&dir, via, &["xattrs = true"], build_tree);
+        write(&s.a(), "new-a", "new in a", T0 + 20.0);
+        set_xattr(&s.a(), "new-a", "gemel.v", &va);
+        write(&s.b(), "new-b", "new in b", T0 + 20.0);
+        set_xattr(&s.b(), "new-b", "gemel.v", &vb);
+        s.find();
+        let client = s.rpc.client_host();
+        assert!(cached(client, &va) && cached(client, &vb), "{via}");
+        if let Some(server) = &s.server {
+            assert!(cached(server, &va) && cached(server, &vb), "{via}");
+        }
+    }
+}
+
 /// With `xattrs`, extended attributes propagate as OCaml propagates them:
 /// set, changed and removed on a file whose contents are the same (a
 /// props change), a new file's, large values (known by their MD5 until
