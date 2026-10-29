@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 3b, 2026-10-28) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 3c, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -420,12 +420,69 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **A test fixed:** `gemel-fs`'s pseudo-terminal test (phase 2a) closed the master once the child's last words had come, which hung the child up if it hadn't exited yet. It failed now and then on macOS, with the child's output whole; the master is now kept until the child has gone. Another failure was seen once, before that fix, and isn't explained: the output stopped short of the child's last words, so the reading ended early. The test now retries an interrupted read, and its assertions say how the reading ended, should it happen again.
 - **Another test fixed:** `gemel-fsmonitor`'s tests (milestone 2) took the watcher's last lines once it had exited, but only those already passed on by the thread that reads them, so an error line was now and then missed (on macOS CI). They now read the watcher's output to its end.
 
+**Notes (phase 3c, 2026-10-29):**
+- **The session's gaps** (`gemel-ui-api`'s `profile_editor`, without a toolkit):
+  - the preferences' types (`Prefs.typ`, with `UNKNOWN` for a name nothing registers), `nameOfType` and `defaultValue`;
+  - their documentation, and `addPreference`'s tree;
+  - a profile's settings as `editProfile` reads them (`ReadProfile`): includes expanded, comments left out, aliases canonical, by name in byte order, each preference's values in the order they came, `normalizeValue`'s last value for a single one, a three-state boolean at `default` or `auto` left out;
+  - the text `applyCommand` writes (`WriteProfile`): `# Unison preferences`, then `name = value` for each value, as they are, over the file, which is its owner's alone if it is made;
+  - `formatDoc`, a preference's documentation as GTK markup.
+
+  As `Prefs.readAFile` does, reading a profile for the editor records its files, so that a profile loaded since is taken to have changed if they change.
+- **Tests:**
+  - the session reads a profile with an include, comments, an alias, values to normalize and a three-state boolean at its default, and writes it back as `uigtk3` does;
+  - what it wrote reads back the same, loads, and OCaml syncs with it (with `GEMEL_REFERENCE_UNISON`, checked against 2.54.0);
+  - the tree, against `Prefs.list false`;
+  - `formatDoc` on examples, and no LaTeX left in any preference's documentation (`uigtk3`'s own check, left commented out there).
+- **The tree** has the basic preferences by topic, then `key` and `label`; the advanced ones by topic, General last; and the expert ones. The basic General topic goes, as its preferences are all for the command line. Only the first group starts expanded, as in `uigtk3`.
+- **The editor** (`editProfile`), from Edit in the profile manager, is a card over it:
+  - the profile's preferences with their types and values, by name, either way from the Name header (as GTK collates, case aside), written in the order read, then added;
+  - Add (`addPreference`, a card of its own), Edit or a double click (`editPreference`, another), and Delete, once asked;
+  - the documentation of the preference selected;
+  - Help, the manual at Running Unison;
+  - Apply, OK and Cancel.
+
+  Closed, the editor leaves the manager listing the profiles again, with its profile selected (`fillLst`).
+- **A preference edited** (`editPreference`): True or False, a line of text, or a list edited a value at a time ("Edited item"). Its rules are ported as they are:
+  - Add is always there, and Enter in the entry adds;
+  - Edit is there when the entry differs from the value selected;
+  - Up and Down are there as the value's place allows;
+  - Remove selects the next value, or the one before at the end.
+
+  OK with no values deletes the preference, once asked; a preference added needs a value. `yes` is read as true, and written back as `true` on OK.
+- **The documentation** (`documentPreference`): `formatDoc`'s markup is shown in Slint's `StyledText`, as markdown:
+  - `<i>` in italics, `<tt>` as code;
+  - each line a line of its own;
+  - punctuation escaped.
+
+  A test checks that every documented preference's text parses, and shows the text `uigtk3` would.
+- **Departures:**
+  - **Deleting from the edit dialog:** emptying a list deletes the preference edited. `uigtk3` deletes the row selected, which differs when Add found the preference already set.
+  - **A failed save:** a profile that can't be saved is said so ("Could not save profile") over the editor, which stays open with what was edited. On OK, `uigtk3` shows the error and closes, losing the edits.
+  - **Apostrophes:** `Glib.Markup.escape_text` writes them `&#39;`, which `uigtk3`'s markup reader doesn't decode, so it shows the entity. They are apostrophes here.
+  - **A profile that can't be read** for the editor is said so in a message ("Error"). In `uigtk3`, the exception goes to GTK's handler, which only prints it.
+  - **Not ported:** dragging a list's values to reorder them (Up and Down do it), and the tree's and lists' keys. Their rows are chosen with the pointer or a screen reader; keys come with phase 4.
+- **Window test:**
+  - Edit from the manager, and the order either way;
+  - a boolean changed, its buttons chosen as a screen reader chooses them;
+  - a line of text, which Enter takes;
+  - a list added from the tree;
+  - a preference deleted, once asked;
+  - Help;
+  - Apply, with the file checked;
+  - OK, back to the manager with the profile selected;
+  - a profile that can't be saved.
+- **True or False** takes the choice from the radio group's `selected`: a button's `toggled` doesn't come when a screen reader chooses it.
+- **Not yet seen by eye** (phase 4): the styled text's fonts, and the cards' layout. It wraps, as a `ScrollView`'s content is as wide as the view unless one word is wider.
+
 ### Phase 4: each system, and the rest
 
 - **Each system's conventions:** shortcuts (⌘ on macOS), the menu bar (native on macOS, in the window elsewhere), and `rfd`'s pickers on each system.
 - **By eye:** screenshots on macOS, on Linux under Xvfb, and on Windows. They need an unlocked session and a person (see Risks).
 - **The spike's checks, through the session:** 50k items, and progress at 500 updates a second.
-- **Odds and ends** found on the way, each with a decision, as in milestone 3's phase 6b.
+- **Odds and ends** found on the way, each with a decision, as in milestone 3's phase 6b. Left for this phase by phase 3:
+  - keys for the documentation window's tabs, the editor's tree and its lists, which take the pointer and a screen reader only;
+  - by eye: the documentation window (empty lines, the wrapped tabs, scrolling), the editor's cards, and its styled text's fonts.
 
 ## Verification
 
