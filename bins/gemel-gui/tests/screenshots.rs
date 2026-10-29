@@ -267,6 +267,9 @@ fn the_roots_dialogs() {
     shoot_main(ui, "roots-3-ssh");
     ui.set_root_kind(2);
     shoot_main(ui, "roots-4-socket");
+    assert!(press(ui, "Help"));
+    shoot_main(ui, "roots-5-help");
+    assert!(press(ui, "OK"));
     app.quit(0);
 }
 

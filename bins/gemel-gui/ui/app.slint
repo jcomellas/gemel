@@ -484,6 +484,7 @@ export component AppWindow inherits Window {
     callback quit();
     callback dialog-done(ok: bool);
     callback browse-root();
+    callback root-help();
     // The manual's window, at a section ("" for the first).
     callback documentation(topic: string);
 
@@ -1550,8 +1551,13 @@ export component AppWindow inherits Window {
             color: #d23c3c;
         }
         HorizontalLayout {
-            alignment: end;
             spacing: 8px;
+            // `getSecondRoot`'s: how roots are picked.
+            if root.dialog == 3: Button {
+                text: "Help";
+                clicked => { root.root-help(); }
+            }
+            Rectangle { horizontal-stretch: 1; }
             Button {
                 text: "Cancel";
                 clicked => { root.dialog-done(false); }
