@@ -42,7 +42,7 @@ use gemel_rpc::root::Root;
 
 use crate::archive::{self, Archive};
 use crate::common::{Codec, ContentsChange, UpdateContent, UpdateItem};
-use crate::copy::{self, Ctx, Replacing, Source};
+use crate::copy::{self, Ctx, Replacing, Source, XPath};
 use crate::globals::Roots;
 use crate::region::Region;
 use crate::stasher::{self, Disposition};
@@ -406,6 +406,8 @@ async fn set_prop_local(
         })
         .await?;
     }
+    // Without the xattrs' values again, as the archive keeps them.
+    let new_desc = new_desc.purge_ext_data();
     if file_updated(&ui) {
         stasher::stash_current_version(host, fspath, &local, None).await?;
     }
@@ -504,20 +506,22 @@ pub async fn set_prop(
     ui_from: &UpdateItem,
     ui_to: &UpdateItem,
 ) -> Result<(), Error> {
+    let (local_from, new_desc) =
+        copy::props_ext_data_on_root(rpc, root_from, XPath::Global(path_from.clone()), new_desc)
+            .await?;
     rpc.call_root(
         &SET_PROP,
         root_to,
-        (
-            path_to.clone(),
-            ui_to.clone(),
-            new_desc.clone(),
-            old_desc.clone(),
-        ),
+        (path_to.clone(), ui_to.clone(), new_desc, old_desc.clone()),
     )
     .await?;
-    let local_from = rpc
-        .call_root(&TRANSLATE_PATH, root_from, path_from.clone())
-        .await?;
+    let local_from = match local_from {
+        Some(p) => p,
+        None => {
+            rpc.call_root(&TRANSLATE_PATH, root_from, path_from.clone())
+                .await?
+        }
+    };
     update_props(rpc, root_from, &local_from, None, ui_from).await
 }
 
@@ -1078,6 +1082,26 @@ pub static DELETE_SPURIOUS_CHILDREN: RootCmd<(Fspath, Path<Local>, Vec<Name>), (
     },
 );
 
+/// `readParentsExtData`: each of `descs` (the props of `path_from`'s
+/// parents, the nearest first) with its xattrs' values.
+async fn read_parents_ext_data(
+    rpc: &Rpc,
+    root_from: &Root,
+    path_from: &Path<Local>,
+    descs: Vec<Props>,
+) -> Result<Vec<Props>, Error> {
+    let mut path = path_from.clone();
+    let mut out = Vec::with_capacity(descs.len());
+    for desc in descs {
+        let (_, parent) = path
+            .deconstruct_rev()
+            .ok_or_else(|| internal("a parent's props without a parent"))?;
+        out.push(copy::read_props_ext_data(rpc, root_from, &parent, &desc).await?);
+        path = parent;
+    }
+    Ok(out)
+}
+
 /// `normalizeProps`: the source's parents' props for the target's
 /// missing parents (dropping those the target has), reversed as OCaml
 /// does.
@@ -1301,6 +1325,8 @@ impl<'a> Copying<'a> {
                         )
                         .await?;
                 }
+                let desc_ext =
+                    copy::read_props_ext_data(self.rpc, self.root_from, p_from, desc).await?;
                 // The actual permissions, to keep inherited bits.
                 self.copy_reg
                     .run(
@@ -1312,7 +1338,7 @@ impl<'a> Copying<'a> {
                                 self.working_dir.clone(),
                                 p_to.clone(),
                                 initial_desc,
-                                desc.clone(),
+                                desc_ext,
                             ),
                         ),
                     )
@@ -1348,7 +1374,13 @@ pub async fn copy(
     let local_path_from = rpc
         .call_root(&TRANSLATE_PATH, root_from, path_from.clone())
         .await?;
-    let parent_props = normalize_props(props_from, props_to)?;
+    let parent_props = read_parents_ext_data(
+        rpc,
+        root_from,
+        &local_path_from,
+        normalize_props(props_from, props_to)?,
+    )
+    .await?;
     let (working_dir, real_path_to, temp_path_to, local_path_to) = rpc
         .call_root(
             &SETUP_TARGET_PATHS_AND_CREATE_PARENT_DIRECTORY,
@@ -1635,9 +1667,16 @@ pub async fn move_(
                 .to_owned(),
         ));
     }
-    rpc.call_root(&TRANSLATE_PATH, root_from, from.new_path.clone())
+    let local_path_from = rpc
+        .call_root(&TRANSLATE_PATH, root_from, from.new_path.clone())
         .await?;
-    let parent_props = normalize_props(from.new_props, to.new_props)?;
+    let parent_props = read_parents_ext_data(
+        rpc,
+        root_from,
+        &local_path_from,
+        normalize_props(from.new_props, to.new_props)?,
+    )
+    .await?;
     rpc.call_root(
         &MOVE,
         root_to,

@@ -757,3 +757,131 @@ fn the_scan_and_reconciliation_show_their_status() {
         }
     }
 }
+
+/// The `gemel.` attributes of the file at `rel` in `root` (leaving those
+/// the system adds, such as macOS's `com.apple.provenance`), by name.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn xattrs_of(root: &StdPath, rel: &str) -> BTreeMap<String, String> {
+    use gemel_fs::xattr;
+    let p = fspath_of(&root.join(rel));
+    xattr::list(&p)
+        .unwrap()
+        .into_iter()
+        .filter(|(n, _)| n.starts_with(b"gemel."))
+        .map(|(n, _)| {
+            let v = xattr::get(&p, &n).unwrap();
+            (String::from_utf8(n).unwrap(), shown(&v))
+        })
+        .collect()
+}
+
+/// A value as the test shows it: short ones as they are, long ones by
+/// their length and first byte.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn shown(v: &[u8]) -> String {
+    if v.len() <= 16 {
+        String::from_utf8_lossy(v).into_owned()
+    } else {
+        format!("{} x {}", v.len(), char::from(v[0]))
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn set_xattr(root: &StdPath, rel: &str, name: &str, value: &[u8]) {
+    gemel_fs::xattr::set(&fspath_of(&root.join(rel)), name.as_bytes(), value).unwrap();
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn fspath_of(p: &StdPath) -> gemel_fs::fspath::Fspath {
+    gemel_fs::fspath::Fspath::canonize(Some(p.to_str().unwrap().as_bytes())).unwrap()
+}
+
+/// With `xattrs`, extended attributes propagate as OCaml propagates them:
+/// set, changed and removed on a file whose contents are the same (a
+/// props change), a new file's, large values (known by their MD5 until
+/// they are copied), a directory's, the other way, and one that
+/// `xattrignore` leaves alone on both sides. With OCaml Unison, it syncs
+/// a twin to the same attributes, and then finds nothing to do on ours.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn xattrs_propagate_like_ocaml() {
+    const PREFS: [&str; 2] = ["xattrs = true", "xattrignore = Path gemel.private"];
+    let big = vec![b'b'; 3000];
+    let bigger = vec![b'B'; 2000];
+    let build: fn(&StdPath) = |r| {
+        build_tree(r);
+        set_xattr(r, "README", "gemel.keep", b"same");
+        set_xattr(r, "README", "gemel.change", b"old");
+        set_xattr(r, "README", "gemel.gone", b"x");
+        set_xattr(r, "src", "gemel.d", b"dir");
+    };
+    let change = |a: &StdPath, b: &StdPath| {
+        set_xattr(a, "README", "gemel.change", b"new");
+        gemel_fs::xattr::remove(&fspath_of(&a.join("README")), b"gemel.gone").unwrap();
+        set_xattr(a, "README", "gemel.big", &vec![b'b'; 3000]);
+        set_xattr(a, "README", "gemel.private", b"a's own");
+        set_xattr(b, "README", "gemel.private", b"b's own");
+        write(a, "new-a", "new in a", T0 + 20.0);
+        set_xattr(a, "new-a", "gemel.n", b"n");
+        set_xattr(a, "new-a", "gemel.bigger", &vec![b'B'; 2000]);
+        set_xattr(a, "src", "gemel.d", b"dir2");
+        set_xattr(b, "src/main.c", "gemel.b", b"from b");
+    };
+    let expect = |a: &StdPath, b: &StdPath, what: &str| {
+        let map = |l: &[(&str, &[u8])]| -> BTreeMap<String, String> {
+            l.iter().map(|(n, v)| (n.to_string(), shown(v))).collect()
+        };
+        let want_readme = |private: &[u8]| {
+            map(&[
+                ("gemel.big", &big),
+                ("gemel.change", b"new"),
+                ("gemel.keep", b"same"),
+                ("gemel.private", private),
+            ])
+        };
+        assert_eq!(xattrs_of(a, "README"), want_readme(b"a's own"), "{what}");
+        assert_eq!(xattrs_of(b, "README"), want_readme(b"b's own"), "{what}");
+        let new_a = map(&[("gemel.bigger", &bigger), ("gemel.n", b"n")]);
+        assert_eq!(xattrs_of(b, "new-a"), new_a, "{what}");
+        assert_eq!(xattrs_of(b, "src"), map(&[("gemel.d", b"dir2")]), "{what}");
+        let main = map(&[("gemel.b", b"from b")]);
+        assert_eq!(xattrs_of(a, "src/main.c"), main, "{what}");
+    };
+    for via in Via::ALL {
+        let what = format!("{via:?}");
+        let dir = TempDir::new("xattrs");
+        let s = synced(&dir, via, &PREFS, build);
+        // An attribute changed in the second of the last scan is missed, as
+        // in OCaml: on macOS, change times are whole seconds.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        change(&s.a(), &s.b());
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new(), "{what}");
+        expect(&s.a(), &s.b(), &what);
+        // Nothing more to do, by our own archives.
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new(), "{what}");
+        if let Some(unison) = std::env::var_os("GEMEL_REFERENCE_UNISON") {
+            ocaml_agrees(&s, &PREFS);
+            let twin_dir = TempDir::new("xattrs-ocaml");
+            let twin = synced(&twin_dir, via, &PREFS, build);
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            change(&twin.a(), &twin.b());
+            settle(&[&twin.a(), &twin.b()]);
+            let all = ocaml_run(&unison, &twin, &flags_of(&PREFS));
+            expect(&twin.a(), &twin.b(), &format!("OCaml, {what}: {all}"));
+            // And gemel, loading the archives OCaml wrote, finds nothing to
+            // do either.
+            let fresh = setup(&twin_dir, via);
+            fresh.init(&PREFS);
+            for (fa, fb) in fresh.find() {
+                assert_eq!(
+                    (&fa.1, &fb.1),
+                    (
+                        &common::UpdateItem::NoUpdates,
+                        &common::UpdateItem::NoUpdates
+                    ),
+                    "{what}: {all}"
+                );
+            }
+        }
+    }
+}

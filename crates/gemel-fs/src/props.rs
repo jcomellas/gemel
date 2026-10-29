@@ -146,7 +146,7 @@ pub fn acl_enabled(_: &Prefs, features: &Features) -> bool {
 }
 
 /// `xattrs` (`syncXattrs`): synchronise extended attributes. Refused when
-/// true (see the module documentation).
+/// the `Sync: xattr` feature isn't enabled (see [`register_features`]).
 pub static SYNC_XATTRS: PrefDef<bool> = PrefDef::new(
     "xattrs",
     Category::Advanced(Topic::Sync),
@@ -215,15 +215,16 @@ pub const FEATURE_XATTR: &str = "Sync: xattr";
 pub const FEATURE_ACL: &str = "Sync: ACL";
 
 /// Registers this module's features, in OCaml's order. Both change the
-/// archive format. Their validators refuse the `xattrs` and `acl`
-/// preferences with OCaml's message for a server without the feature,
-/// whether or not it is enabled, until gemel synchronises them.
+/// archive format. The xattr feature's validator refuses the `xattrs`
+/// preference with OCaml's message when the feature isn't enabled (a
+/// server without it); the ACL feature's refuses `acl` whether or not it
+/// is, until gemel synchronises ACLs.
 pub fn register_features(features: &mut Features) -> Result<(), Error> {
     features.register(
         FEATURE_XATTR,
         true,
-        Some(Box::new(|_, _, prefs| {
-            set(prefs, &SYNC_XATTRS).then(|| {
+        Some(Box::new(|_, enabled_this, prefs| {
+            (!enabled_this && set(prefs, &SYNC_XATTRS)).then(|| {
                 "You have requested synchronization of extended attributes (the \
                  \"xattrs\" preference) but the server does not support this."
                     .to_owned()
@@ -295,8 +296,8 @@ impl Default for PropsConfig {
 impl PropsConfig {
     /// Reads the configuration from preferences registered with
     /// [`register_prefs`] and [`osx::register_prefs`]. The caller sets the
-    /// feature flags from negotiation; xattr and ACL synchronisation stays
-    /// off (see the module documentation).
+    /// feature flags from negotiation; ACL synchronisation stays off (see
+    /// the module documentation).
     pub fn from_prefs(prefs: &Prefs) -> Self {
         PropsConfig {
             perm_mask: *prefs.read(&PERMS),
@@ -305,6 +306,7 @@ impl PropsConfig {
             numeric_ids: *prefs.read(&NUMERIC_IDS),
             sync_times: *prefs.read(&TIMES),
             rsrc: *prefs.read(&osx::RSRC_AUX),
+            sync_xattrs: *prefs.read(&SYNC_XATTRS),
             ..PropsConfig::default()
         }
     }

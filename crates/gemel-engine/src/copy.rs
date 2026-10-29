@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use gemel_base::case;
 use gemel_base::features::Features;
-use gemel_base::path::{Local, Path};
+use gemel_base::path::{Global, Local, Path};
 use gemel_base::prefs::{Category, DumpedPref, PrefDef, Prefs, Topic};
 use gemel_base::util::{Error, FileId};
 use gemel_compat::umarshal::{self, Reader, Writer};
@@ -666,9 +666,8 @@ fn set_fileinfo(
 }
 
 /// `localFile`: copies the file at `path_from` to `path_to` (a temporary
-/// name for `real_path_to`), with the props `desc`. (OCaml also reads the
-/// props' extended data here; gemel doesn't synchronise xattrs and ACLs
-/// yet.)
+/// name for `real_path_to`), with the props `desc` and their xattrs'
+/// values.
 #[allow(clippy::too_many_arguments)]
 pub fn local_file(
     ctx: &Ctx,
@@ -690,7 +689,204 @@ pub fn local_file(
         ress_length,
         p,
     )?;
-    set_fileinfo(ctx, fspath_to, path_to, real_path_to, replacing, desc)
+    let (_, desc) = props_with_ext_data_local(ctx, fspath_from, path_from, desc)?;
+    set_fileinfo(ctx, fspath_to, path_to, real_path_to, replacing, &desc)
+}
+
+// ---- The props' extended data ----
+
+/// A path as `propsExtData` takes it (`mxpath`): local, or global, to be
+/// translated on the root's host.
+#[derive(Debug, Clone)]
+pub enum XPath {
+    /// A path in the replica.
+    Local(Path<Local>),
+    /// A path as the archive names it.
+    Global(Path<Global>),
+}
+
+impl XPath {
+    fn marshal(&self, w: &mut Writer) {
+        match self {
+            XPath::Local(p) => {
+                w.tag(0);
+                p.marshal(w);
+            }
+            XPath::Global(p) => {
+                w.tag(1);
+                p.marshal(w);
+            }
+        }
+    }
+
+    fn unmarshal(r: &mut Reader<'_>) -> umarshal::Result<XPath> {
+        Ok(match r.tag(2)? {
+            0 => XPath::Local(Path::unmarshal(r)?),
+            _ => XPath::Global(Path::unmarshal(r)?),
+        })
+    }
+}
+
+/// The local path for `path` on `host`'s replica at `fspath`.
+fn local_xpath(host: &Host, fspath: &Fspath, path: &XPath) -> Result<Path<Local>, Error> {
+    match path {
+        XPath::Local(p) => Ok(p.clone()),
+        XPath::Global(p) => crate::update::translate_path_local(host, fspath, p),
+    }
+}
+
+/// Props with their xattrs' values, and the local path they were read
+/// from, when it was translated or read there.
+pub type WithExtData = (Option<Path<Local>>, Props);
+
+/// `loadPropsExtDataLocal`: `desc` with its xattrs' values, from the
+/// host's store or read from the file at `path`; and that path.
+fn load_props_ext_data_local(
+    ctx: &Ctx,
+    fspath: &Fspath,
+    path: &Path<Local>,
+    desc: &Props,
+) -> Result<WithExtData, Error> {
+    let desc = desc.load_ext_data(fspath, path, &ctx.fs.props, ctx.xattr.store())?;
+    Ok((Some(path.clone()), desc))
+}
+
+/// `propsExtData` (`loadPropsExtDataOnServer`): [`load_props_ext_data_local`]
+/// on the source's host.
+pub static PROPS_EXT_DATA: ServerCmd<(Fspath, XPath, Props), WithExtData> = ServerCmd::new(
+    "propsExtData",
+    |(fspath, path, desc), w, f| {
+        fspath.marshal(w);
+        path.marshal(w);
+        desc.marshal(w, &PropsConfig::default().with_features(f));
+    },
+    |r, f| {
+        Ok((
+            Fspath::unmarshal(r)?,
+            XPath::unmarshal(r)?,
+            Props::unmarshal(r, &PropsConfig::default().with_features(f))?,
+        ))
+    },
+    |(path, desc), w, f| {
+        w.option(path.as_ref(), |w, p| p.marshal(w));
+        desc.marshal(w, &PropsConfig::default().with_features(f));
+    },
+    |r, f| {
+        Ok((
+            r.option(Path::unmarshal)?,
+            Props::unmarshal(r, &PropsConfig::default().with_features(f))?,
+        ))
+    },
+    |conn, (fspath, path, desc)| {
+        Box::pin(async move {
+            let host = conn.host().clone();
+            let ctx = Ctx::of(&host)?;
+            let path = local_xpath(&host, &fspath, &path)?;
+            load_props_ext_data_local(&ctx, &fspath, &path, &desc)
+        })
+    },
+);
+
+/// `propsWithExtDataLocal`: `desc` with its xattrs' values from the
+/// host's store, or else read from the file.
+fn props_with_ext_data_local(
+    ctx: &Ctx,
+    fspath: &Fspath,
+    path: &Path<Local>,
+    desc: &Props,
+) -> Result<WithExtData, Error> {
+    let stored = {
+        let store = ctx.xattr.store().lock().unwrap_or_else(|e| e.into_inner());
+        desc.with_ext_data(&ctx.fs.props, &store)
+    };
+    match stored {
+        Some(desc) => Ok((None, desc)),
+        None => load_props_ext_data_local(ctx, fspath, path, desc),
+    }
+}
+
+/// `propsWithExtDataConn`: `desc` with its xattrs' values from this
+/// host's store, or else from the source's host, over `conn_from`.
+async fn props_with_ext_data_conn(
+    ctx: &Ctx,
+    conn_from: &Connection,
+    fspath: &Fspath,
+    path: XPath,
+    desc: &Props,
+) -> Result<WithExtData, Error> {
+    let stored = {
+        let store = ctx.xattr.store().lock().unwrap_or_else(|e| e.into_inner());
+        desc.with_ext_data(&ctx.fs.props, &store)
+    };
+    match stored {
+        Some(desc) => Ok((None, desc)),
+        None => {
+            conn_from
+                .call(&PROPS_EXT_DATA, (fspath.clone(), path, desc.clone()))
+                .await
+        }
+    }
+}
+
+/// `propsExtDataOnRoot`: `desc` with its xattrs' values, for the file at
+/// `path` on `root`; and the local path, when it was translated there.
+pub async fn props_ext_data_on_root(
+    rpc: &Rpc,
+    root: &Root,
+    path: XPath,
+    desc: &Props,
+) -> Result<WithExtData, Error> {
+    if root.is_local() {
+        let host = rpc.local_host();
+        let ctx = Ctx::of(host)?;
+        let stored = {
+            let store = ctx.xattr.store().lock().unwrap_or_else(|e| e.into_inner());
+            desc.with_ext_data(&ctx.fs.props, &store)
+        };
+        match stored {
+            Some(desc) => Ok((None, desc)),
+            None => {
+                let path = local_xpath(host, &root.fspath, &path)?;
+                load_props_ext_data_local(&ctx, &root.fspath, &path, desc)
+            }
+        }
+    } else {
+        let conn = rpc.connection_of_root(root)?;
+        let ctx = Ctx::of(rpc.client_host())?;
+        props_with_ext_data_conn(&ctx, &conn, &root.fspath, path, desc).await
+    }
+}
+
+/// `readPropsExtData`: [`props_ext_data_on_root`] for a local path.
+pub async fn read_props_ext_data(
+    rpc: &Rpc,
+    root: &Root,
+    path: &Path<Local>,
+    desc: &Props,
+) -> Result<Props, Error> {
+    Ok(
+        props_ext_data_on_root(rpc, root, XPath::Local(path.clone()), desc)
+            .await?
+            .1,
+    )
+}
+
+/// `propsWithExtData`: on the destination's host, `a`'s props with their
+/// xattrs' values, from this host's store or from the source's.
+async fn props_with_ext_data(
+    ctx: &Ctx,
+    conn_from: &Connection,
+    a: &TransferArgs,
+) -> Result<Props, Error> {
+    Ok(props_with_ext_data_conn(
+        ctx,
+        conn_from,
+        &a.fspath_from,
+        XPath::Local(a.path_from.clone()),
+        &a.desc,
+    )
+    .await?
+    .1)
 }
 
 // ---- Transfers between hosts ----
@@ -1366,6 +1562,7 @@ pub fn without_external_copies(
 /// forgotten.
 async fn try_copy_moved_file(
     host: &Host,
+    conn_from: &Connection,
     ctx: &Ctx,
     a: &TransferArgs,
 ) -> Result<Option<(Info, String)>, Error> {
@@ -1381,17 +1578,21 @@ async fn try_copy_moved_file(
     // transfer goes on without it; one setting the copy's props or
     // checking it fails the transfer, as in OCaml, where those come after
     // a bind that its `try` doesn't reach.
-    type Copied = Result<Result<Option<(Info, String)>, Error>, Error>;
     let copied = {
-        let (ctx, a) = (ctx.clone(), a.clone());
-        exclusive::now(move || -> Copied {
+        let (ctx, a, cand_fspath, cand_path) = (
+            ctx.clone(),
+            a.clone(),
+            cand_fspath.clone(),
+            cand_path.clone(),
+        );
+        exclusive::now(move || -> Result<bool, Error> {
             // If the candidate is the replica's root, `from_root` is
             // right; otherwise it isn't expected to be a link, and it is
             // right still.
             let info = fileinfo::get_basic(true, &cand_fspath, &cand_path, &|_| false, &ctx.fs)?;
             if info.typ == Typ::Absent || info.desc.length() != a.desc.length() {
                 // The candidate has gone.
-                return Ok(Ok(None));
+                return Ok(false);
             }
             let mut progress = |n| {
                 if let Some(p) = &printer {
@@ -1410,42 +1611,50 @@ async fn try_copy_moved_file(
                     check: &check,
                 },
             )?;
-            // (OCaml reads the props' extended data here; gemel doesn't
-            // synchronise xattrs and ACLs yet.)
-            Ok((|| {
-                set_fileinfo(
-                    &ctx,
-                    &a.fspath_to,
-                    &a.path_to,
-                    &a.real_path_to,
-                    a.replacing,
-                    &a.desc,
-                )?;
-                let (info, transferred) = file_is_transferred(&ctx, &a)?;
-                if !transferred {
-                    // The candidate has changed.
-                    return Ok(None);
-                }
-                let msg = format!(
-                    "Shortcut: copied {}/{} from local file {}/{}\n",
-                    String::from_utf8_lossy(a.fspath_to.as_bytes()),
-                    String::from_utf8_lossy(a.real_path_to.as_bytes()),
-                    String::from_utf8_lossy(cand_fspath.as_bytes()),
-                    String::from_utf8_lossy(cand_path.as_bytes()),
-                );
-                Ok(Some((info, msg)))
-            })())
+            Ok(true)
         })
         .await
     };
     match copied {
-        Ok(Ok(Some(done))) => Ok(Some(done)),
-        Ok(Ok(None)) | Err(Error::Transient(_)) => {
+        Ok(true) => {}
+        Ok(false) | Err(Error::Transient(_)) => {
             xferhint::delete_entry(host, &a.fp);
-            Ok(None)
+            return Ok(None);
         }
-        Ok(Err(e)) | Err(e) => Err(e),
+        Err(e) => return Err(e),
     }
+    let desc = props_with_ext_data(ctx, conn_from, a).await?;
+    let done = {
+        let (ctx, a) = (ctx.clone(), a.clone());
+        exclusive::now(move || -> Result<Option<(Info, String)>, Error> {
+            set_fileinfo(
+                &ctx,
+                &a.fspath_to,
+                &a.path_to,
+                &a.real_path_to,
+                a.replacing,
+                &desc,
+            )?;
+            let (info, transferred) = file_is_transferred(&ctx, &a)?;
+            if !transferred {
+                // The candidate has changed.
+                return Ok(None);
+            }
+            let msg = format!(
+                "Shortcut: copied {}/{} from local file {}/{}\n",
+                String::from_utf8_lossy(a.fspath_to.as_bytes()),
+                String::from_utf8_lossy(a.real_path_to.as_bytes()),
+                String::from_utf8_lossy(cand_fspath.as_bytes()),
+                String::from_utf8_lossy(cand_path.as_bytes()),
+            );
+            Ok(Some((info, msg)))
+        })
+        .await?
+    };
+    if done.is_none() {
+        xferhint::delete_entry(host, &a.fp);
+    }
+    Ok(done)
 }
 
 /// `transferFileLocal`, on the destination's host, with the connection to
@@ -1468,6 +1677,7 @@ async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<T
         if let Some(p) = uutil::progress_printer(&host) {
             p(a.id, a.desc.length() + osx::ress_length(&a.ress), "alr");
         }
+        let desc = props_with_ext_data(&ctx, &conn_from, &a).await?;
         {
             let (ctx, a) = (ctx.clone(), a.clone());
             exclusive::now(move || {
@@ -1477,7 +1687,7 @@ async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<T
                     &a.path_to,
                     &a.real_path_to,
                     a.replacing,
-                    &a.desc,
+                    &desc,
                 )
             })
             .await?;
@@ -1490,7 +1700,7 @@ async fn transfer_file_local(conn_from: Connection, a: TransferArgs) -> Result<T
     }
     let fp = a.fp.clone();
     register_file_transfer(&host, &fp, async {
-        if let Some((info, msg)) = try_copy_moved_file(&host, &ctx, &a).await? {
+        if let Some((info, msg)) = try_copy_moved_file(&host, &conn_from, &ctx, &a).await? {
             xferhint::insert_entry(&host, hint);
             return Ok(Transferred::Done(
                 Box::new(TransferStatus::Succeeded(info)),
@@ -1645,6 +1855,7 @@ async fn really_transfer_file(
     if ress_length > 0 {
         transfer_file_contents(conn_from, a, FileKind::Ress, ress_length).await?;
     }
+    let desc = props_with_ext_data(ctx, conn_from, a).await?;
     let (ctx, a) = (ctx.clone(), a.clone());
     exclusive::now(move || {
         set_fileinfo(
@@ -1653,7 +1864,7 @@ async fn really_transfer_file(
             &a.path_to,
             &a.real_path_to,
             a.replacing,
-            &a.desc,
+            &desc,
         )?;
         paranoid_check(&ctx, &a.fspath_to, &a.path_to, &a.fp)
     })
@@ -1961,6 +2172,7 @@ pub fn register_commands(rpc: &mut Rpc) -> Result<(), Error> {
     r.register_root(&SAVE_TEMP_FILE)?;
     r.register_stream(&PROCESS_TRANSFER_INSTRUCTION)?;
     r.register_server(&FINGERPRINT_SUBFILE)?;
+    r.register_server(&PROPS_EXT_DATA)?;
     r.register_server(&COMPRESS)?;
     r.register_server(&TRANSFER_FILE)
 }

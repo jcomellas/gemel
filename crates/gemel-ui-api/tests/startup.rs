@@ -456,8 +456,9 @@ fn diffs_are_of_where_the_files_are() {
 
 /// `xattrs`, `xattrignore`, `xattrignorenot` and `acl` are sent only with
 /// their features, in OCaml's order, so a server without them (2.52) isn't
-/// sent preferences it doesn't know; and setting `xattrs` or `acl` is
-/// refused until gemel synchronises them.
+/// sent preferences it doesn't know. Setting `xattrs` is refused without
+/// its feature, as OCaml refuses it; setting `acl` is refused until gemel
+/// synchronises ACLs.
 #[test]
 fn xattr_and_acl_preferences_follow_their_features() {
     use gemel_fs::props::{FEATURE_ACL, FEATURE_XATTR, SYNC_ACL, SYNC_XATTRS};
@@ -482,21 +483,27 @@ fn xattr_and_acl_preferences_follow_their_features() {
     assert!(acl.is_some() && acl < not, "{acl:?} {not:?}");
 
     assert_eq!(features.validate_enabled(&prefs), Ok(()));
-    for (pref, what) in [
-        (
-            &SYNC_XATTRS,
-            "extended attributes (the \"xattrs\" preference)",
-        ),
-        (&SYNC_ACL, "ACLs (the \"acl\" preference)"),
-    ] {
-        prefs.set(pref, true);
-        let e = features.validate_enabled(&prefs).unwrap_err().to_string();
+    let refused = |prefs: &gemel_base::prefs::Prefs,
+                   features: &gemel_base::features::Features,
+                   what: &str| {
+        let e = features.validate_enabled(prefs).unwrap_err().to_string();
         let message = format!("You have requested synchronization of {what} but the server");
         assert!(e.contains(&message), "{e}");
-        prefs.set(pref, false);
-    }
-    // Whether or not the feature is enabled.
+    };
+    // With the feature, xattrs are synchronised.
+    prefs.set(&SYNC_XATTRS, true);
+    assert_eq!(features.validate_enabled(&prefs), Ok(()));
+    prefs.set(&SYNC_XATTRS, false);
+    // ACLs aren't yet, whether or not the feature is enabled.
+    prefs.set(&SYNC_ACL, true);
+    refused(&prefs, &features, "ACLs (the \"acl\" preference)");
+    prefs.set(&SYNC_ACL, false);
+    // Without the feature, as with a 2.52 server.
     features.reset_enabled();
     prefs.set(&SYNC_XATTRS, true);
-    assert!(features.validate_enabled(&prefs).is_err());
+    refused(
+        &prefs,
+        &features,
+        "extended attributes (the \"xattrs\" preference)",
+    );
 }
