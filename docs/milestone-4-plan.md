@@ -46,6 +46,7 @@ Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.m
 - **Left, by decision:**
   - not ported: GTK's type-ahead search in lists, dragging a list's values to reorder them (Up and Down do it), the busy cursor (Slint has none that leaves clicks to the widgets), and "Show memory/GC stats" (Rust has no garbage collector);
   - on macOS, logging out is cancelled while gemel-gui works, as its Quit asks first (phase 4b).
+- **Found at the close-out:** CI's macOS job failed once in `gemel-engine`'s commit tests ("New archives are not identical"). Off Linux, the umask was still read by setting it and back, which milestone 2 had fixed on Linux only, so a file another test thread created in between got the wrong mode. It is read from a new file's mode now (`gemel-fs`'s `read_umask`).
 
 Out of scope, and how each behaves until it is done:
 
