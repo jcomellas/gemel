@@ -159,6 +159,113 @@ fn version() {
     );
 }
 
+/// The manual (`-doc`): its topics, all of it, a topic, the first section
+/// with no topic, and a topic it doesn't have; as OCaml prints them, but
+/// for the program's name and the About section.
+#[test]
+fn the_manual() {
+    let pair = Pair::new("batch-doc");
+    let topics = gemel(&pair, &["-doc", "topics"]);
+    assert_eq!(topics.code, Some(0));
+    assert_eq!(
+        topics.stdout,
+        [
+            "Documentation topics:",
+            "          about About Gemel",
+            "         people People",
+            "      obtaining Obtaining Unison",
+            "    development Community, Maintenance, and Development",
+            "        copying Copying",
+            "            ack Acknowledgements",
+            "      upgrading Upgrading",
+            "       tutorial Tutorial",
+            "         basics Basic Concepts",
+            "       failures Invariants",
+            "        running Running Unison",
+            "",
+            "Type \"gemel -doc <topic>\" for detailed information about <topic>",
+            "or \"gemel -doc all\" for the whole manual",
+            "",
+        ]
+    );
+    let about = gemel(&pair, &["-doc", "about"]);
+    let version = format!("Version {}", env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        about.stdout,
+        ["", "Gemel File Synchronizer", &version, "", ""]
+    );
+    let unknown = gemel(&pair, &["-doc", "nosuch"]);
+    assert_eq!(unknown.code, Some(0));
+    assert_eq!(
+        unknown.stdout,
+        [
+            "Documentation topic nosuch not recognized:",
+            "Type \"gemel -doc topics\" for a list",
+        ]
+    );
+    assert_eq!(gemel(&pair, &["-doc", ""]).stdout[..2], ["", "Overview"]);
+    // Every section but the Junk, each heading first.
+    let all = gemel(&pair, &["-doc", "all"]);
+    let headings = [
+        "Gemel File Synchronizer",
+        "Overview",
+        "Preface",
+        "People",
+        "Obtaining Unison",
+        "Community, Maintenance, and Development",
+        "Copying",
+        "Acknowledgements",
+        "Upgrading",
+        "Tutorial",
+        "Basic Concepts",
+        "Invariants",
+        "Reference Guide",
+        "Running Unison",
+    ];
+    let mut at = 0;
+    for h in headings {
+        at += all.stdout[at..].iter().position(|l| l == h).expect(h);
+    }
+    assert!(!all.stdout.iter().any(|l| l == "Junk"));
+
+    // OCaml must be built from the same commit: 2.54.0's manual still has
+    // a paragraph on `mergebatch`, which the port's source removed with
+    // the preference. That paragraph aside, the manual is the same.
+    let mergebatch = [
+        "   Ordinarily, external merge programs are only invoked when Unison is not",
+        "   running in batch mode. To specify an external merge program that should",
+        "   be used no matter the setting of the batch flag, use the mergebatch",
+        "   preference instead of merge.",
+        "",
+    ];
+    let theirs_as_ours = |ls: Vec<String>| -> Vec<String> {
+        let ls: Vec<String> = ls
+            .into_iter()
+            .map(|l| match l.as_str() {
+                "          about About Unison" => "          about About Gemel".to_owned(),
+                "Unison File Synchronizer" => "Gemel File Synchronizer".to_owned(),
+                "Version 2.54.0" => version.clone(),
+                _ => l.replace("\"unison -doc", "\"gemel -doc"),
+            })
+            .collect();
+        match ls.windows(mergebatch.len()).position(|w| w == mergebatch) {
+            Some(i) => [&ls[..i], &ls[i + mergebatch.len()..]].concat(),
+            None => ls,
+        }
+    };
+    let mut topics: Vec<&str> = vec!["topics", "all", "nosuch", ""];
+    topics.extend(gemel_ui_api::manual::sections().map(|s| s.short));
+    for topic in topics {
+        let Some(theirs) = ocaml(&pair, &["-doc", topic]) else {
+            return;
+        };
+        let ours = gemel(&pair, &["-doc", topic]);
+        assert_eq!(ours.code, theirs.code, "{topic:?}");
+        assert_eq!(ours.stdout, theirs_as_ours(theirs.stdout), "{topic:?}");
+        assert_eq!(ours.stderr, theirs.stderr, "{topic:?}");
+    }
+}
+
 /// The usage and every option, from `-help` and after a usage error; the
 /// options for the manual page (`-prefsman short`).
 #[test]

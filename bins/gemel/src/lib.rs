@@ -11,8 +11,8 @@
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
 //!
 //! `main.ml`'s options handled before any profile is loaded: `-version`,
-//! `-prefsman short`, `-server`, `-socket` (with `-listen`), and (not
-//! supported yet) `-doc`, `-prefsdocs` and `-prefsman full`; then the
+//! `-prefsman short`, `-doc`, `-server`, `-socket` (with `-listen`), and
+//! (not supported yet) `-prefsdocs` and `-prefsman full`; then the
 //! interface `-ui` asks for. Without a graphical interface ([`main`]'s
 //! `gui`), that is the text interface, whatever `-ui` asks for, as with
 //! OCaml's text-only build; with one, as `gemel-gui` runs it, the
@@ -27,6 +27,8 @@ use gemel_base::uarg::UsageError;
 use gemel_base::util::{MY_NAME, MY_VERSION};
 use gemel_ui_api::cli::{self, Interface};
 use gemel_ui_api::exit_code::ExitCode;
+use gemel_ui_api::manual;
+use std::io::Write;
 
 /// A graphical interface: runs on the command line's arguments, and
 /// returns the exit code.
@@ -73,12 +75,14 @@ fn run(args: Vec<String>, gui: Option<Gui>) -> i32 {
         }
         return 0;
     }
-    let unsupported = |what: &str| {
-        eprintln!("{MY_NAME}: {what} is not supported yet");
-        1
-    };
-    if argv.contains_key(cli::DOC.name()) {
-        return unsupported("-doc");
+    if let Some(topic) = argv.get(cli::DOC.name()).and_then(|v| v.first()) {
+        // A closed pipe (`gemel -doc all | head`) ends the output quietly,
+        // as in OCaml.
+        let mut out = std::io::stdout().lock();
+        let _ = out
+            .write_all(doc(topic).as_bytes())
+            .and_then(|_| out.flush());
+        return 0;
     }
     if argv.contains_key(cli::SERVER.name()) {
         return server::run();
@@ -109,6 +113,33 @@ fn run(args: Vec<String>, gui: Option<Gui>) -> i32 {
             text::start(args, Interface::Text)
         }
         (interface, _) => text::start(args, interface),
+    }
+}
+
+/// What `-doc` prints for `topic`, as `main.ml` prints it: the list of
+/// topics, the whole manual but for the Junk, or a topic.
+fn doc(topic: &str) -> String {
+    match topic {
+        "topics" => {
+            let mut s = String::from("Documentation topics:\n");
+            for sec in manual::sections().filter(|s| !s.short.is_empty()) {
+                s += &format!("   {:>12} {}\n", sec.short, sec.name);
+            }
+            s + &format!(
+                "\nType \"{MY_NAME} -doc <topic>\" for detailed information about <topic>\n\
+                 or \"{MY_NAME} -doc all\" for the whole manual\n\n"
+            )
+        }
+        "all" => manual::sections()
+            .filter(|s| s.name != "Junk")
+            .fold(String::from("\n"), |all, s| all + s.text + "\n"),
+        topic => match manual::find(topic) {
+            Some(s) => format!("\n{}\n", s.text),
+            None => format!(
+                "Documentation topic {topic} not recognized:\n\
+                 Type \"{MY_NAME} -doc topics\" for a list\n"
+            ),
+        },
     }
 }
 
