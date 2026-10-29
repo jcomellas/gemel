@@ -20,18 +20,14 @@
 //! built from them. This module holds only values; reading and setting
 //! metadata on disk is phase 1b of milestone 2.
 //!
-//! xattrs and ACLs: their archive format is here, their synchronisation
-//! isn't yet. OCaml Unison 2.54 enables the `Sync: xattr` and `Sync: ACL`
-//! features whenever both sides support them, even with the `xattrs` and
-//! `acl` preferences off, so its archives carry the change time, xattr and
-//! ACL fields ([`PropsConfig::xattr_enabled`], [`PropsConfig::acl_enabled`]),
-//! and gemel must read and write them. The `xattrs` and `acl` preferences
-//! are registered, since an OCaml client sends them whenever the features
-//! are negotiated, but setting either to true is refused, as OCaml refuses
-//! it when the other side lacks the feature (so [`PropsConfig::sync_xattrs`]
-//! and [`PropsConfig::sync_acl`] stay off). Not ported yet: reading and
-//! setting xattrs and ACLs, ACL comparison under `numericids`, and the
-//! "props data" store that ACL strings refer to.
+//! xattrs and ACLs are synchronised as OCaml synchronises them, with the
+//! `xattrs` and `acl` preferences, where gemel-fs's [`xattr`] and
+//! [`acl`] modules support them. OCaml Unison 2.54 enables the `Sync:
+//! xattr` and `Sync: ACL` features whenever both sides support them, even
+//! with the preferences off, so its archives carry the change time, xattr
+//! and ACL fields ([`PropsConfig::xattr_enabled`],
+//! [`PropsConfig::acl_enabled`]) either way. Long xattr values and ACL
+//! texts are kept apart from the props, by their MD5 ([`propsdata`]).
 
 use gemel_base::features::Features;
 use gemel_base::prefs::{Category, PrefDef, Prefs, Topic};
@@ -42,6 +38,7 @@ use gemel_compat::umarshal::{self, Reader, Writer};
 use gemel_base::path::{Local, Path};
 use std::sync::Mutex;
 
+use crate::acl;
 use crate::fs;
 use crate::fspath::Fspath;
 use crate::osx;
@@ -215,10 +212,9 @@ pub const FEATURE_XATTR: &str = "Sync: xattr";
 pub const FEATURE_ACL: &str = "Sync: ACL";
 
 /// Registers this module's features, in OCaml's order. Both change the
-/// archive format. The xattr feature's validator refuses the `xattrs`
-/// preference with OCaml's message when the feature isn't enabled (a
-/// server without it); the ACL feature's refuses `acl` whether or not it
-/// is, until gemel synchronises ACLs.
+/// archive format. Each feature's validator refuses its preference
+/// (`xattrs`, `acl`) with OCaml's message when the feature isn't enabled
+/// (a server without it).
 pub fn register_features(features: &mut Features) -> Result<(), Error> {
     features.register(
         FEATURE_XATTR,
@@ -234,8 +230,8 @@ pub fn register_features(features: &mut Features) -> Result<(), Error> {
     features.register(
         FEATURE_ACL,
         true,
-        Some(Box::new(|_, _, prefs| {
-            set(prefs, &SYNC_ACL).then(|| {
+        Some(Box::new(|_, enabled_this, prefs| {
+            (!enabled_this && set(prefs, &SYNC_ACL)).then(|| {
                 "You have requested synchronization of ACLs (the \
                  \"acl\" preference) but the server does not support this."
                     .to_owned()
@@ -307,6 +303,7 @@ impl PropsConfig {
             sync_times: *prefs.read(&TIMES),
             rsrc: *prefs.read(&osx::RSRC_AUX),
             sync_xattrs: *prefs.read(&SYNC_XATTRS),
+            sync_acl: *prefs.read(&SYNC_ACL),
             ..PropsConfig::default()
         }
     }
@@ -852,16 +849,18 @@ impl<F: Fn(&[u8]) -> bool> XattrFilter for F {
     }
 }
 
-/// What reading and setting xattrs needs besides the settings: which
-/// attributes are synchronised, and the host's store of their values
-/// (`Xattr.Cache`, which is `Propsdata.Xattr`), which scans running at
-/// once share.
+/// What reading and setting xattrs and ACLs needs besides the settings:
+/// which attributes are synchronised, and the host's stores of attribute
+/// values (`Xattr.Cache`, which is `Propsdata.Xattr`) and of ACL texts
+/// (`Propsdata.ACL`), which scans running at once share.
 #[derive(Clone, Copy)]
 pub struct XattrCtx<'a> {
     /// Which attributes are synchronised.
     pub filter: &'a dyn XattrFilter,
-    /// The host's values by MD5.
+    /// The host's attribute values by MD5.
     pub store: &'a Mutex<propsdata::Store>,
+    /// The host's ACL texts by MD5.
+    pub acl_store: &'a Mutex<propsdata::Store>,
 }
 
 impl XattrCtx<'static> {
@@ -870,10 +869,13 @@ impl XattrCtx<'static> {
     pub fn standalone() -> XattrCtx<'static> {
         static STORE: std::sync::LazyLock<Mutex<propsdata::Store>> =
             std::sync::LazyLock::new(Mutex::default);
+        static ACL_STORE: std::sync::LazyLock<Mutex<propsdata::Store>> =
+            std::sync::LazyLock::new(Mutex::default);
         static KEEP_ALL: fn(&[u8]) -> bool = |_| true;
         XattrCtx {
             filter: &KEEP_ALL,
             store: &STORE,
+            acl_store: &ACL_STORE,
         }
     }
 }
@@ -1195,9 +1197,38 @@ pub fn xattrs_to_string_verbose(x: &Xattrs) -> String {
 
 // ---- ACLs ----
 
-/// `ACL.t`: the ACL as text, `Some("")` for a trivial ACL, `None` where ACLs
-/// are not supported.
+/// `ACL.t`: the ACL's key, the MD5 of its text (`ACL.deflate`); `Some("")`
+/// for a trivial ACL, `None` where ACLs are not supported.
 pub type Acl = Option<Vec<u8>>;
+
+/// The hint OCaml adds to ACL failures (`ACL.wrapFail`).
+const ACL_FALSE_HINT: &str = ". You can set preference \"acl\" to false to avoid this error.";
+
+/// `ACL.deflate`: the key of `text`, which the host's store and the
+/// process's texts get.
+fn acl_deflate(text: Vec<u8>, store: &Mutex<propsdata::Store>) -> Vec<u8> {
+    if text.is_empty() {
+        return text;
+    }
+    let key = md5(&text);
+    lock(store).add(&key, &text);
+    propsdata::remember_acl(&[(key.clone(), text)]);
+    key
+}
+
+/// `ACL.inflate`: the text of `key`. OCaml asserts that it is known; here
+/// an unknown key stands for itself, in hexadecimal.
+fn acl_inflate(key: &[u8]) -> Vec<u8> {
+    if key.is_empty() {
+        return Vec::new();
+    }
+    propsdata::acl_text(key).unwrap_or_else(|| {
+        key.iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+            .into_bytes()
+    })
+}
 
 fn acl_hash(a: &Acl, h: i64, c: &PropsConfig) -> i64 {
     if c.sync_acl {
@@ -1208,10 +1239,131 @@ fn acl_hash(a: &Acl, h: i64, c: &PropsConfig) -> i64 {
     }
 }
 
+/// `ACL.removeAclNames`: the text without the user and group names of
+/// entries such as `user:name:rw------------:------I:allow:1300` (OCaml's
+/// `aclIds`, which only FreeBSD's and Solaris's texts match):
+/// `\(\(user\|group\):\)[^:]+:\([^:]+:[^:]+:[^:]+:[0-9]+\($\|,\)\)`,
+/// replaced by groups 1 and 3, everywhere.
+fn remove_acl_names(s: &[u8]) -> Vec<u8> {
+    /// The end of a non-empty run without `:` from `i`, at a `:`.
+    fn field(s: &[u8], i: usize) -> Option<usize> {
+        let n = s[i..].iter().position(|&b| b == b':')?;
+        (n > 0).then_some(i + n)
+    }
+    /// Where groups 2 and 3 end if the pattern matches at `i`, after the
+    /// `user:` or `group:` that ends there.
+    fn rest(s: &[u8], start: usize) -> Option<(usize, usize)> {
+        let name_end = field(s, start)?;
+        let mut i = name_end + 1;
+        for _ in 0..3 {
+            i = field(s, i)? + 1;
+        }
+        let digits = s[i..].iter().take_while(|b| b.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
+        let j = i + digits;
+        // `$` is the end of the text or of a line, `,` is kept.
+        match s.get(j) {
+            None | Some(b'\n') => Some((name_end + 1, j)),
+            Some(b',') => Some((name_end + 1, j + 1)),
+            _ => None,
+        }
+    }
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let prefix = [&b"user:"[..], b"group:"]
+            .into_iter()
+            .find(|p| s[i..].starts_with(p));
+        if let Some(p) = prefix
+            && let Some((g3, end)) = rest(s, i + p.len())
+        {
+            out.extend_from_slice(p);
+            out.extend_from_slice(&s[g3..end]);
+            i = end;
+        } else {
+            out.push(s[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// `ACL.similar`: the same text, or with `numericids`, the same without
+/// user and group names. The order of the entries counts.
 fn acl_similar(a: &Acl, a2: &Acl, c: &PropsConfig) -> bool {
-    // OCaml also compares the ACLs without user and group names when
-    // `numericids` is set; that comes with the ACL feature.
-    !c.sync_acl || a == a2
+    !c.sync_acl
+        || match (a, a2) {
+            (None, None) => true,
+            (Some(x), Some(y)) if x == y => true,
+            (Some(x), Some(y)) => {
+                c.numeric_ids
+                    && remove_acl_names(&acl_inflate(x)) == remove_acl_names(&acl_inflate(y))
+            }
+            _ => false,
+        }
+}
+
+/// `ACL.get`: the ACL of a regular file or directory, when ACLs are
+/// synchronised, its text added to the host's store.
+pub fn acl_get(
+    abspath: &Fspath,
+    st: &Stats,
+    c: &PropsConfig,
+    x: &XattrCtx<'_>,
+) -> Result<Acl, Error> {
+    if !(c.sync_acl && matches!(st.kind, Kind::File | Kind::Dir)) {
+        return Ok(None);
+    }
+    match acl::get_text(abspath) {
+        Ok(None) => Ok(None),
+        Ok(Some(text)) => Ok(Some(acl_deflate(text, x.acl_store))),
+        Err(m) => Err(Error::Transient(format!("{m}{ACL_FALSE_HINT}"))),
+    }
+}
+
+/// `ACL.set`: sets the ACL from its text, when ACLs are synchronised.
+pub fn acl_set(abspath: &Fspath, a: &Acl, c: &PropsConfig) -> Result<(), Error> {
+    match a {
+        Some(key) if c.sync_acl => acl::set_text(abspath, &acl_inflate(key))
+            .map_err(|m| Error::Transient(format!("{m}{ACL_FALSE_HINT}"))),
+        _ => Ok(()),
+    }
+}
+
+/// `ACL.check`: the ACL on disk after setting it.
+pub fn acl_check(
+    fspath: &Fspath,
+    path: &Path<Local>,
+    st: &Stats,
+    a: &Acl,
+    c: &PropsConfig,
+    x: &XattrCtx<'_>,
+) -> Result<(), Error> {
+    if a.is_none() {
+        return Ok(());
+    }
+    let abspath = fspath.concat(path);
+    let a2 = acl_get(&abspath, st, c, x)?;
+    if acl_similar(a, &a2, c) {
+        return Ok(());
+    }
+    Err(Error::Transient(format!(
+        "Failed to set ACL of file {abspath} to\n{}\nThe ACL was instead set to\n{}\n\
+         The filesystem probably does not have full ACL support or the synchronized \
+         ACL is of different type, or there are other incompatibilities between \
+         systems. If this is a filesystem without correct ACL support, you should set \
+         the \"acl\" preference to false.{}",
+        acl_to_string(a, c),
+        acl_to_string(&a2, c),
+        if c.numeric_ids {
+            ""
+        } else {
+            " Or, you may want to try setting the \"numericids\" preference to true if \
+             the user/group names don't match on both systems."
+        }
+    )))
 }
 
 // ---- Properties ----
@@ -1669,10 +1821,9 @@ impl Props {
     }
 
     /// `Props.get`: everything, including the change time, the Finder
-    /// information and the xattrs, which are read again only if the
-    /// change time differs from the archive's (`arch`) or the system
-    /// doesn't keep it. ACLs are not read yet (see the module
-    /// documentation).
+    /// information, the xattrs, which are read again only if the change
+    /// time differs from the archive's (`arch`) or the system doesn't keep
+    /// it, and the ACL, read again only if the change time differs.
     pub fn get(
         abspath: &Fspath,
         st: &Stats,
@@ -1688,10 +1839,16 @@ impl Props {
         } else {
             arch.xattr.clone()
         };
+        let acl = if ctime_changed {
+            acl_get(abspath, st, c, x)?
+        } else {
+            arch.acl.clone()
+        };
         Ok(Props {
             type_creator: type_creator_get(st, info, c),
             ctime,
             xattr,
+            acl,
             ..Props::get_basic(st, c)
         })
     }
@@ -1704,8 +1861,8 @@ impl Props {
         }
     }
 
-    /// `Props.set`: owner, group, Finder information, xattrs, time, then
-    /// permissions.
+    /// `Props.set`: owner, group, Finder information, xattrs, time,
+    /// permissions, then the ACL, which a change of mode could replace.
     pub fn set(
         &self,
         fspath: &Fspath,
@@ -1723,7 +1880,8 @@ impl Props {
         }
         xattrs_set(&abspath, &self.xattr, c, x)?;
         self.time.set(&abspath)?;
-        self.perm.set(&abspath, kind, dont_chmod)
+        self.perm.set(&abspath, kind, dont_chmod)?;
+        acl_set(&abspath, &self.acl, c)
     }
 
     /// `Props.check`: the props on disk after setting them.
@@ -1736,6 +1894,7 @@ impl Props {
         x: &XattrCtx<'_>,
     ) -> Result<(), Error> {
         let abspath = fspath.concat(path);
+        acl_check(fspath, path, st, &self.acl, c, x)?;
         xattrs_check(fspath, path, st, &self.xattr, c, x)?;
         self.time.check(&abspath, st, c)?;
         self.perm.check(&abspath, st, c)
@@ -1861,7 +2020,7 @@ fn umask() -> i64 {
 fn acl_to_string(a: &Acl, c: &PropsConfig) -> String {
     match a {
         Some(s) if s.is_empty() => " <trivial ACL>".into(),
-        Some(s) => format!(" A={}", String::from_utf8_lossy(s)),
+        Some(s) => format!(" A={}", String::from_utf8_lossy(&acl_inflate(s))),
         None if c.sync_acl => " !No ACL support!".into(),
         None => String::new(),
     }
@@ -2013,5 +2172,53 @@ mod tests {
             .unwrap();
         let shell = i64::from_str_radix(String::from_utf8(out.stdout).unwrap().trim(), 8).unwrap();
         assert_eq!(read_umask(), Some(shell));
+    }
+
+    #[test]
+    fn acl_names_are_removed_as_ocaml_removes_them() {
+        // FreeBSD's text: the names go, the ids stay.
+        let bsd = b"user:jo:rw-------:------:allow:1300,group:staff:r-------:------:allow:20";
+        assert_eq!(
+            remove_acl_names(bsd),
+            b"user:rw-------:------:allow:1300,group:r-------:------:allow:20"
+        );
+        // At the end of a line too, and only where the whole entry matches.
+        assert_eq!(
+            remove_acl_names(b"x\nuser:jo:a:b:c:7\ngroup:g:a:b:c:d"),
+            b"x\nuser:a:b:c:7\ngroup:g:a:b:c:d"
+        );
+        // macOS's ends with the permissions, so it is left as it is.
+        let mac = b"!#acl 1\nuser:CF568982-EAC2-450F-946F-BACAFF5C6355:jo:501:allow:read,write";
+        assert_eq!(remove_acl_names(mac), mac);
+    }
+
+    #[test]
+    fn acls_are_similar_by_text_or_by_ids() {
+        let store = Mutex::default();
+        let key = |t: &[u8]| Some(acl_deflate(t.to_vec(), &store));
+        let (a, b) = (
+            key(b"user:jo:rw:---:allow:1300"),
+            key(b"user:joan:rw:---:allow:1300"),
+        );
+        let on = PropsConfig {
+            sync_acl: true,
+            ..PropsConfig::default()
+        };
+        assert!(acl_similar(&a, &a, &on) && !acl_similar(&a, &b, &on));
+        assert!(!acl_similar(&a, &None, &on) && acl_similar(&None, &None, &on));
+        let ids = PropsConfig {
+            numeric_ids: true,
+            ..on
+        };
+        assert!(acl_similar(&a, &b, &ids));
+        // Not synchronised: always similar.
+        assert!(acl_similar(&a, &None, &PropsConfig::default()));
+        // The texts show, and the trivial ACL keeps no key.
+        assert_eq!(acl_to_string(&a, &on), " A=user:jo:rw:---:allow:1300");
+        assert_eq!(key(b""), Some(Vec::new()));
+        assert_eq!(acl_to_string(&Some(Vec::new()), &on), " <trivial ACL>");
+        assert_eq!(acl_to_string(&None, &on), " !No ACL support!");
+        // What the host made is new in its store, for the other hosts.
+        assert_eq!(lock(&store).get(propsdata::Kind::New).len(), 2);
     }
 }
