@@ -1025,20 +1025,21 @@ export component AppWindow inherits Window {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 8px;
-                Rectangle {
+                // The text over the bar, as GTK's progress bar shows it:
+                // above it, since the style's bar is a thin line.
+                VerticalLayout {
                     width: 220px;
-                    ProgressIndicator {
-                        y: (parent.height - self.height) / 2;
-                        width: parent.width;
-                        progress: root.progress-fraction;
-                        indeterminate: root.progress-pulse;
-                    }
+                    alignment: center;
+                    spacing: 1px;
                     Text {
                         text: root.progress-text;
-                        font-size: 11px;
+                        font-size: 10px;
                         horizontal-alignment: center;
-                        vertical-alignment: center;
                         accessible-label: "Progress";
+                    }
+                    ProgressIndicator {
+                        progress: root.progress-fraction;
+                        indeterminate: root.progress-pulse;
                     }
                 }
                 Text {
