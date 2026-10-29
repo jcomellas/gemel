@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 3c, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 4a, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -483,6 +483,30 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **Odds and ends** found on the way, each with a decision, as in milestone 3's phase 6b. Left for this phase by phase 3:
   - keys for the documentation window's tabs, the editor's tree and its lists, which take the pointer and a screen reader only;
   - by eye: the documentation window (empty lines, the wrapped tabs, scrolling), the editor's cards, and its styled text's fonts.
+- **Split:** 4a, what can be checked headless (the spike's checks, the keys, the close button); 4b, the look on each system, which needs a person: the conventions as they show (the native menu bar, ⌘Q, the pickers), and the screenshots.
+
+**Notes (phase 4a, 2026-10-29):**
+- **The spike's checks, through the session:** `examples/bench.rs` in `gemel-gui`, an example rather than the development flag the plan had, so that the program has none. Events come from `gemel_gui::fake`, which the tests use too.
+  - **Without a session**, it times the main thread's work per frame as the spike did: Slint's software renderer at 1000×700 and 60 frames a second, scrolling 7 rows a frame through 50,000 items, progress at 500 or 5,000 updates a second, each frame taking the events due as the window's ticks take them. The frames that carry select all, a sort, `>` on every item, and the replies to the last two, are reported one by one.
+  - **With `--session`**, the window runs on a session over 50,000 new files in a temporary directory: finding and showing them, `<` on every item with the replies, and a sort, through the engine.
+- **Pass lines,** set before measuring: 16.7 ms at the 99th percentile per frame; 100 ms for a frame carrying a one-off operation or its replies; no frame over 16.7 ms once the items are shown, through the session.
+- **What the benchmark found:** each reply to an action on an item selected showed the details pane again, and with every item selected that looked at all of them. The frame that took the replies to `>` on 50,000 items took 1,981 ms. The pane is now shown once the events taken with a tick are applied: 32 ms. No session command was needed; sending only the changed items, the fallback, isn't.
+- **The numbers** (release build, Apple M4 Max, macOS; Linux and Windows not measured):
+
+  | | 500 updates/s | 5,000 updates/s | The spike |
+  |---|---|---|---|
+  | Work per frame, p50 / p99 / max | 3.4 / 5.4 / 6.2 ms | 3.6 / 4.9 / 5.6 ms | 3.9 / 6.9 / 7–11 ms |
+  | Select all / `>` / its replies | 6.7 / 4.5 / 32 ms | 7.4 / 7.1 / 36 ms | 4–8 / 5–6 ms / (none) |
+  | Sort / its reply | 6.2 / 32 ms | 4.4 / 32 ms | 19–20 ms |
+
+  Through the session: 50,000 items found and shown in 1.5 s, with no frame over 3.8 ms; `<` on all of them, with the replies, in 0.11 s; a sort in 0.09 s, no frame over 6 ms. The engine's detection is in the first figure; the window's share is the frames.
+- **Keys** (`KeyedList`, a frame and keys around a `ListView`):
+  - The profile manager's, the editor's and the edit dialog's lists, and the tree preferences are added from: Up and Down choose the row before or after, which is kept in view. Enter opens the profile, edits the preference or adds it.
+  - A list takes the keys when its card opens, and when a row is clicked. Escape still closes the card.
+  - The tree: Right expands a row, or goes into it; Left collapses it, or goes to the row it is under (`lst_expand_by_keyboard`). GTK's type-ahead search isn't ported.
+  - The documentation window: Up and Down, or Ctrl+Page Up and Page Down, go to the tab before or after; Escape closes it.
+- **The close button** already went through `safeExit`; a test now checks it, while idle and while working.
+- **Window tests:** the keys in the manager, the editor, the edit dialog, the tree and the documentation window; Escape over a list; the close button.
 
 ## Verification
 
