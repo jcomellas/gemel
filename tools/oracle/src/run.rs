@@ -61,7 +61,17 @@ pub struct How {
     pub ssh_config: Option<PathBuf>,
     /// The `gemel-oracle` program, copied as the ssh shim.
     pub harness: PathBuf,
+    /// Extended attributes are synchronised (`-xattrs=true`), and the
+    /// changes wait for the second after the first sync's scan (see
+    /// [`CTIME_WAIT`]).
+    pub xattrs: bool,
 }
+
+/// How long changes wait after the first sync with extended attributes.
+/// Unison reads them again only when a file's change time differs from
+/// the archive's, which macOS gives in whole seconds: an attribute changed
+/// in the second of the scan would be missed, or not, by the clock.
+const CTIME_WAIT: Duration = Duration::from_millis(1100);
 
 /// The host names of the two ends (`UNISONLOCALHOSTNAME`) with a remote
 /// root, which archive names and the output depend on.
@@ -278,7 +288,12 @@ pub fn client_flags(how: &How) -> Vec<String> {
     } else {
         ONE_AT_A_TIME
     };
-    (FLAGS.iter().chain(one).map(|s| s.to_string()))
+    let xattrs = if how.xattrs {
+        &["-xattrs=true"][..]
+    } else {
+        &[]
+    };
+    (FLAGS.iter().chain(one).chain(xattrs).map(|s| s.to_string()))
         .chain(how.client_args.iter().cloned())
         .collect()
 }
@@ -471,6 +486,9 @@ pub fn outcome_with(
     scenario::apply(&a, &scenario.initial_a)?;
     scenario::apply(&b, &scenario.initial_b)?;
     let first = sync(work)?;
+    if how.xattrs {
+        thread::sleep(CTIME_WAIT);
+    }
     scenario::apply(&a, &scenario.changes_a)?;
     scenario::apply(&b, &scenario.changes_b)?;
     let second = sync(work)?;
@@ -546,15 +564,16 @@ fn walk(root: &Path, dir: &Path, snap: &mut Snapshot) -> io::Result<()> {
         let desc = if m.file_type().is_symlink() {
             format!("link -> {}", fs::read_link(&p)?.display())
         } else if m.is_dir() {
-            format!("dir {mode}")
+            format!("dir {mode}{}", xattrs(&p)?)
         } else {
             let mtime = m
                 .modified()?
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
             format!(
-                "file {mode} mtime {mtime} {:?}",
-                String::from_utf8_lossy(&fs::read(&p)?)
+                "file {mode} mtime {mtime} {:?}{}",
+                String::from_utf8_lossy(&fs::read(&p)?),
+                xattrs(&p)?
             )
         };
         snap.insert(rel, desc);
@@ -563,6 +582,46 @@ fn walk(root: &Path, dir: &Path, snap: &mut Snapshot) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The scenarios' extended attributes of `p` ([`scenario::XATTR_NAMES`]),
+/// as ` xattrs {name: value, ...}`, or nothing if it has none of them or
+/// the system has no attributes.
+fn xattrs(p: &Path) -> io::Result<String> {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        return Ok(String::new());
+    }
+    let path = scenario::fspath_of(p)?;
+    let mut names: Vec<Vec<u8>> = match gemel_fs::xattr::list(&path) {
+        Ok(l) => l.into_iter().map(|(n, _)| n).collect(),
+        Err(gemel_fs::xattr::Error::NotSupported) => return Ok(String::new()),
+        Err(e) => return Err(scenario::xattr_error(e)),
+    };
+    names.retain(|n| n.starts_with(scenario::XATTR_PREFIX.as_bytes()));
+    if names.is_empty() {
+        return Ok(String::new());
+    }
+    names.sort();
+    let shown = names
+        .iter()
+        .map(|n| {
+            let v = gemel_fs::xattr::get(&path, n).map_err(scenario::xattr_error)?;
+            Ok(format!(
+                "{}: {:?}",
+                String::from_utf8_lossy(n),
+                String::from_utf8_lossy(&v)
+            ))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    Ok(format!(" xattrs {{{}}}", shown.join(", ")))
+}
+
+/// Whether a replica the outcome left has any of the scenarios' extended
+/// attributes.
+pub fn has_xattrs(o: &Outcome) -> bool {
+    o.a.values()
+        .chain(o.b.values())
+        .any(|d| d.contains(" xattrs {"))
 }
 
 #[cfg(unix)]
