@@ -1019,7 +1019,7 @@ impl App {
             Event::ProfileUnchanged(unchanged) => self.reloaded(unchanged),
             Event::Diff { shown, errors } => self.diffs_shown(shown, &errors),
             Event::InputEnded(root) => self.input_ended(&root),
-            Event::Changed | Event::Interrupted => {}
+            Event::Changed | Event::Interrupted | Event::ProfileSettings(_) => {}
             Event::Error(msg) => {
                 let op = self.state.borrow_mut().profile_ops.pop_front();
                 match op {

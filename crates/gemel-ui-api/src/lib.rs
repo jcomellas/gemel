@@ -10,6 +10,7 @@
 pub mod cli;
 pub mod exit_code;
 pub mod manual;
+pub mod profile_editor;
 pub mod session;
 pub mod uicommon;
 

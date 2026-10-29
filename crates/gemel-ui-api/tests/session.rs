@@ -59,6 +59,7 @@ fn is_reply(c: &Command, e: &Event) -> bool {
     match e {
         Event::Started(_)
         | Event::Profiles(_)
+        | Event::ProfileSettings(_)
         | Event::ProfileLoaded(_)
         | Event::ProfileUnchanged(_)
         | Event::Connected(_)
@@ -926,6 +927,117 @@ fn profiles_are_created_and_deleted_as_uigtk3_does() {
     s.join().unwrap();
     if let Some(out) = ui_support::ocaml(&pair, &["p"]) {
         assert!(pair.b().join("f").exists(), "{out}");
+    }
+}
+
+/// `editProfile` reads a profile's settings: includes expanded, comments
+/// left out, aliases canonical, by name, single values the last one, and
+/// a three-state boolean at its default left out. It writes them back as
+/// `uigtk3` does; what it wrote reads back the same, loads, and OCaml
+/// syncs with it (with `GEMEL_REFERENCE_UNISON`).
+#[test]
+fn profiles_are_read_and_written_as_the_editor_does() {
+    use gemel_ui_api::profile_editor::{PrefType, Setting};
+    let pair = Pair::new("session-edit-profile");
+    write(&pair.a(), "f", "f", T0);
+    write(&pair.a(), "f.tmp", "f", T0);
+    let (a, b) = (pair.root("a"), pair.root("b"));
+    std::fs::create_dir_all(pair.u()).unwrap();
+    std::fs::write(
+        pair.u().join("common.prf"),
+        "ignore = Name *.tmp\nlog = false\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pair.u().join("e.prf"),
+        format!(
+            "# Mine\nroot = {a}\n\nroot = {b}\nbatch = true\ntimes = true\ntimes = false\n\
+             include common\nfastcheck = default\nbackupversions = 3\nlabel = A label\n"
+        ),
+    )
+    .unwrap();
+    let (mut s, _) = start(&pair, &[], false);
+    let Event::ProfileSettings(settings) = ok(
+        &mut s,
+        Command::ReadProfile("e".to_owned()),
+        &mut no_questions,
+    ) else {
+        panic!()
+    };
+    let set = |name: &str, typ, values: &[&str]| Setting {
+        name: name.to_owned(),
+        typ,
+        values: values.iter().map(|v| v.to_string()).collect(),
+    };
+    let expected = vec![
+        set("batch", PrefType::Bool, &["true"]),
+        set("ignore", PrefType::Custom, &["Name *.tmp"]),
+        set("label", PrefType::String, &["A label"]),
+        set("log", PrefType::Bool, &["false"]),
+        set("maxbackups", PrefType::Int, &["3"]),
+        set("root", PrefType::StringList, &[&a, &b]),
+        set("times", PrefType::Bool, &["false"]),
+    ];
+    assert_eq!(settings, expected);
+    let Event::Profiles(_) = ok(
+        &mut s,
+        Command::WriteProfile("e".to_owned(), settings),
+        &mut no_questions,
+    ) else {
+        panic!()
+    };
+    assert_eq!(
+        std::fs::read_to_string(pair.u().join("e.prf")).unwrap(),
+        format!(
+            "# Unison preferences\nbatch = true\nignore = Name *.tmp\nlabel = A label\n\
+             log = false\nmaxbackups = 3\nroot = {a}\nroot = {b}\ntimes = false\n"
+        )
+    );
+    let Event::ProfileSettings(again) = ok(
+        &mut s,
+        Command::ReadProfile("e".to_owned()),
+        &mut no_questions,
+    ) else {
+        panic!()
+    };
+    assert_eq!(again, expected);
+    // A profile made by writing it is its owner's alone.
+    ok(
+        &mut s,
+        Command::WriteProfile("new".to_owned(), Vec::new()),
+        &mut no_questions,
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(pair.u().join("new.prf"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    match call(
+        &mut s,
+        Command::ReadProfile("nosuch".to_owned()),
+        &mut no_questions,
+    )
+    .1
+    {
+        Event::Error(e) => assert!(e.starts_with("Profile nosuch not found"), "{e}"),
+        e => panic!("{e:?}"),
+    }
+    let Event::ProfileLoaded(loaded) = ok(
+        &mut s,
+        Command::LoadProfile("e".to_owned()),
+        &mut no_questions,
+    ) else {
+        panic!()
+    };
+    assert_eq!(loaded.roots, [a, b]);
+    s.join().unwrap();
+    if let Some(out) = ui_support::ocaml(&pair, &["e"]) {
+        assert!(pair.b().join("f").exists(), "{out}");
+        assert!(!pair.b().join("f.tmp").exists(), "{out}");
     }
 }
 
