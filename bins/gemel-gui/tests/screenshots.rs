@@ -227,12 +227,30 @@ fn the_dialogs() {
     shoot_main(ui, "dialog-summary-details");
     assert!(press(ui, "OK"));
 
+    // With a path too long to wrap, as the roots' canonical names are.
     app.handle(Event::Warning(
         "The archive file is missing on some hosts.\n\
-         For safety, the remaining copies should be removed."
+         For safety, the remaining copies should be removed.\n\
+         /private/var/folders/sx/b8l0q_r92hz53gqb5gyq33_m0000gn/T/gemel-gui-shots/a-replica-with-a-long-name"
             .to_owned(),
     ));
     shoot_main(ui, "dialog-warning");
+    // The message starts at its card's left, not centred out of it.
+    let left = |e: &ElementHandle| e.absolute_position().x;
+    let card = ElementQuery::from_root(ui)
+        .match_descendants()
+        .match_accessible_role(AccessibleRole::Groupbox)
+        .find_first()
+        .unwrap();
+    let message = ElementHandle::find_by_accessible_label(ui, "Message")
+        .next()
+        .unwrap();
+    assert!(
+        left(&message) >= left(&card),
+        "{} < {}",
+        left(&message),
+        left(&card)
+    );
     assert!(press(ui, "OK") || press(ui, "Close"));
     app.handle(Event::Error(
         "Fatal error: Connection to the server lost".to_owned(),

@@ -1062,13 +1062,18 @@ export component AppWindow inherits Window {
             if root.dialog-cancel != "" { root.dialog-done(false); }
             else if root.dialog-ok != "" { root.dialog-done(true); }
         }
+        // In a layout, so that the text is as wide as the view, from its
+        // left: alone, Slint centres it, cutting off both sides of a line
+        // wider than the view (a long path).
         ScrollView {
             min-height: 60px;
             preferred-height: min(message.preferred-height + 8px, 360px);
-            message := Text {
-                text: root.dialog-message;
-                wrap: word-wrap;
-                accessible-label: "Message";
+            VerticalLayout {
+                message := Text {
+                    text: root.dialog-message;
+                    wrap: word-wrap;
+                    accessible-label: "Message";
+                }
             }
         }
         HorizontalLayout {
@@ -1143,10 +1148,13 @@ export component AppWindow inherits Window {
         ScrollView {
             min-height: 40px;
             preferred-height: min(ssh-text.preferred-height + 8px, 240px);
-            ssh-text := Text {
-                text: root.dialog-message;
-                wrap: word-wrap;
-                accessible-label: "Message";
+            // In a layout, as the message card's.
+            VerticalLayout {
+                ssh-text := Text {
+                    text: root.dialog-message;
+                    wrap: word-wrap;
+                    accessible-label: "Message";
+                }
             }
         }
         if root.password-editable: LineEdit {
