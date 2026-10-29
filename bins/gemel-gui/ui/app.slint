@@ -1888,7 +1888,8 @@ export component StatsWindow inherits Window {
     // client, server, total.
     in property <[[string]]> table: [["", "", ""], ["", "", ""], ["", "", ""]];
 
-    callback close();
+    // Close, or Escape: hides the window (`close()` is Slint's own).
+    callback close-window();
 
     VerticalLayout {
         padding: 8px;
@@ -1931,7 +1932,7 @@ export component StatsWindow inherits Window {
             alignment: end;
             Button {
                 text: "Close";
-                clicked => { root.close(); }
+                clicked => { root.close-window(); }
             }
         }
     }
@@ -1948,7 +1949,8 @@ export component DiffWindow inherits Window {
     in property <[DiffLine]> lines;
     in property <string> mono-font: "Menlo";
 
-    callback close();
+    // Close, or Escape: hides the window (`close()` is Slint's own).
+    callback close-window();
 
     VerticalLayout {
         padding: 8px;
@@ -1968,7 +1970,7 @@ export component DiffWindow inherits Window {
             alignment: end;
             Button {
                 text: "Close";
-                clicked => { root.close(); }
+                clicked => { root.close-window(); }
             }
         }
     }
@@ -1991,7 +1993,8 @@ export component DocWindow inherits Window {
     in property <string> mono-font: "Menlo";
 
     callback select(page: int);
-    callback close();
+    // Close, or Escape: hides the window (`close()` is Slint's own).
+    callback close-window();
 
     // The keys: Up and Down (or Ctrl+Page Up and Page Down) go to the
     // tab before or after; Escape closes.
@@ -1999,7 +2002,7 @@ export component DocWindow inherits Window {
         init => { self.focus(); }
         key-pressed(event) => {
             if event.text == Key.Escape {
-                root.close();
+                root.close-window();
                 return accept;
             }
             if event.modifiers.alt || event.modifiers.meta {
@@ -2069,7 +2072,7 @@ export component DocWindow inherits Window {
                 alignment: end;
                 Button {
                     text: "Close";
-                    clicked => { root.close(); }
+                    clicked => { root.close-window(); }
                 }
             }
         }
