@@ -18,6 +18,8 @@
 
 pub mod editor;
 pub mod fake;
+#[cfg(target_os = "macos")]
+mod macos;
 pub mod recon_view;
 pub mod stats;
 pub mod summary;
@@ -2963,6 +2965,21 @@ impl App {
 
 fn run(args: Vec<String>) -> Result<i32, slint::PlatformError> {
     let app = App::new(Startup::new(args))?;
+    // macOS's own Quit (the application menu's, the Dock's), as Quit: at
+    // once while nothing is going on, after asking otherwise.
+    #[cfg(target_os = "macos")]
+    {
+        let (weak, weak2) = (Rc::downgrade(&app), Rc::downgrade(&app));
+        let may_end = move || weak.upgrade().is_none_or(|app| !app.busy());
+        let quit = move || {
+            if let Some(app) = weak2.upgrade() {
+                app.safe_exit();
+            }
+        };
+        if !macos::on_terminate(may_end, quit) {
+            eprintln!("gemel-gui: macOS's Quit will end the program without asking");
+        }
+    }
     app.ui.invoke_focus_table();
     let _ticks = app.start_ticks();
     app.ui.run()?;

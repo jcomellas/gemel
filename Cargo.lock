@@ -1537,6 +1537,7 @@ dependencies = [
  "gemel-ui-api",
  "i-slint-backend-testing",
  "i-slint-core",
+ "objc2 0.6.5",
  "png",
  "rfd",
  "slint",

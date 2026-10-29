@@ -26,6 +26,11 @@ gemel-ui-api.workspace = true
 slint = { version = "=1.18.1", features = ["raw-window-handle-06"] }
 rfd = "0.17.2"
 
+# macOS's own Quit through the window's (src/macos.rs): the version rfd
+# and Slint's menus use.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+
 [dev-dependencies]
 # The harness's scenarios, runs and comparisons (tests/support).
 gemel-oracle.workspace = true
