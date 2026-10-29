@@ -18,9 +18,11 @@ use gemel_oracle::compare::{check_recheck, compare_state};
 use gemel_oracle::run::{self, How, Pairing, Remote, Step};
 use gemel_oracle::scenario::{Flavour, Scenario};
 use gemel_ui_api::Trace;
-use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery};
+use i_slint_backend_testing::{
+    AccessibleRole, ElementHandle, ElementQuery, TestingBackend, TestingBackendOptions,
+};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition};
+use slint::{ComponentHandle, LogicalPosition, Model};
 
 // ---- The window ----
 
@@ -34,6 +36,20 @@ thread_local! {
 pub fn init() {
     if !STARTED.replace(true) {
         i_slint_backend_testing::init_no_event_loop();
+    }
+}
+
+/// [`init`], with Slint's software renderer in each window, so that it
+/// can be drawn (`Window::take_snapshot`). Text is laid out in the
+/// system's fonts, not the testing backend's fixed ones.
+pub fn init_drawn() {
+    if !STARTED.replace(true) {
+        slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
+            mock_time: true,
+            threading: false,
+            renderer_name: Some("software".into()),
+        })))
+        .expect("platform already initialized");
     }
 }
 
@@ -206,6 +222,60 @@ fn window_named(
     .unwrap();
     app.ui().show().unwrap();
     (app, out)
+}
+
+// ---- Replicas and profiles ----
+
+/// Replicas `a` and `b` and a Unison directory in `dir`, with `files` in
+/// `a` and `b`, synced once through the window.
+pub fn synced(dir: &Path, files: &[&str]) {
+    for r in ["a", "b", "unison"] {
+        std::fs::create_dir_all(dir.join(r)).unwrap();
+    }
+    for f in files {
+        std::fs::write(dir.join("a").join(f), "same").unwrap();
+        std::fs::write(dir.join("b").join(f), "same").unwrap();
+    }
+    window_sync(dir, None).unwrap();
+}
+
+/// The window's arguments for replicas `a` and `b` in `dir`.
+pub fn roots(dir: &Path) -> Vec<String> {
+    let mut args: Vec<String> = ["a", "b"]
+        .iter()
+        .map(|r| dir.join(r).display().to_string())
+        .collect();
+    args.extend(["-log=false", "-times"].map(String::from));
+    args
+}
+
+/// Profiles `names` in `dir/unison`, each with replicas of its own (and
+/// a file in the first), and the label `Label of NAME`.
+pub fn profiles(dir: &Path, names: &[&str]) {
+    std::fs::create_dir_all(dir.join("unison")).unwrap();
+    for n in names {
+        let (a, b) = (dir.join(format!("{n}-a")), dir.join(format!("{n}-b")));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join(format!("{n}-file")), n).unwrap();
+        std::fs::write(
+            dir.join("unison").join(format!("{n}.prf")),
+            format!(
+                "label = Label of {n}\nroot = {}\nroot = {}\nlog = false\n",
+                a.display(),
+                b.display()
+            ),
+        )
+        .unwrap();
+    }
+}
+
+/// The profile manager's rows, as a screen reader names them.
+pub fn manager_rows(ui: &AppWindow) -> Vec<String> {
+    ui.get_profiles()
+        .iter()
+        .map(|r| r.name.to_string())
+        .collect()
 }
 
 /// How long a sync through the window may take.

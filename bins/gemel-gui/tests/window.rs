@@ -17,7 +17,8 @@ use slint::platform::Key;
 use slint::{ComponentHandle, LogicalSize, Model, SharedString};
 
 use support::{
-    can_press, click, fake_item, fake_updates, init, items, press, type_text, wait_until,
+    can_press, click, fake_item, fake_updates, init, items, manager_rows, press, profiles, roots,
+    synced, type_text, wait_until,
 };
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -123,28 +124,6 @@ fn closing_the_window_quits_as_quit_does() {
     close(&app);
     assert!(press(ui, "Yes"));
     assert_eq!(app.exit_code(), Some(0));
-}
-
-/// Replicas `a` and `b` and a Unison directory in `dir`, with `files` in
-/// `a` and `b`, synced once through the window.
-fn synced(dir: &Path, files: &[&str]) {
-    for r in ["a", "b", "unison"] {
-        std::fs::create_dir_all(dir.join(r)).unwrap();
-    }
-    for f in files {
-        std::fs::write(dir.join("a").join(f), "same").unwrap();
-        std::fs::write(dir.join("b").join(f), "same").unwrap();
-    }
-    support::window_sync(dir, None).unwrap();
-}
-
-fn roots(dir: &Path) -> Vec<String> {
-    let mut args: Vec<String> = ["a", "b"]
-        .iter()
-        .map(|r| dir.join(r).display().to_string())
-        .collect();
-    args.extend(["-log=false", "-times"].map(String::from));
-    args
 }
 
 /// The window starts on the roots given, shows the items with the first
@@ -262,35 +241,6 @@ fn roots_are_asked_for() {
         ui.get_window_title()
     );
     app.quit(0);
-}
-
-/// Profiles `names` in `dir/unison`, each with replicas of its own (and
-/// a file in the first), and the label `Label of NAME`.
-fn profiles(dir: &Path, names: &[&str]) {
-    std::fs::create_dir_all(dir.join("unison")).unwrap();
-    for n in names {
-        let (a, b) = (dir.join(format!("{n}-a")), dir.join(format!("{n}-b")));
-        std::fs::create_dir_all(&a).unwrap();
-        std::fs::create_dir_all(&b).unwrap();
-        std::fs::write(a.join(format!("{n}-file")), n).unwrap();
-        std::fs::write(
-            dir.join("unison").join(format!("{n}.prf")),
-            format!(
-                "label = Label of {n}\nroot = {}\nroot = {}\nlog = false\n",
-                a.display(),
-                b.display()
-            ),
-        )
-        .unwrap();
-    }
-}
-
-/// The profile manager's rows, as a screen reader names them.
-fn manager_rows(ui: &gemel_gui::ui::AppWindow) -> Vec<String> {
-    ui.get_profiles()
-        .iter()
-        .map(|r| r.name.to_string())
-        .collect()
 }
 
 /// Without a profile or roots, the profile manager opens (`getProfile`):
