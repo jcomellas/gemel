@@ -1,6 +1,6 @@
 # Milestone 5: platform polish
 
-*Status: planned (2026-10-29) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 1a, 2026-10-29) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 5 is step 5 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): platform polish. It takes what earlier milestones moved here:
 - synchronising extended attributes and ACLs, cut since milestone 2;
@@ -82,6 +82,24 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - `compare_state` compares them;
   - pairings with `xattrs = true` against `8772d26` and 2.53.8, and the refusal against 2.52.1.
 - **Likely split:** 1a, `gemel-fs`, the vectors and `Props.Xattr` on one host; 1b, the props data, `propsExtData`, copies and the oracle.
+
+**Notes (phase 1a, 2026-10-29):**
+- **Design decision 2, for xattrs: system calls,** in `gemel-fs`'s `xattr` module, not the `xattr` crate. The stubs follow symbolic links, read a value again while it keeps changing, take `ENOTSUP` as not supported, and mangle Linux's names; the crate's plain functions don't follow links.
+- **No vectors from the stubs for xattrs,** where design decision 1 had them. Their behaviour is a few rules, ported and tested from the C: Linux's names (`user.` taken off, `!` before another namespace), and the system attributes left alone (Linux's `system.` but the POSIX ACLs; macOS's Finder information and resource fork). They are checked end to end against OCaml instead (below). Vectors stay for ACLs, whose text is what is at stake.
+- **Ported:**
+  - **`Props.Xattr`:** get (regular files and directories), set, check, `readAll`, `getAll`, `purge`, `wrapFail`, the texts, and the cache of values;
+  - **`Propsdata`'s store,** one per host, which the host's scans share;
+  - **`Props.get`** reading attributes again only when the change time differs from the archive's (`ctimeDetect`), with the archive's props passed as `buildUpdateRec` passes them;
+  - **the `xattrs` preference,** refused only without the `Sync: xattr` feature, as OCaml's validator refuses it.
+- **The split, as done:** loading the values before props are set (`propsExtDataOnRoot`) is one path for local copies and transfers, so the `propsExtData` server command is here too, and the test runs with a remote root in loopback. Left for 1b:
+  - sending the values a host's scan stored to the other hosts (the `propsdata` command's new data, empty so far);
+  - the oracle's scenarios with xattrs, and the pairings with 2.53.8 and against 2.52.1, which refuses `xattrs`.
+- **Change times:** on macOS they are whole seconds, as OCaml's `stat` gives them there. So an attribute changed in the second of the last scan is missed, as in OCaml. The test waits a second before changing any.
+- **Where xattrs can be tested:**
+  - **Docker:** the image's `/tmp` (overlayfs) takes user attributes;
+  - **`trusted.*`:** setting it needs `CAP_SYS_ADMIN`, which neither CI's runner nor Docker's root has, so the test for other namespaces says so and stops; the mangling's unit test runs everywhere;
+  - **macOS** adds `com.apple.provenance` to files on its own. It is synchronised as OCaml synchronises it, and the tests look only at their own attributes.
+- **Against OCaml** (`gemel-engine`'s `xattrs_propagate_like_ocaml`): attributes set, changed and removed on a file whose contents are the same, large ones, a new file's, a directory's, the other way, and one that `xattrignore` leaves alone, directly, in loopback and with a remote root. OCaml syncs a twin to the same attributes; it finds nothing to do on gemel's replicas, with fast checking and without; and gemel finds nothing to do on OCaml's. On macOS against 2.54.0, and on Linux against `8772d26`.
 
 ### Phase 2: ACLs (`props.ml`'s `ACL`, ~0.2k; `props_acl.c`, ~0.8k)
 
