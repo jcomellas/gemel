@@ -253,8 +253,11 @@ component KeyedList inherits FocusScope {
             }
         }
     }
+    // A FocusScope isn't a layout: its height is given here, and the
+    // frame fills it.
+    min-height: root.list-height;
+    preferred-height: root.list-height;
     Rectangle {
-        height: root.list-height;
         border-width: 1px;
         border-color: root.has-focus ? Palette.accent-background : Palette.border;
         @children

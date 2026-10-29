@@ -15,6 +15,7 @@ use gemel_gui::App;
 use gemel_gui::ui::AppWindow;
 use gemel_ui_api::session::{Event, Progress, Summary};
 use gemel_ui_api::uicommon::Action;
+use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery};
 use slint::platform::{Key, WindowEvent};
 use slint::{ComponentHandle, LogicalSize, Model, SharedString};
 
@@ -63,6 +64,17 @@ const MAIN: (f32, f32) = (900., 640.);
 /// Draws the main window as `name.png`.
 fn shoot_main(ui: &AppWindow, name: &str) {
     shoot(ui, name, MAIN);
+}
+
+/// The top and the bottom of the text `label`.
+fn text_span(ui: &AppWindow, label: &str) -> (f32, f32) {
+    let e = ElementHandle::find_by_accessible_label(ui, label)
+        .next()
+        .unwrap_or_else(|| panic!("no {label:?}"));
+    (
+        e.absolute_position().y,
+        e.absolute_position().y + e.size().height,
+    )
 }
 
 fn key(k: Key) -> SharedString {
@@ -234,6 +246,19 @@ fn the_profile_dialogs() {
     let _ticks = app.start_ticks();
     assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
     shoot_main(ui, "manager-1");
+    // The list, between its label and the summary.
+    let list = ElementQuery::from_root(ui)
+        .match_descendants()
+        .match_accessible_role(AccessibleRole::List)
+        .match_predicate(|e| e.accessible_label().as_deref() == Some("Profiles"))
+        .find_first()
+        .unwrap();
+    let (top, bottom) = (
+        list.absolute_position().y,
+        list.absolute_position().y + list.size().height,
+    );
+    assert!(text_span(ui, "Select a profile:").1 <= top + 0.5);
+    assert!(bottom <= text_span(ui, "Summary").0 + 0.5);
     ui.invoke_profile_clicked(1);
     shoot_main(ui, "manager-2-selected");
 
