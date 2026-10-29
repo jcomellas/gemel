@@ -65,12 +65,16 @@ pub struct How {
     /// changes wait for the second after the first sync's scan (see
     /// [`CTIME_WAIT`]).
     pub xattrs: bool,
+    /// ACLs are synchronised (`-acl=true`), and the changes wait as with
+    /// [`How::xattrs`].
+    pub acls: bool,
 }
 
-/// How long changes wait after the first sync with extended attributes.
-/// Unison reads them again only when a file's change time differs from
-/// the archive's, which macOS gives in whole seconds: an attribute changed
-/// in the second of the scan would be missed, or not, by the clock.
+/// How long changes wait after the first sync with extended attributes or
+/// ACLs. Unison reads them again only when a file's change time differs
+/// from the archive's, which macOS gives in whole seconds: an attribute
+/// changed in the second of the scan would be missed, or not, by the
+/// clock.
 const CTIME_WAIT: Duration = Duration::from_millis(1100);
 
 /// The host names of the two ends (`UNISONLOCALHOSTNAME`) with a remote
@@ -293,9 +297,15 @@ pub fn client_flags(how: &How) -> Vec<String> {
     } else {
         &[]
     };
-    (FLAGS.iter().chain(one).chain(xattrs).map(|s| s.to_string()))
-        .chain(how.client_args.iter().cloned())
-        .collect()
+    let acls = if how.acls { &["-acl=true"][..] } else { &[] };
+    (FLAGS
+        .iter()
+        .chain(one)
+        .chain(xattrs)
+        .chain(acls)
+        .map(|s| s.to_string()))
+    .chain(how.client_args.iter().cloned())
+    .collect()
 }
 
 /// A client's run, set up: its roots, and how replica `b` is reached.
@@ -486,7 +496,7 @@ pub fn outcome_with(
     scenario::apply(&a, &scenario.initial_a)?;
     scenario::apply(&b, &scenario.initial_b)?;
     let first = sync(work)?;
-    if how.xattrs {
+    if how.xattrs || how.acls {
         thread::sleep(CTIME_WAIT);
     }
     scenario::apply(&a, &scenario.changes_a)?;
@@ -564,16 +574,17 @@ fn walk(root: &Path, dir: &Path, snap: &mut Snapshot) -> io::Result<()> {
         let desc = if m.file_type().is_symlink() {
             format!("link -> {}", fs::read_link(&p)?.display())
         } else if m.is_dir() {
-            format!("dir {mode}{}", xattrs(&p)?)
+            format!("dir {mode}{}{}", xattrs(&p)?, acl(&p)?)
         } else {
             let mtime = m
                 .modified()?
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
             format!(
-                "file {mode} mtime {mtime} {:?}{}",
+                "file {mode} mtime {mtime} {:?}{}{}",
                 String::from_utf8_lossy(&fs::read(&p)?),
-                xattrs(&p)?
+                xattrs(&p)?,
+                acl(&p)?
             )
         };
         snap.insert(rel, desc);
@@ -614,6 +625,26 @@ fn xattrs(p: &Path) -> io::Result<String> {
         })
         .collect::<io::Result<Vec<_>>>()?;
     Ok(format!(" xattrs {{{}}}", shown.join(", ")))
+}
+
+/// The extended ACL of `p`, as ` acl {text}`, or nothing if it has none
+/// or the system has no ACLs (gemel-fs reads them on macOS).
+fn acl(p: &Path) -> io::Result<String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(String::new());
+    }
+    match gemel_fs::acl::get_text(&scenario::fspath_of(p)?) {
+        Ok(Some(t)) if !t.is_empty() => Ok(format!(" acl {{{:?}}}", String::from_utf8_lossy(&t))),
+        Ok(_) => Ok(String::new()),
+        Err(e) => Err(io::Error::other(e)),
+    }
+}
+
+/// Whether a replica the outcome left has an extended ACL.
+pub fn has_acls(o: &Outcome) -> bool {
+    o.a.values()
+        .chain(o.b.values())
+        .any(|d| d.contains(" acl {"))
 }
 
 /// Whether a replica the outcome left has any of the scenarios' extended

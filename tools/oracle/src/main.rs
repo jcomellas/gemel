@@ -9,7 +9,7 @@
 //!              [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]
 //!              [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH]
 //!              [--concurrent [--ordered]] [--old-server] [--client-args ARGS] [--dump]
-//!              [--ssh-config FILE] [--xattrs [--refused]]
+//!              [--ssh-config FILE] [--xattrs] [--acls] [--refused]
 //! gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] [--work DIR] [--keep]
 //! ```
 //!
@@ -26,9 +26,9 @@
 //! server starts in its compatibility mode. `--ssh-config` goes through a
 //! real ssh and sshd with that client configuration, for host `server`
 //! (`scripts/start-sshd.sh`). `--xattrs` sets and removes extended
-//! attributes in the scenarios, and synchronises them; with `--refused`,
-//! every sync must refuse them instead, as with a server that has no
-//! xattr support. `--record` saves the reference's outcomes, and
+//! attributes in the scenarios, and synchronises them; `--acls` does the
+//! same with ACLs, on macOS. With `--refused`, every sync must refuse
+//! them instead, as with a server that has neither. `--record` saves the reference's outcomes, and
 //! `--replay` compares a candidate with them where there is no reference
 //! (Windows). See `tools/oracle/README.md`.
 
@@ -61,6 +61,7 @@ struct Args {
     dump: bool,
     ssh_config: Option<PathBuf>,
     xattrs: bool,
+    acls: bool,
     refused: bool,
 }
 
@@ -73,6 +74,7 @@ impl Args {
             ssh_config: self.ssh_config.clone(),
             harness: std::env::current_exe().unwrap_or_default(),
             xattrs: self.xattrs,
+            acls: self.acls,
         }
     }
 
@@ -108,7 +110,7 @@ const USAGE: &str = "usage: gemel-oracle --reference PATH [--candidate PATH] [--
                      [--count K] [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]\n                    \
                      [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH] \
                      [--concurrent [--ordered]] [--old-server]\n                    \
-                     [--client-args ARGS] [--dump] [--ssh-config FILE] [--xattrs [--refused]]\n   \
+                     [--client-args ARGS] [--dump] [--ssh-config FILE] [--xattrs] [--acls] [--refused]\n   \
                      or: gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] \
                      [--work DIR] [--keep]";
 
@@ -133,6 +135,7 @@ fn parse_args() -> Result<Args, String> {
         dump: false,
         ssh_config: None,
         xattrs: false,
+        acls: false,
         refused: false,
     };
     let mut it = std::env::args().skip(1);
@@ -175,6 +178,7 @@ fn parse_args() -> Result<Args, String> {
             "--old-server" => args.old_server = true,
             "--ssh-config" => args.ssh_config = Some(value()?.into()),
             "--xattrs" => args.xattrs = true,
+            "--acls" => args.acls = true,
             "--refused" => args.refused = true,
             "--help" | "-h" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
@@ -192,16 +196,19 @@ fn parse_args() -> Result<Args, String> {
             && args.client_args.is_empty()
             && args.ssh_config.is_none()
             && !args.xattrs
+            && !args.acls
     } else {
         !args.reference.as_os_str().is_empty()
             && !(args.concurrent && args.record.is_some())
             && !(args.ordered && !args.concurrent)
             && (args.ssh_config.is_none()
                 || (args.remote == Some(Remote::Ssh) && args.record.is_none() && cfg!(unix)))
-            // Recordings don't say whether scenarios have xattrs, and
-            // Windows has none.
-            && !(args.xattrs && (args.record.is_some() || args.flavour == Flavour::Windows))
-    } && (args.xattrs || !args.refused);
+            // Recordings don't say whether scenarios have xattrs or ACLs,
+            // and Windows has neither yet. Only macOS has ACLs.
+            && !((args.xattrs || args.acls)
+                && (args.record.is_some() || args.flavour == Flavour::Windows))
+            && !(args.acls && !cfg!(target_os = "macos"))
+    } && (args.xattrs || args.acls || !args.refused);
     if !ok {
         return Err(USAGE.into());
     }
@@ -233,11 +240,11 @@ struct Ran {
     problems: Vec<String>,
     reference: Option<Outcome>,
     /// Whether the replicas either side left have any of the scenarios'
-    /// extended attributes.
-    xattrs: bool,
+    /// extended attributes, and any extended ACLs.
+    left: (bool, bool),
 }
 
-/// What a peer without xattr support makes a client say (`Props`'s
+/// What a peer without xattr or ACL support makes a client say (`Props`'s
 /// feature validation).
 const REFUSAL: &str = "preference) but the server does not support this.";
 
@@ -253,7 +260,7 @@ fn check_refused(o: &Outcome) -> Vec<String> {
     .filter(|(_, s)| s.exit == Some(0) || !format!("{}{}", s.stdout, s.stderr).contains(REFUSAL))
     .map(|(name, s)| {
         format!(
-            "the {name} does not refuse xattrs (exit {:?}):\n{}{}",
+            "the {name} does not refuse the preference (exit {:?}):\n{}{}",
             s.exit, s.stdout, s.stderr
         )
     })
@@ -270,7 +277,11 @@ fn run_scenario(
     (flavour, remote): (Flavour, Option<Remote>),
     recorded: Option<&Outcome>,
 ) -> Result<Ran, String> {
-    let scenario = Scenario::generate_with(seed, flavour, args.xattrs);
+    let extras = scenario::Extras {
+        xattrs: args.xattrs,
+        acls: args.acls,
+    };
+    let scenario = Scenario::generate_with(seed, flavour, extras);
     let work = base.join("work");
     let candidate = args.candidate();
     let io = |e: std::io::Error| format!("scenario {seed}: {e}");
@@ -316,7 +327,10 @@ fn run_scenario(
         };
         problems.extend(found.into_iter().map(|p| format!("({side}) {p}")));
     }
-    let xattrs = run::has_xattrs(&reference) || run::has_xattrs(&candidate);
+    let left = (
+        run::has_xattrs(&reference) || run::has_xattrs(&candidate),
+        run::has_acls(&reference) || run::has_acls(&candidate),
+    );
     if problems.is_empty() && !args.keep {
         for side in ["reference", "candidate"] {
             let dir = base.join(format!("{seed}-{side}"));
@@ -330,7 +344,7 @@ fn run_scenario(
     Ok(Ran {
         problems,
         reference: recorded.is_none().then_some(reference),
-        xattrs,
+        left,
     })
 }
 
@@ -402,7 +416,7 @@ fn main() -> ExitCode {
     };
     let total = seeds.len();
     let mut failed = 0;
-    let mut with_xattrs = 0;
+    let (mut with_xattrs, mut with_acls) = (0, 0);
     let mut recording = Recording {
         flavour: kind.0,
         remote: kind.1,
@@ -411,7 +425,8 @@ fn main() -> ExitCode {
     for (seed, recorded) in seeds {
         match run_scenario(&args, &base, seed, kind, recorded.as_ref()) {
             Ok(ran) => {
-                with_xattrs += usize::from(ran.xattrs);
+                with_xattrs += usize::from(ran.left.0);
+                with_acls += usize::from(ran.left.1);
                 if ran.problems.is_empty() {
                     println!("scenario {seed}: ok");
                 } else {
@@ -434,10 +449,14 @@ fn main() -> ExitCode {
         total - failed,
         base.display()
     );
-    // Agreement on replicas without attributes would say nothing: the file
-    // system may not keep them.
+    // Agreement on replicas without attributes or ACLs would say nothing:
+    // the file system may not keep them.
     if args.xattrs && !args.refused && total > 0 && with_xattrs == 0 {
         println!("no scenario left any extended attributes: is the file system keeping them?");
+        failed = total;
+    }
+    if args.acls && !args.refused && total > 0 && with_acls == 0 {
+        println!("no scenario left any ACLs: is the file system keeping them?");
         failed = total;
     }
     if let Some(file) = &args.record {
