@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 4c, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 4d, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -534,6 +534,11 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **The second root's Help** (`getSecondRoot`'s, left by phase 1a): "Picking roots", `helpmessage`, in a card over the root selection's. As in the assistant, the command it names to start a server is `gemel -socket xxx`. The root selection's fields are now emptied as a root is asked for, not each time its card is shown, so that what was typed is still there once Help is closed. Checked in the window test of the roots, and drawn.
 - **CI's screenshots** from phase 4b's PR, on Linux (DejaVu) and Windows (Segoe UI), were looked at: the cards fit and the text wraps as on macOS. Nothing to change.
 - **Left** before the milestone is done: phase 4b's checks by a person, on each system with the real backend.
+
+**Notes (phase 4d, 2026-10-29):** from the first look by a person, on macOS.
+- **Build warnings:** the statistics, diff and manual windows had a callback named `close`, which shadows Slint's own `close()`; the Slint compiler warned at each build. It is `close-window` now.
+- **macOS's look:** every system had Slint's Fluent style, Windows' look. On macOS, `build.rs` now picks Slint's `cupertino` style (`SLINT_STYLE` still wins); elsewhere it stays Fluent, which Slint picks without Qt. The lists are the window's own, so they follow the style by its palette: a selected row is in the style's accent, with its text in the accent's foreground, as Slint's own list items are in the macOS style (Fluent's accent is close to the selection colour it had); and the list boxes, the details pane and the documentation have the style's control background. CI draws the macOS screenshots in that style.
+- **Messages cut off:** a message card's text was the only child of its `ScrollView`, which Slint centres, so a line wider than the view (the roots' canonical names in the warning that there are no archives) was cut off on both sides. The message, and ssh's text in the password card, are now laid out in their views. Seen on the real window; the screenshots' warning now has a long path, and a check that the message starts within its card.
 
 ## Verification
 
