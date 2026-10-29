@@ -56,6 +56,7 @@ use gemel_rpc::root::Root;
 use crate::abort::Abort;
 use crate::pred::{self, Compiled};
 use crate::transfer::{self, rsync};
+use crate::xattrs::XattrState;
 use crate::{exclusive, fpcache, update, uutil, xferhint};
 
 // ---- Preferences ----
@@ -157,6 +158,8 @@ pub struct Ctx {
     pub follow: Arc<Compiled>,
     /// The temporary-file names in use.
     pub temp_names: TempNames,
+    /// The xattrs synchronised, and the host's store of their values.
+    pub xattr: XattrState,
 }
 
 impl Ctx {
@@ -165,10 +168,12 @@ impl Ctx {
         let prefs = host.prefs().borrow();
         let mut fs = FsConfig::from_prefs(&prefs);
         fs.props = fs.props.with_features(&host.features().borrow());
+        let mode = case::mode(&prefs);
         Ok(Ctx {
             fs,
-            follow: pred::FOLLOW.compiled(&prefs, case::mode(&prefs))?,
+            follow: pred::FOLLOW.compiled(&prefs, mode)?,
             temp_names: host.state::<TempNames>().borrow().clone(),
+            xattr: XattrState::of(host, &prefs, mode)?,
         })
     }
 
@@ -657,7 +662,7 @@ fn set_fileinfo(
         Replacing::Update(..) => SetAction::Copy(real_path_to),
         Replacing::Copy => SetAction::Set(&default),
     };
-    fileinfo::set(fspath_to, path_to, action, desc, &ctx.fs)
+    fileinfo::set(fspath_to, path_to, action, desc, &ctx.fs, &ctx.xattr.ctx())
 }
 
 /// `localFile`: copies the file at `path_from` to `path_to` (a temporary
@@ -1906,7 +1911,15 @@ pub fn recursively(
     fspath_to: &Fspath,
     path_to: &Path<Local>,
 ) -> Result<(), Error> {
-    let info = fileinfo::get(true, fspath_from, path_from, &ctx.follow(), &ctx.fs)?;
+    let info = fileinfo::get(
+        true,
+        fspath_from,
+        path_from,
+        &ctx.follow(),
+        &ctx.fs,
+        &Props::dummy(),
+        &ctx.xattr.ctx(),
+    )?;
     match info.typ {
         Typ::Symlink => os::symlink(fspath_to, path_to, &os::read_link(fspath_from, path_from)?),
         Typ::File => Progress::none(|p| {
@@ -1991,6 +2004,7 @@ mod tests {
             },
             follow: Arc::new(Compiled::new(Vec::new(), case::Mode::Sensitive).unwrap()),
             temp_names: TempNames::default(),
+            xattr: XattrState::standalone(),
         }
     }
 

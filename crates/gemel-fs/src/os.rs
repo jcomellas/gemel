@@ -361,6 +361,7 @@ pub fn safe_fingerprint(
     known: Option<Fingerprint>,
     follow: &dyn Fn(&Path<Local>) -> bool,
     c: &FsConfig,
+    x: &crate::props::XattrCtx<'_>,
 ) -> Result<(fileinfo::Info, FullFingerprint), Error> {
     let kind = match info.typ {
         Typ::File => InfoKind::File,
@@ -378,7 +379,7 @@ pub fn safe_fingerprint(
             None => osx::ress_fingerprint(fspath, path, kind, c.props.rsrc)?,
         };
         let (info2, data_unchanged, ress_unchanged) =
-            fileinfo::unchanged(fspath, path, &info, follow, c)?;
+            fileinfo::unchanged(fspath, path, &info, follow, c, x)?;
         if data_unchanged && ress_unchanged {
             return Ok((info2, FullFingerprint { data, ress: r }));
         }

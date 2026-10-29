@@ -74,6 +74,7 @@ use crate::name_map::{NameMap, PathMap};
 use crate::pred::{self, Compiled, Pred};
 use crate::tree::Tree;
 use crate::uutil::UpdateStatusPrinter;
+use crate::xattrs::XattrState;
 use crate::xferhint;
 
 // ---- Preferences ----
@@ -406,6 +407,8 @@ pub struct Scan {
     status: ScanStatus,
     /// The replica's archive hash, which names it to the watcher.
     arch_hash: Vec<u8>,
+    /// The xattrs synchronised, and the host's store of their values.
+    xattr: XattrState,
     /// The host's watcher, while the scan holds it.
     watch: RefCell<Option<fswatch::Slot>>,
     /// The first error talking to the watcher: the scan stops there, as
@@ -522,6 +525,7 @@ impl Scan {
             hints: Vec::new(),
             status: ScanStatus::default(),
             arch_hash: Vec::new(),
+            xattr: XattrState::of(host, &prefs, mode)?,
             watch: RefCell::new(None),
             watch_error: RefCell::new(None),
         })
@@ -568,8 +572,26 @@ impl Scan {
         }
     }
 
-    fn get_info(&self, path: &Path<Local>) -> Result<Info, Error> {
-        let info = fileinfo::get(true, &self.fspath, path, &self.follow_link(), &self.fs);
+    /// `Fileinfo.get`, with the archive's props when fast checking and not
+    /// rescanning props, so that unchanged xattrs needn't be read again.
+    fn get_info(&self, path: &Path<Local>, archive: &Archive) -> Result<Info, Error> {
+        let arch = match archive {
+            Archive::File(desc, ..) | Archive::Dir(desc, _)
+                if self.info.fast_check && !self.info.rescan_props =>
+            {
+                desc.clone()
+            }
+            _ => Props::dummy(),
+        };
+        let info = fileinfo::get(
+            true,
+            &self.fspath,
+            path,
+            &self.follow_link(),
+            &self.fs,
+            &arch,
+            &self.xattr.ctx(),
+        );
         self.watch_result()?;
         info
     }
@@ -712,6 +734,7 @@ impl Scan {
             known,
             &|p| follow.test(p.as_bytes()),
             &self.fs,
+            &self.xattr.ctx(),
         )?;
         self.hint(path, &new_fp);
         if arch_fp == new_fp {
@@ -752,8 +775,14 @@ impl Scan {
         child_updates: &[(Name, UpdateItem)],
     ) -> Result<(Props, bool), Error> {
         if no_child_change(child_updates) {
-            let unchanged =
-                fileinfo::unchanged(&self.fspath, path, info, &self.follow_link(), &self.fs);
+            let unchanged = fileinfo::unchanged(
+                &self.fspath,
+                path,
+                info,
+                &self.follow_link(),
+                &self.fs,
+                &self.xattr.ctx(),
+            );
             self.watch_result()?;
             let (_, data_unchanged, _) = unchanged?;
             if data_unchanged {
@@ -926,7 +955,7 @@ impl Scan {
         archive: &mut Archive,
         path: &Path<Local>,
     ) -> Result<(bool, UpdateItem), Error> {
-        let info = self.get_info(path)?;
+        let info = self.get_info(path, archive)?;
         match (info.typ, &*archive) {
             (Typ::Absent, Archive::NoArchive) => Ok((false, UpdateItem::NoUpdates)),
             (Typ::Absent, _) => Ok((
@@ -948,6 +977,7 @@ impl Scan {
                     None,
                     &|p| follow.test(p.as_bytes()),
                     &self.fs,
+                    &self.xattr.ctx(),
                 )?;
                 self.hint(path, &fp);
                 Ok((
@@ -1160,7 +1190,7 @@ impl Scan {
             let (_, ui) = self.build_update_path_tree(archive, &here, tree)?;
             return Ok((ui, here, Vec::new()));
         };
-        let info = self.get_info(&here)?;
+        let info = self.get_info(&here, archive)?;
         let s = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
         let fail = |e: String| Ok((UpdateItem::Error(e), translated.clone(), Vec::new()));
         if info.typ != Typ::Directory && info.typ != Typ::Absent {

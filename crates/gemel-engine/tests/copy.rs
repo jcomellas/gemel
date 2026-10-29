@@ -42,7 +42,16 @@ impl Setup {
     /// What update detection records of a file in root `i`.
     fn source(&self, i: usize, path: &str) -> Source {
         let (fspath, path, c) = (self.fspath(i), local(path), self.fs());
-        let info = fileinfo::get(true, &fspath, &path, &|_| false, &c).unwrap();
+        let info = fileinfo::get(
+            true,
+            &fspath,
+            &path,
+            &|_| false,
+            &c,
+            &gemel_fs::props::Props::dummy(),
+            &gemel_fs::props::XattrCtx::standalone(),
+        )
+        .unwrap();
         let fp = os::fingerprint(&fspath, &path, info.typ.info_kind(), c.props.rsrc).unwrap();
         Source {
             desc: info.desc.clone(),

@@ -365,7 +365,16 @@ fn the_cache_is_used_only_for_clearly_unchanged_files() {
     };
     let path = Path::from_bytes(b"f").unwrap();
     let none: &dyn Fn(&Path<_>) -> bool = &|_| false;
-    let info = fileinfo::get(true, &fspath, &path, none, &c).unwrap();
+    let info = fileinfo::get(
+        true,
+        &fspath,
+        &path,
+        none,
+        &c,
+        &gemel_fs::props::Props::dummy(),
+        &gemel_fs::props::XattrCtx::standalone(),
+    )
+    .unwrap();
     let real = FullFingerprint {
         data: Fingerprint::file(&fspath, &path).unwrap(),
         ress: Fingerprint::DUMMY,
@@ -387,32 +396,96 @@ fn the_cache_is_used_only_for_clearly_unchanged_files() {
 
     let mut cache = FpCache::init(true, false, &file, c.props);
     let (_, got, ..) = cache
-        .fingerprint(false, true, false, &fspath, &path, &info, None, none, &c)
+        .fingerprint(
+            false,
+            true,
+            false,
+            &fspath,
+            &path,
+            &info,
+            None,
+            none,
+            &c,
+            &gemel_fs::props::XattrCtx::standalone(),
+        )
         .unwrap();
     assert_eq!(got, fake, "a clearly unchanged file uses the cache");
     // Without fast checking, it is fingerprinted.
     let (_, got, ..) = cache
-        .fingerprint(false, false, false, &fspath, &path, &info, None, none, &c)
+        .fingerprint(
+            false,
+            false,
+            false,
+            &fspath,
+            &path,
+            &info,
+            None,
+            none,
+            &c,
+            &gemel_fs::props::XattrCtx::standalone(),
+        )
         .unwrap();
     assert_eq!(got, real);
     // So is a file whose length changed.
     std::fs::write(root.join("f"), b"longer contents").unwrap();
-    let info2 = fileinfo::get(true, &fspath, &path, none, &c).unwrap();
+    let info2 = fileinfo::get(
+        true,
+        &fspath,
+        &path,
+        none,
+        &c,
+        &gemel_fs::props::Props::dummy(),
+        &gemel_fs::props::XattrCtx::standalone(),
+    )
+    .unwrap();
     let mut cache = FpCache::init(true, false, &file, c.props);
     let (desc, got, ..) = cache
-        .fingerprint(false, true, false, &fspath, &path, &info2, None, none, &c)
+        .fingerprint(
+            false,
+            true,
+            false,
+            &fspath,
+            &path,
+            &info2,
+            None,
+            none,
+            &c,
+            &gemel_fs::props::XattrCtx::standalone(),
+        )
         .unwrap();
     assert_eq!(desc.length, 15);
     assert_ne!(got, fake);
     // fastercheckUNSAFE: a new file gets a pseudo-fingerprint.
     let (_, got, ..) = cache
-        .fingerprint(true, true, true, &fspath, &path, &info2, None, none, &c)
+        .fingerprint(
+            true,
+            true,
+            true,
+            &fspath,
+            &path,
+            &info2,
+            None,
+            none,
+            &c,
+            &gemel_fs::props::XattrCtx::standalone(),
+        )
         .unwrap();
     assert!(got.is_pseudo());
     // Its length is the scan's (`info`, 8 bytes), not the new stat's.
     let mut empty = FpCache::disabled(c.props);
     let (desc, got, ..) = empty
-        .fingerprint(true, true, true, &fspath, &path, &info, None, none, &c)
+        .fingerprint(
+            true,
+            true,
+            true,
+            &fspath,
+            &path,
+            &info,
+            None,
+            none,
+            &c,
+            &gemel_fs::props::XattrCtx::standalone(),
+        )
         .unwrap();
     assert_eq!(got, FullFingerprint::pseudo(b"f", 8));
     assert_eq!(desc.length, 15);
