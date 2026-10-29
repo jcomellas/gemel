@@ -34,9 +34,9 @@ jobs:
           if-no-files-found: ignore
       - run: ./scripts/check-no-gui-deps.sh
         shell: bash
-      # There is no OCaml Unison on Windows, nor on the macOS runner: gemel
-      # replays the outcomes the oracle job checks are still the pinned
-      # reference's.
+      # There is no OCaml Unison on Windows, and the macOS runner's (below)
+      # isn't the pinned source: gemel replays the outcomes the oracle job
+      # checks are still the pinned reference's.
       - if: runner.os != 'Linux'
         shell: bash
         run: |
@@ -45,6 +45,23 @@ jobs:
           cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt --candidate $gemel
           cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-socket.txt --candidate $gemel
           cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-ssh.txt --candidate $gemel
+      # On macOS, extended attributes and ACLs against Homebrew's OCaml
+      # Unison (whatever release it has): gemel-engine's tests of them, and
+      # the oracle with gemel as the client, the server and both.
+      - if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install unison
+          export GEMEL_REFERENCE_UNISON=$(brew --prefix)/bin/unison
+          cargo test --locked -p gemel-engine --test transport -- xattr acl
+          oracle() { cargo run --locked -q -p gemel-oracle -- --xattrs --acls "$@"; }
+          oracle --reference $GEMEL_REFERENCE_UNISON --candidate target/debug/gemel --count 20
+          for remote in ssh socket; do
+            oracle --remote $remote --reference $GEMEL_REFERENCE_UNISON --candidate-server target/debug/gemel --count 10
+            oracle --remote $remote --reference $GEMEL_REFERENCE_UNISON --candidate target/debug/gemel \
+              --candidate-server $GEMEL_REFERENCE_UNISON --count 10
+            oracle --remote $remote --reference $GEMEL_REFERENCE_UNISON --candidate target/debug/gemel --count 10
+          done
 
   oracle:
     # The differential harness (tools/oracle) against OCaml Unison built
