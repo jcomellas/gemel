@@ -2887,6 +2887,10 @@ impl App {
             })
         });
         let w = with.clone();
+        ui.on_tree_left(move |r| w(&|s| s.with_tree(|t| t.left(r as usize))));
+        let w = with.clone();
+        ui.on_tree_right(move |r| w(&|s| s.with_tree(|t| t.right(r as usize))));
+        let w = with.clone();
         ui.on_tree_toggle_all(move || w(&|s| s.with_tree(editor::Tree::toggle_all)));
         let w = with.clone();
         ui.on_tree_close(move |ok| w(&|s| s.tree_close(ok)));

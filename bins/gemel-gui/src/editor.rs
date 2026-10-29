@@ -397,6 +397,37 @@ impl Tree {
         }
     }
 
+    /// Left on row `row` (`lst_expand_by_keyboard`): collapses it if it is
+    /// expanded, else goes to the row it is under.
+    pub fn left(&mut self, row: usize) {
+        let Some((at, _)) = self.shown().into_iter().nth(row) else {
+            return;
+        };
+        if !self.expanded.remove(&at) && at.len() > 1 {
+            self.selected = Some(at[..at.len() - 1].to_vec());
+        } else {
+            self.selected = Some(at);
+        }
+    }
+
+    /// Right on row `row`: expands it, or if it is expanded, goes to the
+    /// first row under it.
+    pub fn right(&mut self, row: usize) {
+        let Some((at, n)) = self.shown().into_iter().nth(row) else {
+            return;
+        };
+        if n.children.is_empty() {
+            return;
+        }
+        if self.expanded.insert(at.clone()) {
+            self.selected = Some(at);
+        } else {
+            let mut first = at;
+            first.push(0);
+            self.selected = Some(first);
+        }
+    }
+
     /// Whether Expand all has been pressed (the button then says Collapse
     /// all).
     pub fn all_expanded(&self) -> bool {
@@ -770,6 +801,21 @@ mod tests {
         t.click(0);
         assert_eq!(titles(&t), ["G1", "G2"]);
         assert_eq!(t.selected_row(), Some(0));
+        // The keys: Right expands, then goes in; Left goes out, then
+        // collapses.
+        t.right(0);
+        assert_eq!(titles(&t), ["G1", "T1", "a", "b", "key", "G2"]);
+        assert_eq!(t.selected_row(), Some(0));
+        t.right(0);
+        assert_eq!(t.selected_row(), Some(1));
+        t.left(2);
+        assert_eq!(t.selected_row(), Some(1));
+        t.left(1);
+        assert_eq!(titles(&t), ["G1", "T1", "key", "G2"]);
+        t.left(1);
+        assert_eq!(t.selected_row(), Some(0));
+        t.left(0);
+        assert_eq!(titles(&t), ["G1", "G2"]);
         t.toggle_all();
         assert!(t.all_expanded());
         assert_eq!(titles(&t), ["G1", "T1", "a", "b", "key", "G2", "c"]);
