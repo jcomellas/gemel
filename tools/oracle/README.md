@@ -83,6 +83,8 @@ scripts/oracle.sh /path/to/unison --count 30
 | `--old-server` | Start ssh servers without `__new-rpc-mode` (their compatibility mode) |
 | `--client-args ARGS` | More arguments for both clients, split at spaces (`-debug remote+`) |
 | `--ssh-config FILE` | With `--remote ssh`, go through a real ssh and sshd with this client configuration (Unix) |
+| `--xattrs` | Set and remove extended attributes too, and synchronise them (see below; Linux and macOS) |
+| `--refused` | With `--xattrs`, every sync must refuse them instead, as with a 2.52 server |
 | `--dump` | Print what each sync printed, in full, where it differs |
 
 A scenario that differs prints its operations and the first difference in
@@ -164,6 +166,44 @@ scripts/oracle.sh /path/to/unison --remote socket --count 10 \
 
 A candidate server that runs unison with `UNISONLOCALHOSTNAME=elsewhere`
 fails every scenario, over either transport.
+
+## Extended attributes
+
+With `--xattrs`, scenarios set and remove extended attributes too, on
+files and directories, and every sync gets `-xattrs=true` ([milestone
+5](../../docs/milestone-5-plan.md), phase 1). Without it, scenarios are
+generated as before, so recorded outcomes still hold.
+
+- **What changes:** the attributes `gemel.a`, `gemel.b` and `gemel.c`, as
+  Unison shows their names (`user.gemel.a` and so on on Linux), on new
+  files and directories and as changes between the syncs. Their values
+  are empty, short enough to be kept in the props (32 bytes or less),
+  kept by their digest, or too long to be cached (1500 bytes).
+- **What is compared:** the replicas' snapshots add each path's
+  attributes of those names, and only those: systems add their own
+  (macOS's `com.apple.provenance` differs by the program that made the
+  file). A run in which no replica ended with any fails, since the file
+  system may not keep them.
+- **The wait:** Unison reads a file's attributes again only when its
+  change time differs from the archive's, and macOS gives change times
+  in whole seconds. So the changes wait a second after the first sync,
+  where an attribute changed in the second of the scan would be missed,
+  or not, by the clock.
+- **`--refused`:** a 2.52 server has no attributes, so a client that
+  asks for them must stop with OCaml's message, at every sync and the
+  recheck, the reference's and the candidate's alike.
+- **Not with recordings:** `--record` and `--replay` take no `--xattrs`,
+  and neither does the Windows flavour, since Windows has no attributes.
+
+```sh
+# gemel against OCaml on macOS, then as a server
+cargo run -p gemel-oracle -- --reference "$(which unison)" --candidate target/debug/gemel --xattrs --count 30
+cargo run -p gemel-oracle -- --remote ssh --reference "$(which unison)" \
+    --candidate-server target/debug/gemel --xattrs --count 10
+```
+
+A candidate that runs unison with `-xattrs=false` last fails every
+scenario.
 
 ## Recorded outcomes, for Windows
 

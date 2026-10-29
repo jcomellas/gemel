@@ -9,7 +9,7 @@
 //!              [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]
 //!              [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH]
 //!              [--concurrent [--ordered]] [--old-server] [--client-args ARGS] [--dump]
-//!              [--ssh-config FILE]
+//!              [--ssh-config FILE] [--xattrs [--refused]]
 //! gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] [--work DIR] [--keep]
 //! ```
 //!
@@ -25,7 +25,10 @@
 //! starts ssh servers without `__new-rpc-mode`, so that a 2.52 or 2.53
 //! server starts in its compatibility mode. `--ssh-config` goes through a
 //! real ssh and sshd with that client configuration, for host `server`
-//! (`scripts/start-sshd.sh`). `--record` saves the reference's outcomes, and
+//! (`scripts/start-sshd.sh`). `--xattrs` sets and removes extended
+//! attributes in the scenarios, and synchronises them; with `--refused`,
+//! every sync must refuse them instead, as with a server that has no
+//! xattr support. `--record` saves the reference's outcomes, and
 //! `--replay` compares a candidate with them where there is no reference
 //! (Windows). See `tools/oracle/README.md`.
 
@@ -57,6 +60,8 @@ struct Args {
     client_args: Vec<String>,
     dump: bool,
     ssh_config: Option<PathBuf>,
+    xattrs: bool,
+    refused: bool,
 }
 
 impl Args {
@@ -67,6 +72,7 @@ impl Args {
             old_server: self.old_server,
             ssh_config: self.ssh_config.clone(),
             harness: std::env::current_exe().unwrap_or_default(),
+            xattrs: self.xattrs,
         }
     }
 
@@ -102,7 +108,7 @@ const USAGE: &str = "usage: gemel-oracle --reference PATH [--candidate PATH] [--
                      [--count K] [--flavour unix|windows] [--record FILE] [--work DIR] [--keep]\n                    \
                      [--remote ssh|socket] [--reference-server PATH] [--candidate-server PATH] \
                      [--concurrent [--ordered]] [--old-server]\n                    \
-                     [--client-args ARGS] [--dump] [--ssh-config FILE]\n   \
+                     [--client-args ARGS] [--dump] [--ssh-config FILE] [--xattrs [--refused]]\n   \
                      or: gemel-oracle --replay FILE --candidate PATH [--candidate-server PATH] \
                      [--work DIR] [--keep]";
 
@@ -126,6 +132,8 @@ fn parse_args() -> Result<Args, String> {
         client_args: Vec::new(),
         dump: false,
         ssh_config: None,
+        xattrs: false,
+        refused: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(a) = it.next() {
@@ -166,6 +174,8 @@ fn parse_args() -> Result<Args, String> {
             "--dump" => args.dump = true,
             "--old-server" => args.old_server = true,
             "--ssh-config" => args.ssh_config = Some(value()?.into()),
+            "--xattrs" => args.xattrs = true,
+            "--refused" => args.refused = true,
             "--help" | "-h" => return Err(USAGE.into()),
             other => return Err(format!("unknown argument {other}\n{USAGE}")),
         }
@@ -181,13 +191,17 @@ fn parse_args() -> Result<Args, String> {
             && !args.old_server
             && args.client_args.is_empty()
             && args.ssh_config.is_none()
+            && !args.xattrs
     } else {
         !args.reference.as_os_str().is_empty()
             && !(args.concurrent && args.record.is_some())
             && !(args.ordered && !args.concurrent)
             && (args.ssh_config.is_none()
                 || (args.remote == Some(Remote::Ssh) && args.record.is_none() && cfg!(unix)))
-    };
+            // Recordings don't say whether scenarios have xattrs, and
+            // Windows has none.
+            && !(args.xattrs && (args.record.is_some() || args.flavour == Flavour::Windows))
+    } && (args.xattrs || !args.refused);
     if !ok {
         return Err(USAGE.into());
     }
@@ -218,6 +232,32 @@ fn parse_args() -> Result<Args, String> {
 struct Ran {
     problems: Vec<String>,
     reference: Option<Outcome>,
+    /// Whether the replicas either side left have any of the scenarios'
+    /// extended attributes.
+    xattrs: bool,
+}
+
+/// What a peer without xattr support makes a client say (`Props`'s
+/// feature validation).
+const REFUSAL: &str = "preference) but the server does not support this.";
+
+/// With `--refused`, problems with an outcome on its own: every sync must
+/// stop with the refusal.
+fn check_refused(o: &Outcome) -> Vec<String> {
+    [
+        ("first sync", &o.first),
+        ("second sync", &o.second),
+        ("recheck", &o.recheck),
+    ]
+    .into_iter()
+    .filter(|(_, s)| s.exit == Some(0) || !format!("{}{}", s.stdout, s.stderr).contains(REFUSAL))
+    .map(|(name, s)| {
+        format!(
+            "the {name} does not refuse xattrs (exit {:?}):\n{}{}",
+            s.exit, s.stdout, s.stderr
+        )
+    })
+    .collect()
 }
 
 /// Runs a scenario with the reference and the candidate, or, given a
@@ -230,7 +270,7 @@ fn run_scenario(
     (flavour, remote): (Flavour, Option<Remote>),
     recorded: Option<&Outcome>,
 ) -> Result<Ran, String> {
-    let scenario = Scenario::generate(seed, flavour);
+    let scenario = Scenario::generate_with(seed, flavour, args.xattrs);
     let work = base.join("work");
     let candidate = args.candidate();
     let io = |e: std::io::Error| format!("scenario {seed}: {e}");
@@ -268,12 +308,15 @@ fn run_scenario(
     };
     // A disagreement inside the reference itself is a harness problem; one
     // in the candidate's recheck is a real failure.
-    if let Some(p) = check_recheck(&reference) {
-        problems.push(format!("(reference) {p}"));
+    for (side, o) in [("reference", &reference), ("candidate", &candidate)] {
+        let found = if args.refused {
+            check_refused(o)
+        } else {
+            check_recheck(o).into_iter().collect()
+        };
+        problems.extend(found.into_iter().map(|p| format!("({side}) {p}")));
     }
-    if let Some(p) = check_recheck(&candidate) {
-        problems.push(format!("(candidate) {p}"));
-    }
+    let xattrs = run::has_xattrs(&reference) || run::has_xattrs(&candidate);
     if problems.is_empty() && !args.keep {
         for side in ["reference", "candidate"] {
             let dir = base.join(format!("{seed}-{side}"));
@@ -287,6 +330,7 @@ fn run_scenario(
     Ok(Ran {
         problems,
         reference: recorded.is_none().then_some(reference),
+        xattrs,
     })
 }
 
@@ -358,6 +402,7 @@ fn main() -> ExitCode {
     };
     let total = seeds.len();
     let mut failed = 0;
+    let mut with_xattrs = 0;
     let mut recording = Recording {
         flavour: kind.0,
         remote: kind.1,
@@ -366,6 +411,7 @@ fn main() -> ExitCode {
     for (seed, recorded) in seeds {
         match run_scenario(&args, &base, seed, kind, recorded.as_ref()) {
             Ok(ran) => {
+                with_xattrs += usize::from(ran.xattrs);
                 if ran.problems.is_empty() {
                     println!("scenario {seed}: ok");
                 } else {
@@ -388,6 +434,12 @@ fn main() -> ExitCode {
         total - failed,
         base.display()
     );
+    // Agreement on replicas without attributes would say nothing: the file
+    // system may not keep them.
+    if args.xattrs && !args.refused && total > 0 && with_xattrs == 0 {
+        println!("no scenario left any extended attributes: is the file system keeping them?");
+        failed = total;
+    }
     if let Some(file) = &args.record {
         if failed > 0 {
             eprintln!("not recording {}: scenarios differ", file.display());
