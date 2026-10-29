@@ -189,6 +189,7 @@ component DocPane inherits VerticalLayout {
             Rectangle {
                 colspan: 2;
                 height: 128px;
+                background: Palette.control-background;
                 border-width: 1px;
                 border-color: Palette.border;
                 ScrollView {
@@ -266,6 +267,7 @@ component KeyedList inherits FocusScope {
     min-height: root.list-height;
     preferred-height: root.list-height;
     Rectangle {
+        background: Palette.control-background;
         border-width: 1px;
         border-color: root.has-focus ? Palette.accent-background : Palette.border;
         @children
@@ -280,7 +282,7 @@ component ListRow inherits Rectangle {
     callback clicked();
     callback double-clicked();
     height: 22px;
-    background: root.selected ? Palette.selection-background : transparent;
+    background: root.selected ? Palette.accent-background : transparent;
     accessible-role: list-item;
     accessible-label: root.label;
     accessible-item-selectable: true;
@@ -904,6 +906,10 @@ export component AppWindow inherits Window {
                 reject
             }
 
+            // Behind the items, a list box's background, as the style has it.
+            Rectangle {
+                background: Palette.control-background;
+            }
             list := ListView {
                 // ListView is already `list` (AccessKit ListBox, which
                 // VoiceOver treats as a container of selectable items);
@@ -914,7 +920,7 @@ export component AppWindow inherits Window {
 
                 for row[index] in root.rows: Rectangle {
                     height: Theme.row-height;
-                    background: row.selected ? Palette.selection-background
+                    background: row.selected ? Palette.accent-background
                         : Math.mod(index, 2) == 1 ? Palette.alternate-background : transparent;
 
                     // One accessible item per row, with a spoken summary;
@@ -944,7 +950,7 @@ export component AppWindow inherits Window {
                             text: row.replica1;
                             overflow: elide;
                             vertical-alignment: center;
-                            color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            color: row.selected ? Palette.accent-foreground : Palette.foreground;
                             accessible-role: none;
                         }
                         Text {
@@ -961,7 +967,7 @@ export component AppWindow inherits Window {
                             text: row.replica2;
                             overflow: elide;
                             vertical-alignment: center;
-                            color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            color: row.selected ? Palette.accent-foreground : Palette.foreground;
                             accessible-role: none;
                         }
                         HorizontalLayout {
@@ -978,7 +984,7 @@ export component AppWindow inherits Window {
                                 font-family: root.mono-font;
                                 vertical-alignment: center;
                                 horizontal-stretch: 1;
-                                color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                                color: row.selected ? Palette.accent-foreground : Palette.foreground;
                                 accessible-role: none;
                             }
                         }
@@ -987,7 +993,7 @@ export component AppWindow inherits Window {
                             text: row.path;
                             overflow: elide;
                             vertical-alignment: center;
-                            color: row.selected ? Palette.selection-foreground : Palette.foreground;
+                            color: row.selected ? Palette.accent-foreground : Palette.foreground;
                             accessible-role: none;
                         }
                     }
@@ -998,6 +1004,7 @@ export component AppWindow inherits Window {
         // The details pane (`updateDetails`): the path, then the details.
         Rectangle {
             height: 5 * Theme.row-height;
+            background: Palette.control-background;
             border-width: 1px;
             border-color: Palette.border;
             ScrollView {
@@ -1199,7 +1206,7 @@ export component AppWindow inherits Window {
                     content-y <=> profile-list.scroll;
                     for p[i] in root.profiles: Rectangle {
                         height: 22px;
-                        background: i == root.profile-selected ? Palette.selection-background : transparent;
+                        background: i == root.profile-selected ? Palette.accent-background : transparent;
                         accessible-role: list-item;
                         accessible-label: p.name;
                         accessible-item-selectable: true;
@@ -1218,14 +1225,14 @@ export component AppWindow inherits Window {
                                 text: p.name;
                                 vertical-alignment: center;
                                 overflow: elide;
-                                color: i == root.profile-selected ? Palette.selection-foreground : Palette.foreground;
+                                color: i == root.profile-selected ? Palette.accent-foreground : Palette.foreground;
                                 accessible-role: none;
                             }
                             Text {
                                 text: p.label;
                                 vertical-alignment: center;
                                 overflow: elide;
-                                color: i == root.profile-selected ? Palette.selection-foreground : Palette.foreground;
+                                color: i == root.profile-selected ? Palette.accent-foreground : Palette.foreground;
                                 accessible-role: none;
                             }
                         }
@@ -1623,7 +1630,7 @@ export component AppWindow inherits Window {
                                     text: cell;
                                     vertical-alignment: center;
                                     overflow: elide;
-                                    color: i == root.editor-selected ? Palette.selection-foreground : Palette.foreground;
+                                    color: i == root.editor-selected ? Palette.accent-foreground : Palette.foreground;
                                     accessible-role: none;
                                 }
                             }
@@ -1743,7 +1750,7 @@ export component AppWindow inherits Window {
                                     text: v;
                                     vertical-alignment: center;
                                     overflow: elide;
-                                    color: i == root.pe-item ? Palette.selection-foreground : Palette.foreground;
+                                    color: i == root.pe-item ? Palette.accent-foreground : Palette.foreground;
                                     accessible-role: none;
                                 }
                             }
@@ -1855,7 +1862,7 @@ export component AppWindow inherits Window {
                         overflow: elide;
                         font-weight: r.kind == 0 ? 700 : 400;
                         font-italic: r.kind == 1;
-                        color: i == root.tree-selected ? Palette.selection-foreground : Palette.foreground;
+                        color: i == root.tree-selected ? Palette.accent-foreground : Palette.foreground;
                         accessible-role: none;
                     }
                 }
@@ -2038,7 +2045,7 @@ export component DocWindow inherits Window {
                     accessible-label: "Sections";
                     for name[i] in root.pages: Rectangle {
                         height: tab-name.preferred-height + 8px;
-                        background: i == root.current ? Palette.selection-background : transparent;
+                        background: i == root.current ? Palette.accent-background : transparent;
                         accessible-role: tab;
                         accessible-label: name;
                         accessible-item-selectable: true;
@@ -2056,12 +2063,13 @@ export component DocWindow inherits Window {
                             font-weight: 700;
                             horizontal-alignment: right;
                             vertical-alignment: center;
-                            color: i == root.current ? Palette.selection-foreground : Palette.foreground;
+                            color: i == root.current ? Palette.accent-foreground : Palette.foreground;
                             accessible-role: none;
                         }
                     }
                 }
                 Rectangle {
+                    background: Palette.control-background;
                     border-width: 1px;
                     border-color: Palette.border;
                     text := ListView {
