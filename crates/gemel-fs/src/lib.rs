@@ -15,12 +15,13 @@
 //! terminal's modes), and sending a child `SIGTERM`, and on Windows
 //! pseudo-consoles (`CreatePseudoConsole`) and starting a process on one
 //! (`CreateProcessW` with its attributes, `SearchPathW`, pipes, and waiting
-//! for and ending it).
+//! for and ending it), and extended attributes (`getxattr` and the rest)
+//! and macOS's ACLs (`acl_get_file` and the rest, declared in [`acl`]).
 //!
 //! Not ported yet: AppleDouble files (resource forks on volumes without
-//! them), reading and setting ACLs, and block cloning on Windows (see
-//! [`reflink`]).
+//! them), Windows' ACLs, and block cloning on Windows (see [`reflink`]).
 
+pub mod acl;
 #[cfg(windows)]
 pub mod conpty;
 pub mod fileinfo;
