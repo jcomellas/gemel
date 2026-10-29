@@ -84,7 +84,8 @@ scripts/oracle.sh /path/to/unison --count 30
 | `--client-args ARGS` | More arguments for both clients, split at spaces (`-debug remote+`) |
 | `--ssh-config FILE` | With `--remote ssh`, go through a real ssh and sshd with this client configuration (Unix) |
 | `--xattrs` | Set and remove extended attributes too, and synchronise them (see below; Linux and macOS) |
-| `--refused` | With `--xattrs`, every sync must refuse them instead, as with a 2.52 server |
+| `--acls` | Add and remove ACL entries too, and synchronise ACLs (see below; macOS) |
+| `--refused` | With `--xattrs` or `--acls`, every sync must refuse them instead, as with a 2.52 server |
 | `--dump` | Print what each sync printed, in full, where it differs |
 
 A scenario that differs prints its operations and the first difference in
@@ -203,6 +204,25 @@ cargo run -p gemel-oracle -- --remote ssh --reference "$(which unison)" \
 ```
 
 A candidate that runs unison with `-xattrs=false` last fails every
+scenario.
+
+## ACLs
+
+With `--acls`, on macOS, scenarios add ACL entries to files and
+directories with `chmod +a`, and remove extended ACLs with `chmod -N`,
+and every sync gets `-acl=true` (milestone 5, phase 2). The entries
+only allow, so that the harness can still change and remove what they
+are on, and one is inherited by what a directory gets. Snapshots add
+each path's extended ACL, as `acl_to_text` writes it; the changes wait
+a second after the first sync, as with xattrs; and a run in which no
+replica ended with an ACL fails. `--xattrs` and `--acls` go together.
+
+```sh
+cargo run -p gemel-oracle -- --remote ssh --reference "$(which unison)" \
+    --candidate-server target/debug/gemel --acls --xattrs --count 10
+```
+
+A candidate that runs unison with `-acl=false` last fails every
 scenario.
 
 ## Recorded outcomes, for Windows
