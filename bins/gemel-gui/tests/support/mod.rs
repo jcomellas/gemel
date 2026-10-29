@@ -99,15 +99,15 @@ pub fn items(ui: &AppWindow) -> Vec<Item> {
     out
 }
 
-/// The buttons labelled `label`.
-fn buttons(ui: &AppWindow, label: &str) -> Vec<ElementHandle> {
+/// The buttons labelled `label`, in any window.
+fn buttons(ui: &impl ComponentHandle, label: &str) -> Vec<ElementHandle> {
     ElementHandle::find_by_accessible_label(ui, label)
         .filter(|e| e.accessible_role() == Some(AccessibleRole::Button))
         .collect()
 }
 
 /// Whether a button labelled `label` is shown and enabled.
-pub fn can_press(ui: &AppWindow, label: &str) -> bool {
+pub fn can_press(ui: &impl ComponentHandle, label: &str) -> bool {
     buttons(ui, label)
         .iter()
         .any(|b| b.accessible_enabled() != Some(false))
@@ -115,7 +115,7 @@ pub fn can_press(ui: &AppWindow, label: &str) -> bool {
 
 /// Presses the button labelled `label`, as a screen reader would: whether
 /// there was one, enabled.
-pub fn press(ui: &AppWindow, label: &str) -> bool {
+pub fn press(ui: &impl ComponentHandle, label: &str) -> bool {
     match buttons(ui, label)
         .into_iter()
         .find(|b| b.accessible_enabled() != Some(false))

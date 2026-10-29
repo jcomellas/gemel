@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use gemel_ui_api::clroot::{self, Clroot};
 use gemel_ui_api::exit_code::ExitCode;
+use gemel_ui_api::manual::{self, Section};
 use gemel_ui_api::session::{
     self, Command, Config, Event, Favor, IgnoreKind, ItemView, LogKind, NewProfile, Overrides,
     Progress, Question, Reply, RootNames, SetAction, Settings, SortKind, Summary, Traffic, Updates,
@@ -50,7 +51,8 @@ pub mod ui {
 }
 
 use ui::{
-    AppWindow, DiffLine, DiffWindow, ProfileKey, ProfileRow, RowData, StatsWindow, SummaryEntry,
+    AppWindow, DiffLine, DiffWindow, DocTopic, DocWindow, ProfileKey, ProfileRow, RowData,
+    StatsWindow, SummaryEntry,
 };
 
 /// How the window starts its session.
@@ -78,6 +80,12 @@ impl Startup {
             host_name: None,
         }
     }
+}
+
+/// The manual's sections that have a topic, as the documentation window
+/// and the Help menu show them.
+fn doc_pages() -> impl Iterator<Item = &'static Section> {
+    manual::sections().filter(|s| !s.short.is_empty() && !s.name.is_empty())
 }
 
 /// `myNameCapitalized`.
@@ -347,6 +355,11 @@ pub struct App {
     stats_window: StatsWindow,
     /// The diffs shown, each a window of its own.
     diffs: RefCell<Vec<DiffWindow>>,
+    /// The manual's window.
+    doc_window: DocWindow,
+    /// How far down each of its pages was shown, as a page of GTK's
+    /// notebook keeps it.
+    doc_scrolls: RefCell<Vec<f32>>,
     /// The Unison directory, where the profiles are; none without a
     /// session.
     unison_dir: Option<PathBuf>,
@@ -424,10 +437,13 @@ impl App {
             stats_timer: slint::Timer::default(),
             stats_window: StatsWindow::new()?,
             diffs: RefCell::default(),
+            doc_window: DocWindow::new()?,
+            doc_scrolls: RefCell::default(),
             unison_dir,
             weak: RefCell::default(),
         });
         *app.weak.borrow_mut() = Rc::downgrade(&app);
+        app.set_up_documentation();
         app.wire();
         app.refresh_groups();
         app.refresh_stats();
@@ -478,6 +494,66 @@ impl App {
     /// The statistics window.
     pub fn stats_window(&self) -> &StatsWindow {
         &self.stats_window
+    }
+
+    /// The manual's window.
+    pub fn doc_window(&self) -> &DocWindow {
+        &self.doc_window
+    }
+
+    /// `documentation`: the manual's window, at the section `sect` names,
+    /// or the first for `""`. There is one window: if it is open, it is
+    /// brought back, where it was if `sect` names no section.
+    pub fn documentation(&self, sect: &str) {
+        let page = if sect.is_empty() {
+            Some(0)
+        } else {
+            doc_pages().position(|s| s.short == sect)
+        };
+        let open = self.doc_window.window().is_visible();
+        if !open {
+            // A new window, each page at its top.
+            *self.doc_scrolls.borrow_mut() = vec![0.; doc_pages().count()];
+            self.doc_window.set_scroll(0.);
+        }
+        match page {
+            Some(p) => self.doc_page(p),
+            None if !open => self.doc_page(0),
+            None => {}
+        }
+        let _ = self.doc_window.show();
+    }
+
+    /// Shows page `i` of the manual's window, as far down as it was.
+    fn doc_page(&self, i: usize) {
+        let Some(s) = doc_pages().nth(i) else {
+            return;
+        };
+        let w = &self.doc_window;
+        let mut scrolls = self.doc_scrolls.borrow_mut();
+        if let Some(y) = scrolls.get_mut(w.get_current() as usize) {
+            *y = w.get_scroll();
+        }
+        w.set_current(i as i32);
+        let lines: Vec<SharedString> = s.text.lines().map(Into::into).collect();
+        w.set_lines(ModelRc::new(VecModel::from(lines)));
+        w.set_scroll(scrolls.get(i).copied().unwrap_or(0.));
+    }
+
+    /// The manual's window and the Help menu (`addDocSection`): the
+    /// sections with a topic, About first.
+    fn set_up_documentation(&self) {
+        let w = &self.doc_window;
+        let names: Vec<SharedString> = doc_pages().map(|s| s.name.into()).collect();
+        w.set_pages(ModelRc::new(VecModel::from(names)));
+        w.set_mono_font(self.ui.get_mono_font());
+        let topics: Vec<DocTopic> = doc_pages()
+            .map(|s| DocTopic {
+                short: s.short.into(),
+                name: s.name.into(),
+            })
+            .collect();
+        self.ui.set_doc_topics(ModelRc::new(VecModel::from(topics)));
     }
 
     /// Starts the timer that applies what the session sends (~60 Hz); it
@@ -2292,6 +2368,17 @@ impl App {
                 if s.ui.get_dialog() == 0 && s.ui.get_rescan_enabled() {
                     s.recheck();
                 }
+            })
+        });
+        let w = with.clone();
+        ui.on_documentation(move |topic| w(&|s| s.documentation(&topic)));
+        let w = with.clone();
+        self.doc_window
+            .on_select(move |i| w(&|s| s.doc_page(i as usize)));
+        let w = with.clone();
+        self.doc_window.on_close(move || {
+            w(&|s| {
+                let _ = s.doc_window.hide();
             })
         });
         let w = with.clone();

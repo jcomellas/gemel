@@ -12,7 +12,7 @@ use std::time::Duration;
 use gemel_gui::App;
 use gemel_ui_api::session::{Command, Event, Progress, SetAction, Summary};
 use gemel_ui_api::uicommon::Action;
-use i_slint_backend_testing::{AccessibleRole, ElementQuery};
+use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementQuery};
 use slint::platform::Key;
 use slint::{ComponentHandle, LogicalSize, Model};
 
@@ -278,6 +278,76 @@ fn without_a_profile_the_profile_manager_opens() {
     assert!(ui.get_profile_root2().ends_with("b-b"));
     assert!(press(ui, "Quit"));
     assert_eq!(app.exit_code(), Some(0));
+}
+
+/// The manual (`documentation`, `addDocSection`): the Help menu's
+/// sections, and the manual's window. Help in the profile manager opens
+/// it at About, and a section opens it there. Each page is shown as far
+/// down as it was. There is one window: a section it hasn't leaves it
+/// where it is, until it is closed.
+#[test]
+fn the_manual_has_a_window_of_its_own() {
+    let work = support::Work::new("window-doc");
+    profiles(&work.0, &["a"]);
+    let (app, out) = support::window(&work.0.join("unison"), Vec::new());
+    let ui = app.ui();
+    let _ticks = app.start_ticks();
+    assert!(wait_until(WAIT, || ui.get_dialog() == 6), "{}", out.text());
+    let topics: Vec<String> = ui
+        .get_doc_topics()
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert_eq!(
+        topics,
+        [
+            "About Gemel",
+            "People",
+            "Obtaining Unison",
+            "Community, Maintenance, and Development",
+            "Copying",
+            "Acknowledgements",
+            "Upgrading",
+            "Tutorial",
+            "Basic Concepts",
+            "Invariants",
+            "Running Unison",
+        ]
+    );
+    let w = app.doc_window();
+    let first_line = || w.get_lines().row_data(0).unwrap().to_string();
+    assert!(!w.window().is_visible());
+    assert!(press(ui, "Help"));
+    assert!(w.window().is_visible());
+    assert_eq!(w.get_current(), 0);
+    assert_eq!(first_line(), "Gemel File Synchronizer");
+    ui.invoke_documentation("running".into());
+    assert_eq!(w.get_current(), 10);
+    assert_eq!(first_line(), "Running Unison");
+    w.set_scroll(-500.);
+    // A tab, as a screen reader chooses it.
+    let tab = ElementHandle::find_by_accessible_label(w, "Tutorial")
+        .find(|e| e.accessible_role() == Some(AccessibleRole::Tab))
+        .unwrap();
+    tab.invoke_accessible_default_action();
+    assert_eq!(w.get_current(), 7);
+    assert_eq!(first_line(), "Tutorial");
+    // Each page is shown as far down as it was.
+    assert_eq!(w.get_scroll(), 0.);
+    ui.invoke_documentation("nosuch".into());
+    assert_eq!(w.get_current(), 7);
+    w.invoke_select(10);
+    // The list may move it a little as it lays the page out again.
+    assert!(w.get_scroll() < -400., "{}", w.get_scroll());
+    assert!(press(w, "Close"));
+    assert!(!w.window().is_visible());
+    ui.invoke_documentation("nosuch".into());
+    assert!(w.window().is_visible());
+    assert_eq!(w.get_current(), 0);
+    assert_eq!(w.get_scroll(), 0.);
+    ui.invoke_documentation("running".into());
+    assert_eq!(w.get_scroll(), 0.);
+    app.quit(0);
 }
 
 /// The assistant (`createProfile`) makes a local profile, which the
