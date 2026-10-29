@@ -1390,25 +1390,46 @@ impl Props {
 /// The process umask (0o077 on Windows, where OCaml uses rw------- and
 /// rwx------ defaults), read once, as OCaml reads it when it starts.
 ///
-/// Reading it means setting it (to 0) and back, and a file another thread
-/// creates in between gets the wrong mode, so it isn't read again. On
-/// Linux it is read from `/proc/self/status`, without setting it.
+/// Reading it with `umask` means setting it (to 0) and back, and a file
+/// another thread creates in between gets the wrong mode. So it is read
+/// without setting it: on Linux from `/proc/self/status`, elsewhere from
+/// the mode a new file gets. Setting it is left for when neither works.
 #[cfg(unix)]
 fn umask() -> i64 {
     static UMASK: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
-    *UMASK.get_or_init(|| proc_umask().unwrap_or_else(swap_umask))
+    *UMASK.get_or_init(|| read_umask().unwrap_or_else(swap_umask))
 }
 
 #[cfg(target_os = "linux")]
-fn proc_umask() -> Option<i64> {
+fn read_umask() -> Option<i64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find_map(|l| l.strip_prefix("Umask:"))?;
     i64::from_str_radix(line.trim(), 8).ok()
 }
 
+/// The bits the umask takes from a file created rwxrwxrwx, in a directory
+/// of its own (so that no default ACL of a shared one applies).
 #[cfg(all(unix, not(target_os = "linux")))]
-fn proc_umask() -> Option<i64> {
-    None
+fn read_umask() -> Option<i64> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "gemel-umask-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).ok()?;
+    let file = dir.join("probe");
+    let mode = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o777)
+        .open(&file)
+        .and_then(|f| f.metadata())
+        .map(|m| m.permissions().mode());
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_dir(&dir);
+    Some(i64::from(0o777 & !mode.ok()?))
 }
 
 #[cfg(unix)]
@@ -1568,10 +1589,17 @@ mod tests {
         }
     }
 
-    /// Linux's record of the umask is the umask.
-    #[cfg(target_os = "linux")]
+    /// Linux's record of the umask, or the mode a new file gets, is the
+    /// umask, as a shell started from here reports it (not swapped here,
+    /// which would race with the other tests' files).
+    #[cfg(unix)]
     #[test]
     fn the_umask_is_read_without_setting_it() {
-        assert_eq!(proc_umask(), Some(swap_umask()));
+        let out = std::process::Command::new("sh")
+            .args(["-c", "umask"])
+            .output()
+            .unwrap();
+        let shell = i64::from_str_radix(String::from_utf8(out.stdout).unwrap().trim(), 8).unwrap();
+        assert_eq!(read_umask(), Some(shell));
     }
 }
