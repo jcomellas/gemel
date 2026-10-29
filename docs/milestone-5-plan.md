@@ -1,6 +1,6 @@
 # Milestone 5: platform polish
 
-*Status: in progress (phase 1a, 2026-10-29) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 1b, 2026-10-29) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 5 is step 5 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): platform polish. It takes what earlier milestones moved here:
 - synchronising extended attributes and ACLs, cut since milestone 2;
@@ -100,6 +100,27 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - **`trusted.*`:** setting it needs `CAP_SYS_ADMIN`, which neither CI's runner nor Docker's root has, so the test for other namespaces says so and stops; the mangling's unit test runs everywhere;
   - **macOS** adds `com.apple.provenance` to files on its own. It is synchronised as OCaml synchronises it, and the tests look only at their own attributes.
 - **Against OCaml** (`gemel-engine`'s `xattrs_propagate_like_ocaml`): attributes set, changed and removed on a file whose contents are the same, large ones, a new file's, a directory's, the other way, and one that `xattrignore` leaves alone, directly, in loopback and with a remote root. OCaml syncs a twin to the same attributes; it finds nothing to do on gemel's replicas, with fast checking and without; and gemel finds nothing to do on OCaml's. On macOS against 2.54.0, and on Linux against `8772d26`.
+
+**Notes (phase 1b, 2026-10-29):**
+- **A bug from 1a, found by the first mixed pairing:** `prepareCommit` hashed the archive with the default props settings, which leave xattrs out, where OCaml's `Props.hash` counts them when they are synchronised. So with `xattrs = true`, every sync between an OCaml end and a gemel end stopped at the commit ("New archives are not identical"). Phase 1a's test had OCaml check gemel's replicas and archives, but never had both at the ends of one sync; gemel at both ends left the xattrs out on both sides. Fixed, and the oracle's mixed pairings now check it.
+- **The props data is `Propsdata`'s stores:**
+  - the host's xattr store, which its scans share;
+  - an ACL store, a host state of its own: the archive being written out is borrowed from the archive cache, so the store can't live there.
+
+  Loading an archive sets them, and empties the xattr store, which archives don't keep. Writing one keeps the ACL texts it uses. After update detection, the `propsdata` command sends each host's new values to the other, so a copy finds cached values without `propsExtData`.
+- **An archive that hasn't changed on disk isn't loaded again,** as in OCaml (`archiveUnchanged`), so the xattr store lasts from one sync to the next in a session.
+- **The oracle, `--xattrs`:**
+  - scenarios set and remove `gemel.a`, `gemel.b` and `gemel.c` on files and directories, with values empty, kept in the props, kept by digest, and too long to cache;
+  - snapshots show those attributes only, since macOS's `com.apple.provenance` differs by the program that made the file;
+  - the changes wait a second after the first sync, for macOS's whole-second change times;
+  - a run that ends with no attributes at all fails.
+
+  Without the flag, scenarios and snapshots are unchanged, and so are the recordings. `--refused` expects every sync to be refused instead.
+- **Pairings,** all agreeing:
+  - **Linux, in Docker:** `8772d26` against itself, and with gemel as the client, the server and both; gemel with 2.53.8 at the other end, both ways; locally, over ssh and on a socket. A gemel client with a 2.52.1 server is refused as OCaml's client is.
+  - **macOS,** against Homebrew's 2.54.0: the same, but 2.53.8 and 2.52.1.
+  - **CI's oracle job** runs these pairings, with 2.53.8 against the pinned source too.
+- **Not done:** a 2.52.1 client with a gemel server, since 2.52 has no `xattrs` preference to ask with.
 
 ### Phase 2: ACLs (`props.ml`'s `ACL`, ~0.2k; `props_acl.c`, ~0.8k)
 
