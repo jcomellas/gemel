@@ -200,7 +200,8 @@ fn a_sync_goes_through_the_session() {
 }
 
 /// A profile without roots asks for them (`getFirstRoot`,
-/// `getSecondRoot`).
+/// `getSecondRoot`, whose Help says how, over it, and leaves what was
+/// typed).
 #[test]
 fn roots_are_asked_for() {
     let work = support::Work::new("window-roots");
@@ -224,6 +225,25 @@ fn roots_are_asked_for() {
     assert_eq!(
         (ui.get_dialog(), ui.get_root_error()),
         (3, "Please enter a port".into())
+    );
+    assert!(press(ui, "Help"));
+    assert_eq!(
+        (ui.get_dialog(), ui.get_dialog_title()),
+        (1, "Picking roots".into())
+    );
+    let help = ui.get_dialog_message();
+    assert!(
+        help.starts_with("Gemel can synchronize a local directory"),
+        "{help}"
+    );
+    assert!(
+        help.contains("(Use \"gemel -socket xxx\" on the remote machine"),
+        "{help}"
+    );
+    assert!(press(ui, "OK"));
+    assert_eq!(
+        (ui.get_dialog(), ui.get_root_kind(), ui.get_root_host()),
+        (3, 2, "localhost".into())
     );
     ui.set_root_kind(0);
     ui.set_root_dir(dir.join("b").display().to_string().into());

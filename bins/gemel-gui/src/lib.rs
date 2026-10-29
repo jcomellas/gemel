@@ -119,6 +119,37 @@ fn try_again_message() -> String {
     )
 }
 
+/// `helpmessage`, `getSecondRoot`'s Help, with its lines. As in the
+/// assistant, the command to start a server is the program's,
+/// `gemel -socket xxx`, where OCaml capitalizes it.
+fn root_help_message() -> String {
+    let (name, cmd) = (my_name_capitalized(), MY_NAME);
+    format!(
+        "{name} can synchronize a local directory with another local directory, or with\n\
+         a directory on a remote machine. You can also synchronize a single file\n\
+         by entering a file name instead of a directory.\n\
+         \n\
+         To synchronize with a local directory, just enter the file name.\n\
+         \n\
+         To synchronize with a remote directory, you must first choose a protocol\n\
+         that {name} will use to connect to the remote machine.  Each protocol has\n\
+         different requirements:\n\
+         \n\
+         1) To synchronize using SSH, there must be an SSH client installed on\n\
+         this machine and an SSH server installed on the remote machine.  You\n\
+         must enter the host to connect to, a user name (if different from\n\
+         your user name on this machine), and the directory on the remote machine\n\
+         (relative to your home directory on that machine).\n\
+         \n\
+         2) To synchronize using {name}'s socket protocol, there must be a {name}\n\
+         server running on the remote machine, listening to the port that you\n\
+         specify here.  (Use \"{cmd} -socket xxx\" on the remote machine to\n\
+         start the {name} server.)  You must enter the host, port, and the directory\n\
+         on the remote machine (relative to the working directory of the\n\
+         {name} server running on that machine)."
+    )
+}
+
 // ---- The rows ----
 
 /// Exposes the [`ReconTable`] to Slint without copying it: rows are built
@@ -803,14 +834,6 @@ impl App {
             .collect();
         self.ui
             .set_summary_entries(ModelRc::new(VecModel::from(entries)));
-        if d.kind != 1 {
-            self.ui.set_root_dir(SharedString::new());
-            self.ui.set_root_kind(0);
-            self.ui.set_root_host(SharedString::new());
-            self.ui.set_root_user(SharedString::new());
-            self.ui.set_root_port(SharedString::new());
-            self.ui.set_root_error(SharedString::new());
-        }
         if let OnAnswer::Password { root, editable, .. } = &d.on {
             self.ui.set_password_root(root.as_str().into());
             self.ui.set_password_editable(*editable);
@@ -896,6 +919,7 @@ impl App {
                 if ok {
                     let dir = self.ui.get_root_dir().trim().to_owned();
                     let first = Clroot::ConnectLocal(Some(dir)).to_string();
+                    self.clear_root();
                     self.state.borrow_mut().dialogs.push_front(Dialog {
                         kind: 3,
                         title: "Root selection".to_owned(),
@@ -930,6 +954,28 @@ impl App {
         if !self.quitting.get() {
             self.show_dialog();
         }
+    }
+
+    /// Empties the root selection's fields, for a root to be asked for.
+    /// (Not as its card is shown, which it is again after its Help.)
+    fn clear_root(&self) {
+        self.ui.set_root_dir(SharedString::new());
+        self.ui.set_root_kind(0);
+        self.ui.set_root_host(SharedString::new());
+        self.ui.set_root_user(SharedString::new());
+        self.ui.set_root_port(SharedString::new());
+        self.ui.set_root_error(SharedString::new());
+    }
+
+    /// `getSecondRoot`'s Help: how roots are picked, over its card.
+    fn root_help(&self) {
+        self.push_dialog_front(Dialog::message(
+            "Picking roots",
+            &root_help_message(),
+            "OK",
+            "",
+            OnAnswer::Close,
+        ));
     }
 
     /// `getSecondRoot`'s `getRoot`: the root typed, or what is wrong with
@@ -1108,15 +1154,18 @@ impl App {
             Question::Warning(w, r) => {
                 Dialog::message("Warning", &w, "OK", "Quit", OnAnswer::Warning(r))
             }
-            Question::Roots(r) => Dialog {
-                kind: 2,
-                title: "Root selection".to_owned(),
-                message: try_again_message(),
-                ok: "OK",
-                cancel: "Cancel",
-                on: OnAnswer::FirstRoot(r),
-                entries: Vec::new(),
-            },
+            Question::Roots(r) => {
+                self.clear_root();
+                Dialog {
+                    kind: 2,
+                    title: "Root selection".to_owned(),
+                    message: try_again_message(),
+                    ok: "OK",
+                    cancel: "Cancel",
+                    on: OnAnswer::FirstRoot(r),
+                    entries: Vec::new(),
+                }
+            }
             Question::Password { root, text, reply } => {
                 // `getPassword`: more of what ssh prints goes to the dialog
                 // already open for the root (whose answer is the one that
@@ -2938,6 +2987,8 @@ impl App {
         ui.on_quit(move || w(&|s| s.safe_exit()));
         let w = with.clone();
         ui.on_dialog_done(move |ok| w(&|s| s.dialog_done(ok)));
+        let w = with.clone();
+        ui.on_root_help(move || w(&|s| s.root_help()));
         let w = with.clone();
         ui.on_browse_root(move || {
             w(&|s| {
