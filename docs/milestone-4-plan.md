@@ -1,6 +1,6 @@
 # Milestone 4: GUI
 
-*Status: in progress (phase 4a, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 4b, 2026-10-29) · Follows milestone 3 (remote roots, PRs #30–#46) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 4 is step 4 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): the GUI. It ends with `gemel-gui` doing what OCaml's GTK interface (`uigtk3.ml`, ~4.8k) does, on the engine through the session contract, with ssh's prompts in it, on macOS, Linux and Windows. Today `gemel-gui` is the Slint spike of §6 of the analysis, fed by a fake engine.
 
@@ -508,6 +508,28 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **The close button** already went through `safeExit`; a test now checks it, while idle and while working.
 - **Window tests:** the keys in the manager, the editor, the edit dialog, the tree and the documentation window; Escape over a list; the close button.
 
+**Notes (phase 4b, 2026-10-29):**
+- **The screenshots:** `tests/screenshots.rs` in `gemel-gui` drives the window through `uigtk3`'s flows, as the window tests do, on Slint's testing backend with its software renderer (`support::init_drawn`), in the system's fonts. It writes 48 PNGs to `target/tmp/screenshots`:
+  - the main window: the items, an action changed, all selected, a sync's progress, synced;
+  - each card: a warning, an error, "Premature exit", the summary with its details, ssh's password, the roots (local, ssh, socket), the profile manager, the assistant's pages, and the editor's (its list, each kind of value, the tree, the longest documentation scrolled to its end, deleting);
+  - the other windows: a diff, the statistics, and each page of the manual.
+
+  CI keeps them for each system (`screenshots-<os>`). Each shot waits for the style's animations to end, and checks that it isn't blank and that a card's controls (buttons, fields, lists, choices) lie within the card. The menu bar is Slint's own, drawn in the window as on Linux and Windows; macOS's native one and `rfd`'s pickers aren't drawn.
+- **What they showed, fixed:**
+  - **The lists over their cards:** `KeyedList` (4a) is a `FocusScope`, which isn't a layout, so its framed list had no height in its card's layout; the profile manager's, the editor's and the tree's lists were drawn over their labels. It now has the list's height. Checked: the manager's list lies between its label and the summary.
+  - **Cards cut short:** in a layout in a card, Slint 1.18 counts a word-wrapped text as one line, so the assistant's ssh page put its buttons below the card. Such texts are `Para`s now, at least as tall as their own preferred height (dialog 1's message already was).
+  - **The second root's fields:** its row of kind, host, user and port was wider than the card. `uigtk3` has the kind's radio buttons in a row of their own; here the kind, then the host and the port, then the user, each a row.
+  - **The progress text** was drawn over the style's progress bar, a thin line. It is above it now.
+- **macOS's own Quit:** AppKit quits with `terminate:` (the application menu's Quit, which Slint always adds with Cmd-Q; the Dock's; logging out). winit's delegate has no `applicationShouldTerminate:`, so AppKit ended the program at once: measured while contacting a server, exit 0 with no question, and mid-sync it would leave the archives locked. `src/macos.rs` adds the method to the delegate's class: while nothing is going on, AppKit ends the program at once, as Quit would; otherwise it cancels, and the window's Quit runs (`safeExit`), which asks. It is gemel-gui's only `unsafe` (decided 2026-10-29), through `objc2`, which `rfd` and Slint's menus already use. Measured again: while busy, "Premature exit" comes up and the program goes on (seen in its window); while idle, it ends with 0, nothing locked. Logging out is cancelled only while gemel-gui works.
+- **Checked, nothing to change:**
+  - a card's text fields keep Ctrl-A (Cmd-A): Select All is disabled whenever such a card can be up (a test);
+  - the longest preference documentation scrolls to its end.
+- **Left for a person,** on each system, with the real backend:
+  - the look against the PNGs (fonts, high-DPI);
+  - macOS's menu bar: the application menu (its name, About), and which Quit a typed Cmd-Q reaches (both are Cmd-Q, and both ask now);
+  - `rfd`'s pickers (Browse… in the roots and the assistant);
+  - a run on Windows, and on Linux under X11 and Wayland.
+
 ## Verification
 
 - **The session's additions:** tests in `gemel-ui-api`, without a toolkit; prompts against an ssh shim. The bytes each side sent are checked against the bytes on the connection, not against OCaml, whose text interface doesn't print them.
@@ -531,5 +553,5 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 | ConPTY behaves differently from Unix pseudo-terminals | `terminal.ml`'s Windows code is the reference. A Windows test runs if CI's runner allows it (phase 2) |
 | Snapshots of 50k items, and sorting them on the engine thread | The spike's numbers were for 50k rows in the GUI. Phase 4 measures them through the session; sending only the changed items is the fallback |
 | Pseudo-terminals add `unsafe` | Kept in `gemel-fs`, behind safe functions, with tests on each system |
-| Checking by eye and with screen readers needs an unlocked session and a person | Screenshots in phase 4. The VoiceOver and Narrator pass moves to M5 (decided 2026-10-24) |
+| Checking by eye and with screen readers needs an unlocked session and a person | Screenshots drawn headless by the tests, on each system in CI (phase 4b); the real backends looked at by a person. The VoiceOver and Narrator pass moves to M5 (decided 2026-10-24) |
 | Slint is pinned at 1.18.1 | It stays pinned unless a phase needs a newer release; that upgrade is a commit of its own |
