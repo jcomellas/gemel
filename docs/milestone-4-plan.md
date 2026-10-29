@@ -418,6 +418,7 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **The Help menu** (`addDocSection`) has an item for each of those sections. **Help in the profile manager** opens the window at About, the page that `uigtk3`'s `""` finds.
 - **Window test:** the Help menu's sections; Help in the manager; a section asked for; a tab chosen as a screen reader chooses it; each page's place; a section the window hasn't; and Close.
 - **A test fixed:** `gemel-fs`'s pseudo-terminal test (phase 2a) closed the master once the child's last words had come, which hung the child up if it hadn't exited yet. It failed now and then on macOS, with the child's output whole; the master is now kept until the child has gone. Another failure was seen once, before that fix, and isn't explained: the output stopped short of the child's last words, so the reading ended early. The test now retries an interrupted read, and its assertions say how the reading ended, should it happen again.
+- **Another test fixed:** `gemel-fsmonitor`'s tests (milestone 2) took the watcher's last lines once it had exited, but only those already passed on by the thread that reads them, so an error line was now and then missed (on macOS CI). They now read the watcher's output to its end.
 
 ### Phase 4: each system, and the rest
 

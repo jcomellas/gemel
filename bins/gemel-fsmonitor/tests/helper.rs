@@ -20,7 +20,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use gemel_compat::fsmonitor_protocol::{Response, quote};
@@ -137,11 +137,21 @@ impl Monitor {
         reported
     }
 
-    /// Closes stdin, and the exit code and last line.
+    /// Closes stdin: the exit code, and the lines not read yet, up to the
+    /// end of the watcher's output. The child may have gone before the
+    /// reader has passed its last lines on.
     fn finish(mut self) -> (Option<i32>, Vec<String>) {
         drop(self.stdin.take());
         let status = self.child.wait().unwrap();
-        (status.code(), self.lines.try_iter().collect())
+        let mut rest = Vec::new();
+        loop {
+            match self.lines.recv_timeout(TIMEOUT) {
+                Ok(l) => rest.push(l),
+                Err(RecvTimeoutError::Disconnected) => break,
+                Err(RecvTimeoutError::Timeout) => panic!("the watcher's output didn't end"),
+            }
+        }
+        (status.code(), rest)
     }
 }
 
