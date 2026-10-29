@@ -12,7 +12,7 @@ use gemel_compat::umarshal::{self, Reader, Writer};
 use crate::fs;
 use crate::fspath::Fspath;
 use crate::osx::{self, InfoKind};
-use crate::props::{Props, PropsConfig, SetKind};
+use crate::props::{Props, PropsConfig, SetKind, XattrCtx};
 use crate::system::{Kind, Stats, SysError};
 
 /// `links`: synchronise symbolic links (`true`/`false`/`default`).
@@ -289,7 +289,7 @@ fn get_aux(
     path: &Path<Local>,
     follow: &dyn Fn(&Path<Local>) -> bool,
     c: &FsConfig,
-    props: &dyn Fn(&Stats, &osx::Info) -> Props,
+    props: &dyn Fn(&Stats, &osx::Info) -> Result<Props, Error>,
 ) -> Result<Info, Error> {
     let what = "querying file information";
     let absent = || -> Result<Info, Error> {
@@ -327,7 +327,7 @@ fn get_aux(
         typ,
         // Truncated to fit a 31-bit OCaml int, as archives store it.
         inode: st.ino & 0x3FFF_FFFF,
-        desc: props(&st, &os_x),
+        desc: props(&st, &os_x)?,
         os_x,
     })
 }
@@ -340,7 +340,10 @@ pub fn get_type(
     follow: &dyn Fn(&Path<Local>) -> bool,
     c: &FsConfig,
 ) -> Result<Typ, Error> {
-    Ok(get_aux(from_root, fspath, path, follow, c, &|_, _| Props::dummy())?.typ)
+    Ok(get_aux(from_root, fspath, path, follow, c, &|_, _| {
+        Ok(Props::dummy())
+    })?
+    .typ)
 }
 
 /// `Fileinfo.getBasic`: with the props `stat` gives.
@@ -352,7 +355,7 @@ pub fn get_basic(
     c: &FsConfig,
 ) -> Result<Info, Error> {
     get_aux(from_root, fspath, path, follow, c, &|st, _| {
-        Props::get_basic(st, &c.props)
+        Ok(Props::get_basic(st, &c.props))
     })
 }
 
@@ -368,20 +371,24 @@ pub fn get_basic_with_ress(
     get_aux(from_root, fspath, path, follow, c, &|st, os_x| {
         let mut p = Props::get_basic(st, &c.props);
         p.type_creator = crate::props::type_creator_get(st, os_x, &c.props);
-        p
+        Ok(p)
     })
 }
 
-/// `Fileinfo.get`: with all the props.
+/// `Fileinfo.get`: with all the props, the xattrs read again unless the
+/// change time is the archive's (`arch`, [`Props::dummy`] when there is
+/// none).
 pub fn get(
     from_root: bool,
     fspath: &Fspath,
     path: &Path<Local>,
     follow: &dyn Fn(&Path<Local>) -> bool,
     c: &FsConfig,
+    arch: &Props,
+    x: &XattrCtx<'_>,
 ) -> Result<Info, Error> {
     get_aux(from_root, fspath, path, follow, c, &|st, os_x| {
-        Props::get(st, os_x, &c.props)
+        Props::get(&fspath.concat(path), st, os_x, &c.props, arch, x)
     })
 }
 
@@ -391,13 +398,14 @@ pub fn check(
     path: &Path<Local>,
     props: &Props,
     c: &FsConfig,
+    x: &XattrCtx<'_>,
 ) -> Result<(), Error> {
     let st = match stat_fn(false, fspath, path, &|_| false) {
         Ok(st) => st,
         Err(StatError::Sys(e)) => return Err(e.to_transient("checking file information")),
         Err(StatError::Transient(e)) => return Err(e),
     };
-    props.check(fspath, path, &st, &c.props)
+    props.check(fspath, path, &st, &c.props, x)
 }
 
 /// What [`set`] starts from.
@@ -418,25 +426,26 @@ pub fn set(
     action: SetAction<'_>,
     new: &Props,
     c: &FsConfig,
+    x: &XattrCtx<'_>,
 ) -> Result<(), Error> {
     let p = &c.props;
     let (kind, props) = match action {
         SetAction::Set(defaults) => (SetKind::Set, defaults.override_with(new, p)),
         SetAction::Copy(old) => (
             SetKind::Set,
-            get(false, fspath, old, &|_| false, c)?
+            get(false, fspath, old, &|_| false, c, &Props::dummy(), x)?
                 .desc
                 .override_with(new, p),
         ),
         SetAction::Update(old) => (
             SetKind::Update,
-            get(false, fspath, path, &|_| false, c)?
+            get(false, fspath, path, &|_| false, c, &Props::dummy(), x)?
                 .desc
                 .override_with(&old.diff(new, p), p),
         ),
     };
-    props.set(fspath, path, kind, p, c.dont_chmod)?;
-    check(fspath, path, &props, c)
+    props.set(fspath, path, kind, p, c.dont_chmod, x)?;
+    check(fspath, path, &props, c, x)
 }
 
 /// `Fileinfo.unchanged`: rereads the info and says whether the data and the
@@ -449,12 +458,13 @@ pub fn unchanged(
     info: &Info,
     follow: &dyn Fn(&Path<Local>) -> bool,
     c: &FsConfig,
+    x: &XattrCtx<'_>,
 ) -> Result<(Info, bool, bool), Error> {
     // The time must be taken before the stat.
     let t0 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0.0, |d| d.as_secs_f64());
-    let info2 = get(true, fspath, path, follow, c)?;
+    let info2 = get(true, fspath, path, follow, c, &info.desc, x)?;
     let data_unchanged = info.desc.same_time(&info2.desc, &c.props)
         && info.stamp(c) == info2.stamp(c)
         && if info2.desc.time.extract() == t0 {

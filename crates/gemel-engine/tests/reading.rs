@@ -133,7 +133,16 @@ fn compare(
     c: &FsConfig,
     out: &mut Vec<String>,
 ) {
-    let mut info = fileinfo::get(true, root, path, &|_| false, c).unwrap();
+    let mut info = fileinfo::get(
+        true,
+        root,
+        path,
+        &|_| false,
+        c,
+        &gemel_fs::props::Props::dummy(),
+        &gemel_fs::props::XattrCtx::standalone(),
+    )
+    .unwrap();
     if target {
         match a {
             Archive::Dir(p, _) => {

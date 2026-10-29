@@ -401,6 +401,7 @@ async fn set_prop_local(
                 SetAction::Update(&old_desc),
                 &new_desc,
                 &ctx.fs,
+                &ctx.xattr.ctx(),
             )
         })
         .await?;
@@ -584,7 +585,14 @@ pub static SET_DIR_PROP: RootCmd<(Fspath, Path<Local>, Props, Props), ()> = Root
     |host, _, (working_dir, path, initial, new)| {
         Box::pin(async move {
             let ctx = Ctx::of(&host)?;
-            fileinfo::set(&working_dir, &path, SetAction::Set(&initial), &new, &ctx.fs)
+            fileinfo::set(
+                &working_dir,
+                &path,
+                SetAction::Set(&initial),
+                &new,
+                &ctx.fs,
+                &ctx.xattr.ctx(),
+            )
         })
     },
 );
@@ -920,7 +928,14 @@ fn create_directories(
         &fspath.concat(&parent),
         Props::dir_default().perm.bits as u32,
     ) {
-        Ok(()) => fileinfo::set(fspath, &parent, SetAction::Copy(&parent), desc, &ctx.fs),
+        Ok(()) => fileinfo::set(
+            fspath,
+            &parent,
+            SetAction::Copy(&parent),
+            desc,
+            &ctx.fs,
+            &ctx.xattr.ctx(),
+        ),
         // Created already, for another path with the same parent.
         Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e.to_transient("creating parent directories")),
@@ -1962,7 +1977,15 @@ impl MergeFiles {
     fn copy(&self, ctx: &Ctx, pairs: &[(&Path<Local>, &Path<Local>)]) -> Result<(), Error> {
         for (src, trg) in pairs {
             self.delete(ctx, trg)?;
-            let info = fileinfo::get(false, &self.working_dir, src, &|_| false, &ctx.fs)?;
+            let info = fileinfo::get(
+                false,
+                &self.working_dir,
+                src,
+                &|_| false,
+                &ctx.fs,
+                &Props::dummy(),
+                &ctx.xattr.ctx(),
+            )?;
             let mut progress = |n| {
                 if let Some(p) = &self.printer {
                     p(self.id, n, "l");
@@ -2279,7 +2302,15 @@ async fn merge_in(
     };
     // A copy of it, in case the merge program overwrites it and crashes.
     if let Some(f) = &arch {
-        let info = fileinfo::get(false, f, &Path::empty(), &|_| false, &ctx.fs)?;
+        let info = fileinfo::get(
+            false,
+            f,
+            &Path::empty(),
+            &|_| false,
+            &ctx.fs,
+            &Props::dummy(),
+            &ctx.xattr.ctx(),
+        )?;
         copy::Progress::none(|p| {
             copy::local_file(
                 ctx,

@@ -34,7 +34,7 @@ use gemel_compat::umarshal::{self, HEADER_SIZE, Reader, Writer};
 use gemel_fs::fileinfo::{self, FsConfig, Info, Stamp};
 use gemel_fs::os::{self, FullFingerprint};
 use gemel_fs::osx::{self, RessStamp};
-use gemel_fs::props::{Filesize, Props, PropsConfig};
+use gemel_fs::props::{Filesize, Props, PropsConfig, XattrCtx};
 use md5::{Digest, Md5};
 
 /// The first line of the cache file.
@@ -328,6 +328,7 @@ impl FpCache {
         known: Option<&FullFingerprint>,
         follow: &dyn Fn(&Path<Local>) -> bool,
         c: &FsConfig,
+        x: &XattrCtx<'_>,
     ) -> Result<Entry, Error> {
         let cached = self.get(path).filter(|(desc, _, stamp, ress)| {
             clearly_unchanged(fast_check, path, info, desc, *stamp, ress, &c.props)
@@ -343,7 +344,8 @@ impl FpCache {
                 let (info, dig) = if faster_check_unsafe && new_file {
                     // The length is the scan's, as in OCaml, not the new stat's.
                     let dig = FullFingerprint::pseudo(path.as_bytes(), info.desc.length());
-                    (fileinfo::get(false, fspath, path, follow, c)?, dig)
+                    let info = fileinfo::get(false, fspath, path, follow, c, &Props::dummy(), x)?;
+                    (info, dig)
                 } else {
                     os::safe_fingerprint(
                         fspath,
@@ -352,6 +354,7 @@ impl FpCache {
                         known.map(|f| f.data.clone()),
                         follow,
                         c,
+                        x,
                     )?
                 };
                 let stamp = info.stamp(c);

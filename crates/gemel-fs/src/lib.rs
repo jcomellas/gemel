@@ -31,6 +31,7 @@ pub mod net;
 pub mod os;
 pub mod osx;
 pub mod props;
+pub mod propsdata;
 #[cfg(unix)]
 pub mod pty;
 pub mod reflink;
