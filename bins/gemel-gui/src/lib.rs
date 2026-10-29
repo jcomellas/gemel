@@ -2219,7 +2219,7 @@ impl App {
                 .collect();
             w.set_lines(ModelRc::new(VecModel::from(lines)));
             let weak = w.as_weak();
-            w.on_close(move || {
+            w.on_close_window(move || {
                 if let Some(w) = weak.upgrade() {
                     let _ = w.hide();
                 }
@@ -2844,7 +2844,7 @@ impl App {
         self.doc_window
             .on_select(move |i| w(&|s| s.doc_page(i as usize)));
         let w = with.clone();
-        self.doc_window.on_close(move || {
+        self.doc_window.on_close_window(move || {
             w(&|s| {
                 let _ = s.doc_window.hide();
             })
@@ -2857,7 +2857,7 @@ impl App {
             })
         });
         let w = with.clone();
-        self.stats_window.on_close(move || {
+        self.stats_window.on_close_window(move || {
             w(&|s| {
                 let _ = s.stats_window.hide();
             })
