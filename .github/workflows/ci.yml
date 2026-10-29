@@ -158,6 +158,31 @@ jobs:
               --candidate target/debug/gemel --candidate-server releases/unison-$v --count 20
           done
         shell: bash
+      # Extended attributes (milestone 5): scenarios that set and remove
+      # them, synchronised with -xattrs=true. Each pairing as above, checked
+      # against itself, then with gemel as the client, the server, or both,
+      # and with 2.53.8, which has them, at the other end. A 2.52.1 server
+      # has none: a client asking for them must be refused, as OCaml's is.
+      - run: |
+          oracle() { cargo run --locked -q -p gemel-oracle -- --xattrs "$@"; }
+          src=unison-src/src/unison
+          oracle --reference $src --count 10
+          oracle --reference $src --candidate target/debug/gemel --count 30
+          for remote in ssh socket; do
+            oracle --remote $remote --reference $src --count 10
+            oracle --remote $remote --reference $src --reference-server releases/unison-2.53.8 --count 10
+            oracle --remote $remote --reference releases/unison-2.53.8 --reference-server $src --count 10
+            oracle --remote $remote --reference $src --candidate-server target/debug/gemel --count 15
+            oracle --remote $remote --reference $src --candidate target/debug/gemel --candidate-server $src --count 15
+            oracle --remote $remote --reference $src --candidate target/debug/gemel --count 15
+            oracle --remote $remote --reference $src --reference-server releases/unison-2.53.8 \
+              --candidate target/debug/gemel --candidate-server releases/unison-2.53.8 --count 10
+            oracle --remote $remote --reference releases/unison-2.53.8 --reference-server $src \
+              --candidate releases/unison-2.53.8 --candidate-server target/debug/gemel --count 10
+            oracle --remote $remote --refused --reference $src --reference-server releases/unison-2.52.1 \
+              --candidate target/debug/gemel --candidate-server releases/unison-2.52.1 --count 3
+          done
+        shell: bash
       # The same over a real ssh and sshd, with keys of their own, on this
       # host (scripts/start-sshd.sh): a gemel client, a gemel server (one
       # item at a time, then concurrently) and gemel at both ends. Each
