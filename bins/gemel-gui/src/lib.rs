@@ -3014,8 +3014,18 @@ impl App {
     }
 }
 
+/// The application's id: the packages' (macOS's bundle identifier, the
+/// Flatpak's id) and, on Linux, the window's.
+const APP_ID: &str = "io.github.jcomellas.gemel";
+
 fn run(args: Vec<String>) -> Result<i32, slint::PlatformError> {
     let app = App::new(Startup::new(args))?;
+    // Linux's desktops find the window's name and icon in the desktop entry
+    // of the same id (packaging/linux). Slint keeps it for the windows it
+    // shows from now on, and needs its backend, which `App::new` started.
+    if let Err(e) = slint::set_xdg_app_id(APP_ID) {
+        eprintln!("gemel-gui: can't set the window's application id: {e}");
+    }
     // macOS's own Quit (the application menu's, the Dock's), as Quit: at
     // once while nothing is going on, after asking otherwise.
     #[cfg(target_os = "macos")]
