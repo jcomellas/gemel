@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Gemel's Windows installer, built by scripts/package-windows.sh with WiX
+  (version 5), which passes:
+  - Version: the workspace's version;
+  - BinDir: the directory of the release binaries;
+  - Root: the checkout;
+  - ThirdParty: the THIRD-PARTY-LICENSES file it wrote.
+
+  It installs gemel-gui.exe, gemel.exe and gemel-fsmonitor.exe, which
+  gemel-gui finds beside itself, with the notices, in Program Files\Gemel,
+  for all users, and a Start menu entry for gemel-gui. The UpgradeCode
+  ties every version together, so that a newer one replaces an older one
+  (MajorUpgrade): it must never change.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Gemel"
+           Manufacturer="gemel"
+           Version="$(var.Version)"
+           UpgradeCode="5D263CA2-BD4D-4CFD-9A4C-10F41F29FF0D"
+           Scope="perMachine"
+           Compressed="yes"
+           Language="1033">
+    <SummaryInformation Description="Gemel, a file synchronizer derived from Unison" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Gemel is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="GemelIcon" SourceFile="$(var.Root)\packaging\windows\gemel.ico" />
+    <Property Id="ARPPRODUCTICON" Value="GemelIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/jcomellas/gemel" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Gemel">
+        <Component Id="GemelGui">
+          <File Id="GemelGuiExe" Source="$(var.BinDir)\gemel-gui.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="GemelCli">
+          <File Id="GemelExe" Source="$(var.BinDir)\gemel.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="GemelFsmonitor">
+          <File Id="GemelFsmonitorExe" Source="$(var.BinDir)\gemel-fsmonitor.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="Notices">
+          <File Id="License" Source="$(var.Root)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+          <File Id="Notice" Source="$(var.Root)\NOTICE" Name="NOTICE.txt" />
+          <File Id="ThirdParty" Source="$(var.ThirdParty)" Name="THIRD-PARTY-LICENSES.txt" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenu">
+        <Shortcut Id="GemelShortcut"
+                  Name="Gemel"
+                  Description="Synchronize files and directories"
+                  Target="[#GemelGuiExe]"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="GemelIcon" />
+        <RegistryValue Root="HKMU"
+                       Key="Software\gemel\Gemel"
+                       Name="StartMenuShortcut"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Gemel">
+      <ComponentRef Id="GemelGui" />
+      <ComponentRef Id="GemelCli" />
+      <ComponentRef Id="GemelFsmonitor" />
+      <ComponentRef Id="Notices" />
+      <ComponentRef Id="StartMenu" />
+    </Feature>
+  </Package>
+</Wix>
