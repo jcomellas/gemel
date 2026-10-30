@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Gemel
+GenericName=File Synchronizer
+Comment=Synchronize files and directories, as Unison does
+Exec=gemel-gui
+Icon=io.github.jcomellas.gemel
+Terminal=false
+Categories=Utility;FileTools;
+Keywords=sync;synchronize;synchronizer;replica;unison;
+StartupWMClass=io.github.jcomellas.gemel
