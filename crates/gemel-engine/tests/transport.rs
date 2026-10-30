@@ -791,7 +791,7 @@ fn set_xattr(root: &StdPath, rel: &str, name: &str, value: &[u8]) {
     gemel_fs::xattr::set(&fspath_of(&root.join(rel)), name.as_bytes(), value).unwrap();
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 fn fspath_of(p: &StdPath) -> gemel_fs::fspath::Fspath {
     gemel_fs::fspath::Fspath::canonize(Some(p.to_str().unwrap().as_bytes())).unwrap()
 }
@@ -894,6 +894,54 @@ fn acls_propagate_like_ocaml() {
                 );
             }
         }
+    }
+}
+
+/// ACLs as SDDL, set, changed and removed on files and directories, and a
+/// new file's, between gemel's ends on Windows, where there is no OCaml
+/// Unison to compare with. Everyone keeps full access, so that the
+/// directories can still be removed.
+#[cfg(windows)]
+#[test]
+fn acls_propagate_on_windows() {
+    const PREFS: [&str; 1] = ["acl = true"];
+    let set = |root: &StdPath, rel: &str, sddl: &str| {
+        gemel_fs::acl::set_text(&fspath_of(&root.join(rel)), sddl.as_bytes()).unwrap();
+    };
+    let acl_of = |root: &StdPath, rel: &str| {
+        let t = gemel_fs::acl::get_text(&fspath_of(&root.join(rel))).unwrap();
+        String::from_utf8(t.unwrap()).unwrap()
+    };
+    let build: fn(&StdPath) = |r| {
+        build_tree(r);
+        for (rel, sddl) in [
+            ("README", "D:P(A;;FA;;;WD)(A;;FR;;;BU)"),
+            ("src/main.c", "D:(A;;FA;;;WD)"),
+            ("src", "D:(A;OICI;FA;;;WD)"),
+        ] {
+            gemel_fs::acl::set_text(&fspath_of(&r.join(rel)), sddl.as_bytes()).unwrap();
+        }
+    };
+    for via in Via::ALL {
+        let what = format!("{via:?}");
+        let dir = TempDir::new("acls-windows");
+        let s = synced(&dir, via, &PREFS, build);
+        for rel in ["README", "src", "src/main.c"] {
+            assert!(!acl_of(&s.b(), rel).is_empty(), "{what}: {rel}");
+            assert_eq!(acl_of(&s.a(), rel), acl_of(&s.b(), rel), "{what}: {rel}");
+        }
+        set(&s.a(), "README", "D:P(A;;FA;;;WD)");
+        set(&s.a(), "src/main.c", "");
+        write(&s.a(), "new-a", "new in a", T0 + 20.0);
+        set(&s.a(), "new-a", "D:P(A;;FA;;;WD)(A;;FR;;;BU)");
+        set(&s.b(), "src/deep/x", "D:(A;;FA;;;WD)");
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new(), "{what}");
+        for rel in ["README", "src", "src/main.c", "src/deep/x", "new-a"] {
+            assert_eq!(acl_of(&s.a(), rel), acl_of(&s.b(), rel), "{what}: {rel}");
+        }
+        assert_eq!(acl_of(&s.b(), "src/main.c"), "", "{what}");
+        assert!(!acl_of(&s.a(), "src/deep/x").is_empty(), "{what}");
+        assert_eq!(s.sync().unwrap(), Vec::<String>::new(), "{what}");
     }
 }
 
