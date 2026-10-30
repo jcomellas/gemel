@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Gemel.app's: scripts/package-macos.sh puts the version in place of
+     @VERSION@. CFBundleName is what the menu bar and the Dock show. -->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Gemel</string>
+	<key>CFBundleExecutable</key>
+	<string>gemel-gui</string>
+	<key>CFBundleIconFile</key>
+	<string>Gemel</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.jcomellas.gemel</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Gemel</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.utilities</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright 2026 Juan Jose Comellas. Derived from Unison, Copyright 1999-2020 Benjamin C. Pierce and others. GPL-3.0-only.</string>
+</dict>
+</plist>

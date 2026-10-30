@@ -1,0 +1,17 @@
+Third-party software in gemel
+=============================
+
+The gemel programs are built with the Rust crates below. Each licence is
+given once, followed by the crates it covers.
+{{#each licenses}}
+
+----------------------------------------------------------------------
+{{{name}}} ({{id}})
+
+Used by:
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}
+{{/each}}
+
+{{{text}}}
+{{/each}}
