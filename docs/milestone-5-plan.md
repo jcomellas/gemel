@@ -1,6 +1,6 @@
 # Milestone 5: platform polish
 
-*Status: in progress (phase 2b, 2026-10-30) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 3a, 2026-10-30) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 5 is step 5 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): platform polish. It takes what earlier milestones moved here:
 - synchronising extended attributes and ACLs, cut since milestone 2;
@@ -175,6 +175,25 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **CI:** a job per package, which starts the packaged program (`-version`, and the window under Xvfb on Linux); a release workflow on tags.
 - **Licences:** GPL-3.0-only for the GUI's packages, with Unison's notices and the dependencies' licences (`cargo about` or similar).
 - **Likely split:** 3a, macOS and Windows; 3b, Linux.
+
+**Notes (phase 3a, 2026-10-30):**
+- **Design decision 4, the tooling, as done:**
+  - **macOS:** a script (`scripts/package-macos.sh`) rather than `cargo-bundle`. The bundle is a few files, and the script signs them in the right order.
+  - **Windows:** WiX 5 directly (`dotnet tool install`, pinned), rather than `cargo-wix`, which drives WiX 3. Runners may no longer have WiX 3.
+- **The icon** (`packaging/icon/gemel.svg`) is a plain placeholder: two interlocking rings. `scripts/make-icons.sh` builds the `.icns` and the `.ico` from it, and both are committed.
+- **Notices:**
+  - **`NOTICE`:** gemel's copyright, that it derives from Unison at `8772d26` and isn't an official Unison project, its licences, where a package's source is (the tag of its version), and the copyright lines of the Unison sources it ports, as their headers carry them, with OCaml's for the legacy hash;
+  - **`THIRD-PARTY-LICENSES`:** written by `cargo-about` (`packaging/about.toml`), with each crate's licence. Slint's crates are accepted only under GPL-3.0-only, which records the option gemel uses.
+- **macOS:**
+  - **The bundle:** `Gemel.app` holds universal binaries (arm64 and x86_64) of `gemel-gui`, `gemel` and `gemel-fsmonitor`, which `gemel-gui` finds beside itself.
+  - **Signing:** ad hoc, the helpers then the bundle, so that the signature covers `Info.plist` and the resources; the linker's covers only each binary. There is no hardened runtime, which only notarisation needs.
+  - **The disk image** links to `/Applications`, and comes to about 31 MB.
+  - **Checked locally:** run from the mounted image, the programs start, and Launch Services names the running app Gemel, from `CFBundleName`, which is what the menu bar shows.
+- **Windows:** the `.msi` installs for all users in `Program Files\Gemel`, with a Start menu entry. Its UpgradeCode is fixed, so a newer version replaces an older one.
+- **CI** (`.github/workflows/packages.yml`) builds and checks both on every push. The release workflow runs the same jobs on a tag and attaches the packages to a draft release.
+- **Identifiers,** fixed from the first release: the bundle identifier `io.github.jcomellas.gemel`, and the installer's UpgradeCode.
+- **Known, for phase 4:** `gemel-gui` is a console program on Windows, since it is also the text interface (`-ui text`), so launching it from the Start menu opens a console window beside the GUI. Hiding it (`windows_subsystem`, attaching to a parent console for the text interface) is a change to the program, not to the package.
+- **Not run before this PR:** the Windows package (no Windows here) and the release workflow (no tag yet).
 
 ### Phase 4: the screen-reader pass, and the rest
 
