@@ -16,10 +16,11 @@
 //! pseudo-consoles (`CreatePseudoConsole`) and starting a process on one
 //! (`CreateProcessW` with its attributes, `SearchPathW`, pipes, and waiting
 //! for and ending it), and extended attributes (`getxattr` and the rest)
-//! and macOS's ACLs (`acl_get_file` and the rest, declared in [`acl`]).
+//! and ACLs (on macOS `acl_get_file` and the rest, declared in [`acl`];
+//! on Windows `GetNamedSecurityInfoW` and its SDDL conversions).
 //!
 //! Not ported yet: AppleDouble files (resource forks on volumes without
-//! them), Windows' ACLs, and block cloning on Windows (see [`reflink`]).
+//! them), and block cloning on Windows (see [`reflink`]).
 
 pub mod acl;
 #[cfg(windows)]
