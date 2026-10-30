@@ -1,6 +1,6 @@
 # Milestone 5: platform polish
 
-*Status: in progress (phase 2a, 2026-10-29) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 2b, 2026-10-30) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 5 is step 5 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): platform polish. It takes what earlier milestones moved here:
 - synchronising extended attributes and ACLs, cut since milestone 2;
@@ -147,6 +147,24 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   A candidate that runs unison with `-acl=false` fails every scenario.
 - **CI's macOS job** now installs Homebrew's unison and runs these, since the runner has no build of the pinned source. They follow whatever release Homebrew has.
 - **Not run:** ACL pairings with 2.53.8 and 2.52.1, which CI builds only on Linux, where there are no ACLs. A 2.52 server's refusal of `acl` is checked by `gemel-ui-api`'s startup test, as OCaml's validator words it.
+
+**Notes (phase 2b, 2026-10-30):**
+- **Design decision 2, for Windows' ACLs: system calls,** the stub's own: `GetNamedSecurityInfoW`, `SetNamedSecurityInfoW` and the SDDL conversions, from `windows-sys`. `exacl` has no SDDL.
+- **The text** is the DACL's SDDL as the stub makes it:
+  - inherited entries removed, since they come from the parent directory and can't be set;
+  - the auto-inherited flag cleared;
+  - empty when nothing explicit or protected is left;
+  - not supported when the file has no DACL at all.
+
+  Setting an empty text sets an empty DACL that inherits (`D:`), and protection follows the text.
+- **No vectors from the stubs:** no OCaml builds on Windows here (the Risks table's MSYS2 build wasn't tried). gemel makes the text with the same system calls and the same edits as the stub, so the SDDL is the system's own conversion, as the Risks table's fallback says.
+- **Tests, gemel at both ends, on CI's Windows runner:**
+  - `gemel-fs`: SDDL read and set, protected and not, inherited entries left out, the auto-inherited flag dropped, an empty text, and the stub's errors;
+  - `gemel-engine`'s `acls_propagate_on_windows`: ACLs set, changed and removed on files and directories, and a new file's, directly, in loopback and with a remote root, then nothing to do by the archives.
+
+  None of these run anywhere but Windows, so this PR's CI is their first run.
+- **`removeAclNames`** never matches SDDL, whose entries name accounts by SID, so `numericids` changes nothing there, as in OCaml.
+- **Not done:** a Windows end with an OCaml end, which the oracle can't pair here: Windows replays recorded outcomes, without xattrs or ACLs.
 
 ### Phase 3: packages
 
