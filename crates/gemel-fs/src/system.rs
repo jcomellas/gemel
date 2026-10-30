@@ -732,9 +732,13 @@ pub fn has_symlink() -> bool {
     true
 }
 
-/// `System.hasCorrectCTime`: whether `ctime` is the status change time.
+/// `System.hasCorrectCTime`: whether `ctime` is the status change time,
+/// so that an unchanged one means unchanged metadata. Not on Windows, as
+/// OCaml says: gemel's `ctime` there is NTFS's change time, which setting
+/// an ACL doesn't always update, so ACLs are read again at every scan, as
+/// OCaml reads them.
 pub fn has_correct_ctime() -> bool {
-    true
+    cfg!(not(windows))
 }
 
 /// The name of a user or group id, if it has one (`getpwuid`/`getgrgid`).

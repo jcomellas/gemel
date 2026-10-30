@@ -163,6 +163,7 @@ There is one PR per phase, cut from `main` and merged before the next phase star
   - `gemel-engine`'s `acls_propagate_on_windows`: ACLs set, changed and removed on files and directories, and a new file's, directly, in loopback and with a remote root, then nothing to do by the archives.
 
   None of these run anywhere but Windows, so this PR's CI is their first run.
+- **Change times on Windows aren't trusted, as in OCaml** (`hasCorrectCTime` is false there). gemel had it true everywhere since milestone 2, since its Windows `stat` gives NTFS's change time. But setting an ACL doesn't always update that, so CI's first run found a changed ACL left unread, with the archive's kept. ACLs are now read again at every scan on Windows, as OCaml reads them.
 - **`removeAclNames`** never matches SDDL, whose entries name accounts by SID, so `numericids` changes nothing there, as in OCaml.
 - **Not done:** a Windows end with an OCaml end, which the oracle can't pair here: Windows replays recorded outcomes, without xattrs or ACLs.
 
