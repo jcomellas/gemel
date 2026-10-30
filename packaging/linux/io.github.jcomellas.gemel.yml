@@ -1,0 +1,57 @@
+# Gemel's Flatpak, built by scripts/package-flatpak.sh with flatpak-builder,
+# which needs target/flatpak/THIRD-PARTY-LICENSES written first.
+#
+# It holds gemel-gui, which it runs, and gemel and gemel-fsmonitor beside
+# it in /app/bin (`flatpak run --command=gemel io.github.jcomellas.gemel`
+# for the command line).
+id: io.github.jcomellas.gemel
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: gemel-gui
+finish-args:
+  # The window: Wayland's, or X11's where there is none; and GL.
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  # Remote roots, over ssh or a socket.
+  - --share=network
+  # The replicas, wherever they are; and the Unison directory (~/.unison)
+  # and ssh's (~/.ssh), as the system's unison, gemel and ssh have them.
+  # The sandbox keeps $HOME. Without this, a directory picked in the file
+  # chooser would come back as the document portal's path, which neither
+  # the profile's other users nor the file watcher can use.
+  - --filesystem=host
+  # The user's ssh agent. ssh is the runtime's, with ~/.ssh's keys,
+  # known_hosts and config, but not the system's /etc/ssh.
+  - --socket=ssh-auth
+modules:
+  - name: gemel
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/gemel/cargo
+      # Cargo fetches the crates, as Cargo.lock pins them. Flathub would
+      # instead need them listed as sources (flatpak-cargo-generator).
+      build-args:
+        - --share=network
+    build-commands:
+      - cargo build --locked --release -p gemel-gui -p gemel -p gemel-fsmonitor
+      - install -D -m 755 -t /app/bin target/release/gemel-gui target/release/gemel target/release/gemel-fsmonitor
+      - install -D -m 644 -t /app/share/applications packaging/linux/io.github.jcomellas.gemel.desktop
+      - install -D -m 644 -t /app/share/metainfo packaging/linux/io.github.jcomellas.gemel.metainfo.xml
+      - install -D -m 644 packaging/icon/gemel.svg /app/share/icons/hicolor/scalable/apps/io.github.jcomellas.gemel.svg
+      - install -D -m 644 -t /app/share/licenses/io.github.jcomellas.gemel LICENSE NOTICE THIRD-PARTY-LICENSES
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .git
+          - .claude
+      - type: file
+        path: ../../target/flatpak/THIRD-PARTY-LICENSES
