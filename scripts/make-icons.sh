@@ -1,7 +1,9 @@
 #!/bin/sh
 # Builds the packages' icons from packaging/icon/gemel.svg:
 # - packaging/macos/Gemel.icns, for the macOS application bundle;
-# - packaging/windows/gemel.ico, for the Windows installer's shortcut.
+# - packaging/windows/gemel.ico, for the Windows installer's shortcut;
+# - packaging/linux/io.github.jcomellas.gemel.png, the AppImage's icon (the
+#   Flatpak's is the SVG itself).
 #
 #   scripts/make-icons.sh
 #
@@ -42,4 +44,8 @@ for s, img in zip(sizes, images):
     offset += len(img)
 open(out, "wb").write(data + b"".join(images))
 PY
-echo "wrote packaging/macos/Gemel.icns and packaging/windows/gemel.ico"
+
+# Linux: 256 pixels, the size desktops and AppImage's tools expect.
+mkdir -p "$root/packaging/linux"
+png 256 "$root/packaging/linux/io.github.jcomellas.gemel.png"
+echo "wrote packaging/macos/Gemel.icns, packaging/windows/gemel.ico and packaging/linux/io.github.jcomellas.gemel.png"
