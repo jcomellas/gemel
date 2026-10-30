@@ -1,6 +1,6 @@
 # Milestone 5: platform polish
 
-*Status: in progress (phase 3a, 2026-10-30) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 3b, 2026-10-30) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 5 is step 5 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): platform polish. It takes what earlier milestones moved here:
 - synchronising extended attributes and ACLs, cut since milestone 2;
@@ -194,6 +194,24 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **Identifiers,** fixed from the first release: the bundle identifier `io.github.jcomellas.gemel`, and the installer's UpgradeCode.
 - **Known, for phase 4:** `gemel-gui` is a console program on Windows, since it is also the text interface (`-ui text`), so launching it from the Start menu opens a console window beside the GUI. Hiding it (`windows_subsystem`, attaching to a parent console for the text interface) is a change to the program, not to the package.
 - **Not run before this PR:** the Windows package (no Windows here) and the release workflow (no tag yet).
+
+**Notes (phase 3b, 2026-10-30):**
+- **The Windows package** first ran in #67's CI. WiX refused a component holding three unversioned files, the notices, so each has its own. CI has installed and uninstalled it since.
+- **The application id** (`io.github.jcomellas.gemel`, macOS's bundle identifier) is also the window's on Linux: `gemel-gui` sets it (`slint::set_xdg_app_id`) once Slint's backend has started. Desktops match the Wayland app id and X11's `WM_CLASS` to the desktop entry of that name, for the name and icon they show. The desktop entry, the AppStream metadata and the icon are in `packaging/linux`, shared by both packages. The metadata leaves out releases, which would need editing for each version.
+- **Design decision 4, the tooling, as done:**
+  - **AppImage:** `scripts/package-appimage.sh`, with appimagetool 1.9.1 and the runtime of type2-runtime's 20251108 release, downloaded and checked against the SHA-256s GitHub publishes. It holds the three programs, the notices in `usr/share/doc/gemel`, and nothing of the system's: winit and glutin load X11, Wayland and GL with `dlopen`, and fontconfig is on every desktop. Built on Ubuntu 22.04, it needs glibc 2.35, which CI checks.
+  - **Flatpak:** `scripts/package-flatpak.sh` and `packaging/linux/io.github.jcomellas.gemel.yml`, on the Freedesktop 26.08 runtime with its Rust extension (1.98), in a single-file bundle. Cargo fetches the crates during the build (`--share=network`), as `Cargo.lock` pins them; Flathub would instead need them as sources (`flatpak-cargo-generator`). The runtime and SDK go in the user's installation: the CI image's system-wide copy is on overlayfs, where updating it fails.
+- **The Flatpak's sandbox and ssh, settled:**
+  - **Files:** `--filesystem=host`. A synchronizer's replicas may be anywhere, `/media` and `/mnt` too. Without host access, a directory picked in the file chooser comes back as the document portal's path (`/run/user/…/doc/…`), which goes into the profile, where the command line and the file watcher can't use it.
+  - **The Unison directory:** gemel finds it from `HOME` (`~/.unison`), never `XDG_CONFIG_HOME`, and a Flatpak keeps `HOME`. So the profiles and archives are the system's `unison` and `gemel`'s.
+  - **ssh:** the runtime's own (OpenSSH 10.6p1, which CI checks is there), with `~/.ssh`'s keys, `known_hosts` and config through the host access, and the agent through `--socket=ssh-auth`. Not the system's `/etc/ssh`, or the programs a `ProxyCommand` names: the README says so. Running the system's ssh (`flatpak-spawn --host`) would need the permission to run anything outside the sandbox.
+  - **Also:** the network, for remote roots; the window on Wayland, or X11 without it, with GL. The file chooser is rfd's portal backend, which works in the sandbox.
+- **CI** (`packages.yml`):
+  - **AppImage,** extracted, since runners may have no FUSE: the programs start, the notices are there, the desktop entry validates, and glibc 2.35 is enough.
+  - **Flatpak,** in Flathub's image for building Flatpaks (`ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08`, privileged for bubblewrap), installed from its bundle: the programs start, ssh is there, and so are the notices. That image has no cargo, so `THIRD-PARTY-LICENSES` comes from the AppImage's job.
+  - **The window, for both:** `scripts/smoke-linux-gui.sh` starts it under Xvfb on two empty roots. It waits for a window whose class is the application id, reading `WM_CLASS` through libX11 from Python, since the image has no `xwininfo`. Then it checks the program is still running 5 seconds later.
+- **x86_64 only in CI,** as on Windows. Both scripts build for the machine's architecture, and were run on aarch64 here: the AppImage in the Linux Docker image, the Flatpak in CI's image (arm64), each with the window check.
+- **Not checked:** the packages on a real desktop, which is the person's check in the verification section; Wayland, which Xvfb doesn't have.
 
 ### Phase 4: the screen-reader pass, and the rest
 
