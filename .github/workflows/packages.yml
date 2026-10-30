@@ -1,8 +1,9 @@
 name: Packages
 
 # gemel-gui's packages, built on every push and pull request, and checked:
-# each is installed or mounted as a person would, and the programs in it
-# start. The release workflow runs the same jobs on tags.
+# each is installed, mounted or extracted as a person's system would, and
+# the programs in it start (on Linux, the window too, under Xvfb). The
+# release workflow runs the same jobs on tags.
 on:
   push:
     branches: [main]
@@ -85,4 +86,82 @@ jobs:
         with:
           name: package-windows
           path: target/package/Gemel-*-x64.msi
+          if-no-files-found: error
+
+  # On the oldest Ubuntu with runners, for the oldest glibc it can need.
+  appimage:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      # Building: Slint's fontconfig. Starting the window: Xvfb, X11's
+      # client libraries and Mesa's GL, which winit and glutin load.
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libfontconfig-dev \
+              xvfb xauth libxkbcommon-x11-0 libxcursor1 libxrandr2 libxi6 \
+              libgl1 libegl1 libgl1-mesa-dri desktop-file-utils
+      - run: scripts/package-appimage.sh target/package
+      # Extracted rather than mounted, since runners may have no FUSE: the
+      # programs starting, the notices, the glibc it needs, and the window.
+      - run: |
+          img=$(echo target/package/Gemel-*-x86_64.AppImage)
+          "$img" --appimage-extract-and-run -version | grep '^gemel version '
+          "$img" --appimage-extract >/dev/null
+          r=squashfs-root
+          "$r/usr/bin/gemel" -version | grep '^gemel version '
+          "$r/usr/bin/gemel-fsmonitor" -version </dev/null | grep '^VERSION '
+          for f in LICENSE NOTICE THIRD-PARTY-LICENSES; do test -s "$r/usr/share/doc/gemel/$f"; done
+          desktop-file-validate "$r/io.github.jcomellas.gemel.desktop"
+          # The README says glibc 2.35, Ubuntu 22.04's, is enough.
+          need=$(objdump -T "$r"/usr/bin/* | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "glibc needed: $need"
+          test "$(printf '%s\n' "$need" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35
+          scripts/smoke-linux-gui.sh "$img" --appimage-extract-and-run
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-appimage
+          path: target/package/Gemel-*-x86_64.AppImage
+          if-no-files-found: error
+      # For the Flatpak's job, whose container has no cargo.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: third-party-licenses
+          path: target/package/THIRD-PARTY-LICENSES
+          if-no-files-found: error
+
+  # In Flathub's image for building Flatpaks, which bubblewrap needs
+  # privileged.
+  flatpak:
+    needs: appimage
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-licenses
+          path: target/flatpak
+      - run: scripts/package-flatpak.sh target/package
+      # Installed as a person would, from the bundle: the programs
+      # starting, the runtime's ssh, the notices, and the window.
+      - run: |
+          id=io.github.jcomellas.gemel
+          flatpak install --user -y --noninteractive target/package/Gemel-*-x86_64.flatpak
+          flatpak run $id -version | grep '^gemel version '
+          flatpak run --command=gemel $id -version | grep '^gemel version '
+          flatpak run --command=gemel-fsmonitor $id -version </dev/null | grep '^VERSION '
+          flatpak run --command=sh $id -c 'command -v ssh && ssh -V'
+          flatpak run --command=sh $id -c \
+              'for f in LICENSE NOTICE THIRD-PARTY-LICENSES; do test -s /app/share/licenses/'$id'/$f; done'
+          dbus-run-session -- scripts/smoke-linux-gui.sh flatpak run $id
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-flatpak
+          path: target/package/Gemel-*-x86_64.flatpak
           if-no-files-found: error
