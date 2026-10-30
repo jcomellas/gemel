@@ -257,6 +257,9 @@ There is one PR per phase, cut from `main` and merged before the next phase star
     - the watcher (`-repeat watch`) opens no console window.
   - **With the permission,** `scripts/macos-ax-dump.swift` on each of these, for what VoiceOver is given: from Terminal, say, once Terminal has Accessibility in System Settings › Privacy & Security.
 
+**Found on the way (2026-10-30):**
+- **ssh's last words, when it fails:** on macOS the terminal is revoked as ssh exits, so its reader can reach the end before the failure is known. OCaml then sends what wasn't shown to standard error, and its warning is empty. `gemel-rpc`'s `handle_password_requests` keeps it for the warning instead, or for standard error if the connection is up. `terminal.rs`'s `what_ssh_said_last_is_kept_when_it_fails` failed about one run in five from this.
+
 ## Verification
 
 - **xattrs and ACLs:**
