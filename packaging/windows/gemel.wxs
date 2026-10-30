@@ -40,10 +40,16 @@
         <Component Id="GemelFsmonitor">
           <File Id="GemelFsmonitorExe" Source="$(var.BinDir)\gemel-fsmonitor.exe" KeyPath="yes" />
         </Component>
-        <Component Id="Notices">
+        <!-- One component per notice: WiX generates a component's GUID only
+             if its keypath is versioned or it holds a single file. -->
+        <Component Id="License">
           <File Id="License" Source="$(var.Root)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
-          <File Id="Notice" Source="$(var.Root)\NOTICE" Name="NOTICE.txt" />
-          <File Id="ThirdParty" Source="$(var.ThirdParty)" Name="THIRD-PARTY-LICENSES.txt" />
+        </Component>
+        <Component Id="Notice">
+          <File Id="Notice" Source="$(var.Root)\NOTICE" Name="NOTICE.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="ThirdParty">
+          <File Id="ThirdParty" Source="$(var.ThirdParty)" Name="THIRD-PARTY-LICENSES.txt" KeyPath="yes" />
         </Component>
       </Directory>
     </StandardDirectory>
@@ -69,7 +75,9 @@
       <ComponentRef Id="GemelGui" />
       <ComponentRef Id="GemelCli" />
       <ComponentRef Id="GemelFsmonitor" />
-      <ComponentRef Id="Notices" />
+      <ComponentRef Id="License" />
+      <ComponentRef Id="Notice" />
+      <ComponentRef Id="ThirdParty" />
       <ComponentRef Id="StartMenu" />
     </Feature>
   </Package>
