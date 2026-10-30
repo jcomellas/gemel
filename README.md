@@ -76,6 +76,18 @@ draft release:
 - **Windows:** `Gemel-<version>-x64.msi`, which installs `gemel-gui`,
   `gemel` and `gemel-fsmonitor` in `Program Files\Gemel`, with a Start
   menu entry.
+- **Linux, as an AppImage:** `Gemel-<version>-x86_64.AppImage`, for
+  systems with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36
+  and later). Make it executable (`chmod +x`) and run it. Without FUSE,
+  run it with `--appimage-extract-and-run`.
+- **Linux, as a Flatpak:** `Gemel-<version>-x86_64.flatpak`. Install it
+  with `flatpak install --user Gemel-<version>-x86_64.flatpak`, which
+  fetches the Freedesktop runtime from Flathub, and start Gemel from the
+  desktop's menu, or with `flatpak run io.github.jcomellas.gemel`. The
+  command line is `flatpak run --command=gemel io.github.jcomellas.gemel`.
+  The Flatpak can read and write all your files, as a synchronizer must.
+  It runs its runtime's ssh, with your `~/.ssh` and ssh agent, but not
+  your system's `/etc/ssh` or the programs a `ProxyCommand` names.
 
 The packages aren't signed with a Developer ID or an Authenticode
 certificate, so each system asks before the first run:
@@ -87,9 +99,10 @@ certificate, so each system asks before the first run:
 - **Windows:** SmartScreen says it protected your PC. Choose More info,
   then Run anyway.
 
-To build them yourself: `scripts/package-macos.sh` on macOS, and
-`scripts/package-windows.sh` on Windows in Git Bash, with WiX 5 (each
-script's header lists what it needs). Each package carries `LICENSE`,
+To build them yourself: `scripts/package-macos.sh` on macOS,
+`scripts/package-windows.sh` on Windows in Git Bash, with WiX 5, and
+`scripts/package-appimage.sh` and `scripts/package-flatpak.sh` on Linux
+(each script's header lists what it needs). Each package carries `LICENSE`,
 `NOTICE` (gemel's and Unison's notices, and where the source is) and
 `THIRD-PARTY-LICENSES` (the licences of the crates it is built with).
 
