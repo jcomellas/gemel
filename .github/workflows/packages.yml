@@ -1,0 +1,88 @@
+name: Packages
+
+# gemel-gui's packages, built on every push and pull request, and checked:
+# each is installed or mounted as a person would, and the programs in it
+# start. The release workflow runs the same jobs on tags.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - run: scripts/package-macos.sh target/package
+      # From the mounted disk image: the bundle's signature, its name in the
+      # menu bar, universal binaries, and the programs starting.
+      - run: |
+          m=$(mktemp -d)
+          hdiutil attach -nobrowse -readonly -mountpoint "$m" target/package/Gemel-*-macos.dmg
+          app=$m/Gemel.app
+          codesign --verify --strict --verbose=2 "$app"
+          plutil -lint "$app/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$app/Contents/Info.plist")" = Gemel
+          for b in gemel-gui gemel gemel-fsmonitor; do
+            lipo -archs "$app/Contents/MacOS/$b" | grep -qw x86_64
+            lipo -archs "$app/Contents/MacOS/$b" | grep -qw arm64
+          done
+          "$app/Contents/MacOS/gemel-gui" -version | grep '^gemel version '
+          "$app/Contents/MacOS/gemel" -version | grep '^gemel version '
+          "$app/Contents/MacOS/gemel-fsmonitor" -version </dev/null | grep '^VERSION '
+          for f in Gemel.icns LICENSE NOTICE THIRD-PARTY-LICENSES; do
+            test -s "$app/Contents/Resources/$f"
+          done
+          hdiutil detach "$m"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos
+          path: target/package/Gemel-*-macos.dmg
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - run: |
+          dotnet tool install --global wix --version 5.0.2
+          Add-Content $env:GITHUB_PATH (Join-Path $env:USERPROFILE '.dotnet\tools')
+      - run: scripts/package-windows.sh target/package
+        shell: bash
+      # Installed for all users as a person would, the programs starting
+      # from Program Files, the Start menu entry and the notices there, then
+      # uninstalled. msiexec returns at once unless waited for.
+      - shell: pwsh
+        run: |
+          $msi = (Get-Item target/package/Gemel-*-x64.msi).FullName
+          $p = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /l*v install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 80; exit 1 }
+          $dir = Join-Path $env:ProgramFiles Gemel
+          foreach ($b in 'gemel-gui', 'gemel') {
+            $v = & (Join-Path $dir "$b.exe") -version
+            if ($LASTEXITCODE -ne 0 -or $v -notmatch '^gemel version ') { "$b -version: $v"; exit 1 }
+          }
+          foreach ($f in 'gemel-fsmonitor.exe', 'LICENSE.txt', 'NOTICE.txt', 'THIRD-PARTY-LICENSES.txt') {
+            if (-not (Test-Path (Join-Path $dir $f))) { "missing $f"; exit 1 }
+          }
+          $lnk = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Gemel.lnk'
+          if (-not (Test-Path $lnk)) { "missing $lnk"; exit 1 }
+          $p = Start-Process msiexec -ArgumentList "/x `"$msi`" /qn /l*v uninstall.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content uninstall.log -Tail 80; exit 1 }
+          if (Test-Path (Join-Path $dir 'gemel-gui.exe')) { 'still installed after uninstalling'; exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-windows
+          path: target/package/Gemel-*-x64.msi
+          if-no-files-found: error
