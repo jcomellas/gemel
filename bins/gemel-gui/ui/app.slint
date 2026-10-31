@@ -1061,11 +1061,12 @@ export component AppWindow inherits Window {
                         text: root.progress-text;
                         font-size: 10px;
                         horizontal-alignment: center;
-                        accessible-label: "Progress";
+                        accessible-label: "Time remaining";
                     }
                     ProgressIndicator {
                         progress: root.progress-fraction;
                         indeterminate: root.progress-pulse;
+                        accessible-label: "Progress";
                     }
                 }
                 Text {
