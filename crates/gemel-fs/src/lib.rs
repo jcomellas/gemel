@@ -7,8 +7,10 @@
 //! `gethostname`, the Windows file-information calls behind `stat`, and
 //! for copying `clonefile` on macOS and `ioctl(FICLONE)`,
 //! `copy_file_range` and `sendfile64` on Linux, and for the text interface
-//! the terminal's modes (`tcgetattr`/`tcsetattr`, the Windows console's)
-//! and catching signals (`sigaction`, `SetConsoleCtrlHandler`), and for
+//! the terminal's modes (`tcgetattr`/`tcsetattr`, the Windows console's),
+//! and on Windows a console for a program built without one
+//! (`AttachConsole`, `AllocConsole`, `SetStdHandle`) and none for the
+//! programs it starts (`GetConsoleWindow`), and catching signals (`sigaction`, `SetConsoleCtrlHandler`), and for
 //! the file watcher, Windows' long path names (`GetLongPathNameW`), for
 //! sockets `getaddrinfo`, and for ssh under a pseudo-terminal `openpty`,
 //! `fcntl` and the child's session (`setsid`, `ioctl(TIOCSCTTY)`, its

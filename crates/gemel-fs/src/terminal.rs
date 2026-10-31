@@ -2,12 +2,10 @@
 //! keys as they are typed.
 //!
 //! Ports `System.terminalStateFunctions` and `System.termVtCapable`
-//! (`system_generic.ml`, and `system_win.ml` with its stubs).
+//! (`system_generic.ml`, and `system_win.ml` with its stubs), and on
+//! Windows the console of a program built without one (`win_init_console`).
 //!
 //! Derived from Unison, Copyright 1999-2020, Benjamin C. Pierce.
-//!
-//! Not ported: on Windows, allocating a console for a process started
-//! without one (`win_init_console`); gemel is a console program.
 
 use std::io;
 
@@ -142,23 +140,48 @@ pub fn read_stdin(buf: &mut [u8]) -> io::Result<usize> {
     windows::read_stdin(buf)
 }
 
+/// `win_init_console`, for a program built without a console (`gemel-gui`
+/// on Windows), on a run that won't show its window: if it was started
+/// without its standard output or error (from the Start menu, or from a
+/// console without redirecting them), it attaches to its parent's console,
+/// if it was started from one, or else gets a console of its own, as OCaml
+/// does, for the standard handles it lacks. Those it was given are kept.
+/// Nothing elsewhere.
+pub fn init_console() {
+    #[cfg(windows)]
+    windows::init_console();
+}
+
+/// On Windows, while this program has no console (`gemel-gui`'s window),
+/// `cmd` starts without a console window: a console program would open
+/// one of its own. Nothing elsewhere.
+pub fn no_console_window(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    windows::no_console_window(cmd);
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows {
     //! `win_get_console_mode`, `win_set_console_mode`, the output code
-    //! page and `win_vt_capable` (system_win_stubs.c).
+    //! page, `win_vt_capable` and `win_init_console` (system_win_stubs.c).
 
     use std::fs::File;
     use std::io::{self, Read};
     use std::mem::ManuallyDrop;
-    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle};
 
     use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_UNKNOWN, GetFileType};
     use windows_sys::Win32::System::Console::{
-        CONSOLE_MODE, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleOutputCP,
+        ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, CONSOLE_MODE,
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetConsoleOutputCP, GetConsoleWindow,
         GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-        SetConsoleMode, SetConsoleOutputCP,
+        SetConsoleMode, SetConsoleOutputCP, SetStdHandle,
     };
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
     use super::Output;
 
@@ -236,6 +259,49 @@ mod windows {
         };
         std_handle(which)
             .is_some_and(|h| mode(h).is_ok_and(|m| m & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0))
+    }
+
+    /// Whether `which` is a handle the process can use, as OCaml checks
+    /// with `GetFileType`.
+    fn is_open(which: STD_HANDLE) -> bool {
+        // SAFETY: a plain value.
+        std_handle(which).is_some_and(|h| unsafe { GetFileType(h) } != FILE_TYPE_UNKNOWN)
+    }
+
+    pub fn init_console() {
+        let missing = [
+            (STD_INPUT_HANDLE, "CONIN$"),
+            (STD_OUTPUT_HANDLE, "CONOUT$"),
+            (STD_ERROR_HANDLE, "CONOUT$"),
+        ]
+        .map(|(which, name)| (which, name, !is_open(which)));
+        if !missing[1].2 && !missing[2].2 {
+            return;
+        }
+        // SAFETY: plain values. Each fails if the process has a console
+        // already, which is then kept.
+        if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } == 0 {
+            unsafe { AllocConsole() };
+        }
+        // Both are meant to set the standard handles; any still missing is
+        // opened on the console.
+        for (which, name, missing) in missing {
+            if missing && !is_open(which) {
+                if let Ok(f) = File::options().read(true).write(true).open(name) {
+                    // SAFETY: the file's handle, never closed, as the file
+                    // is given up.
+                    unsafe { SetStdHandle(which, f.into_raw_handle()) };
+                }
+            }
+        }
+    }
+
+    pub fn no_console_window(cmd: &mut std::process::Command) {
+        use std::os::windows::process::CommandExt;
+        // SAFETY: no arguments.
+        if unsafe { GetConsoleWindow() }.is_null() {
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
     }
 
     pub fn read_stdin(buf: &mut [u8]) -> io::Result<usize> {

@@ -146,11 +146,13 @@ fn run(cmd: &str) -> Result<(ProcessStatus, String), Error> {
 fn run(cmd: &str) -> Result<(ProcessStatus, String), Error> {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
-    let out = Command::new("cmd")
-        .raw_arg(format!("/c \"{cmd}\""))
+    let mut c = Command::new("cmd");
+    c.raw_arg(format!("/c \"{cmd}\""))
         .stdin(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .stdout(Stdio::piped())
+        .stdout(Stdio::piped());
+    gemel_fs::terminal::no_console_window(&mut c);
+    let out = c
         .output()
         .map_err(|e| Error::Transient(format!("Error in running {cmd}:\n{e}")))?;
     let status = ProcessStatus::of(out.status);
