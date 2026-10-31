@@ -18,7 +18,7 @@ use slint::{ComponentHandle, LogicalSize, Model, SharedString};
 
 use support::{
     can_press, click, fake_item, fake_updates, init, items, manager_rows, press, profiles, roots,
-    synced, type_text, wait_until,
+    spoken_focus, synced, type_text, wait_until,
 };
 
 const WAIT: Duration = Duration::from_secs(60);
@@ -89,6 +89,40 @@ fn items_are_virtualised_selectable_and_accessible() {
     assert_eq!(app.sent().len(), 3);
     assert!(press(ui, "Close"));
     assert_eq!(ui.get_dialog(), 0);
+}
+
+/// A screen reader is told the focus is on the cursor's row, as the keys
+/// move it, also once the list has scrolled and the rows above are no
+/// longer made.
+#[test]
+fn screen_readers_follow_the_cursor() {
+    init();
+    let app = App::detached().unwrap();
+    let ui = app.ui();
+    ui.window().set_size(LogicalSize::new(1000.0, 700.0));
+    ui.show().unwrap();
+    let fake = (0..1000).map(|i| fake_item(&format!("dir/file-{i:05}"), Action::LtoR(false)));
+    app.handle(Event::Updates(fake_updates(fake.collect())));
+    ui.invoke_focus_table();
+    let row = |i: usize| {
+        items(ui)
+            .into_iter()
+            .find(|r| r.index == i)
+            .map(|r| r.label)
+            .expect("the row is shown")
+    };
+    // The first interesting item is selected, with the cursor.
+    assert_eq!(spoken_focus(ui), Some(row(0)));
+    type_text(ui, &SharedString::from(Key::DownArrow));
+    assert_eq!(spoken_focus(ui), Some(row(1)));
+    for _ in 0..4 {
+        type_text(ui, &SharedString::from(Key::PageDown));
+    }
+    assert_eq!(app.table().cursor(), Some(101));
+    assert!(items(ui)[0].index > 50, "scrolled");
+    assert_eq!(spoken_focus(ui), Some(row(101)));
+    type_text(ui, &SharedString::from(Key::UpArrow));
+    assert_eq!(spoken_focus(ui), Some(row(100)));
 }
 
 /// The window's close button quits as Quit does (`safeExit`): at once
@@ -337,9 +371,10 @@ fn the_manual_has_a_window_of_its_own() {
     tab.invoke_accessible_default_action();
     assert_eq!(w.get_current(), 7);
     assert_eq!(first_line(), "Tutorial");
-    // The keys.
+    // The keys, with a screen reader told the focus is on the tab chosen.
     type_text(w, &SharedString::from(Key::DownArrow));
     assert_eq!(w.get_current(), 8);
+    assert_eq!(spoken_focus(w).as_deref(), Some("Basic Concepts"));
     type_text(w, &SharedString::from(Key::UpArrow));
     assert_eq!(w.get_current(), 7);
     // Each page is shown as far down as it was.
@@ -349,7 +384,9 @@ fn the_manual_has_a_window_of_its_own() {
     w.invoke_select(10);
     // The list may move it a little as it lays the page out again.
     assert!(w.get_scroll() < -400., "{}", w.get_scroll());
-    // Escape closes, as Close does.
+    // Escape closes, as Close does, also from Close, which Tab goes to.
+    type_text(w, &SharedString::from(Key::Tab));
+    assert_eq!(spoken_focus(w).as_deref(), Some("Close"));
     type_text(w, &SharedString::from(Key::Escape));
     assert!(!w.window().is_visible());
     ui.invoke_documentation("nosuch".into());
@@ -386,6 +423,8 @@ fn the_profile_editor_writes_profiles_as_uigtk3_does() {
     type_text(ui, &down);
     type_text(ui, &down);
     assert_eq!(ui.get_profile_selected(), 1);
+    // A screen reader is told the focus is on the profile chosen.
+    assert_eq!(spoken_focus(ui).as_deref(), Some("b"));
     assert!(press(ui, "Edit"));
     assert!(wait_until(WAIT, || ui.get_dialog() == 8), "{}", out.text());
     assert_eq!(ui.get_editor_title(), "b - Profile Editor");
@@ -417,6 +456,7 @@ fn the_profile_editor_writes_profiles_as_uigtk3_does() {
     type_text(ui, &down);
     type_text(ui, &down);
     assert_eq!(ui.get_editor_selected(), row("log"));
+    assert_eq!(spoken_focus(ui).as_deref(), Some("log"));
     assert!(ui.get_doc_shown());
     assert!(!ui.get_doc_short().is_empty());
     assert!(!app.documentation_markdown().is_empty());

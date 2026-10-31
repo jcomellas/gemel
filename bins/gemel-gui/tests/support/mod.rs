@@ -162,6 +162,34 @@ pub fn click(ui: &AppWindow, at: LogicalPosition, modifier: Option<Key>) {
     }
 }
 
+/// What a screen reader is told has the focus, by its label: the
+/// element with the keys or, if it isn't accessible, its nearest
+/// accessible ancestor, or the descendant that one delegates the focus
+/// to, as Slint's AccessKit bridge works it out (`focus_node` in
+/// i-slint-backend-winit's `accesskit.rs`), which the testing backend
+/// hasn't. `None` while nothing has the keys.
+pub fn spoken_focus(ui: &impl ComponentHandle) -> Option<String> {
+    use i_slint_core::accessibility::{
+        AccessibleStringProperty, accessible_descendents, nearest_accessible_item,
+    };
+    // A `ListView` makes the rows shown as it is laid out, which a frame
+    // does before the bridge looks, and a query here.
+    ElementQuery::from_root(ui).match_descendants().find_all();
+    let inner = i_slint_core::window::WindowInner::from_pub(ui.window());
+    let focus = inner.focus_item.borrow().upgrade()?;
+    let parent = nearest_accessible_item(focus);
+    let item = parent
+        .accessible_string_property(AccessibleStringProperty::DelegateFocus)
+        .and_then(|s| s.parse::<usize>().ok())
+        .and_then(|i| accessible_descendents(&parent).nth(i))
+        .unwrap_or(parent);
+    Some(
+        item.accessible_string_property(AccessibleStringProperty::Label)
+            .unwrap_or_default()
+            .to_string(),
+    )
+}
+
 /// Types `text`, as one key, in any window.
 pub fn type_text(ui: &impl ComponentHandle, text: &str) {
     let w = ui.window();
