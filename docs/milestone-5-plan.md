@@ -1,6 +1,6 @@
 # Milestone 5: platform polish
 
-*Status: in progress (phase 3b, 2026-10-30) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
+*Status: in progress (phase 4a, 2026-10-30) · Follows milestone 4 (GUI, PRs #47–#62) · Source: `bcpierce00/unison` at `8772d26`*
 
 Milestone 5 is step 5 of the port order in [the analysis](unison-port-analysis.md#4-architecture-recommendation): platform polish. It takes what earlier milestones moved here:
 - synchronising extended attributes and ACLs, cut since milestone 2;
@@ -218,6 +218,44 @@ There is one PR per phase, cut from `main` and merged before the next phase star
 - **VoiceOver and Narrator,** by a person: the main window's items and actions, each dialog, the profile manager, the assistant, the editor and the manual. `scripts/macos-ax-dump.swift` dumps the real window's tree on macOS; what the testing backend can't check is checked there.
 - **Fixes** to what can't be reached or read, each with a window test where the testing backend can check it.
 - **Odds and ends** found on the way, each with a decision.
+
+**Notes (phase 4a, 2026-10-30):**
+- **Split:** 4a, what can be done without a person: Windows' console, and the screen-reader tree as Slint's code and the testing backend show it. 4b, the VoiceOver and Narrator pass by a person, with its fixes. `scripts/macos-ax-dump.swift` wasn't run: the process running the commands here had no Accessibility permission. It is for 4b.
+- **Windows' console** (left by phase 3a):
+  - **The fix:** `gemel-gui` is built as a program for the window (`windows_subsystem`), as OCaml builds `unison-gui` (`-subsystem windows`). From the Start menu it opens no console beside the window.
+  - **Its other runs:** the text interface, `-version`, `-doc`, the servers and usage errors. Started without their standard output or error, they attach to the parent's console if there is one, or get a console of their own, as OCaml's `win_init_console` does (`gemel_fs::terminal::init_console`). `gemel`'s main asks for it on every path but the window's, and only for `gemel-gui`.
+  - **Not like OCaml:** OCaml shows `-version` and usage errors in a message box when there is no console; gemel attaches to the parent's. The text interface from a console then shares that console's input with the shell, which has already gone back to its prompt: the README points to `gemel` for the command line.
+  - **The programs it starts:** while it has no console, the file watcher (`gemel-fsmonitor`) and external commands (`diff`, `merge`, through `cmd`) start with `CREATE_NO_WINDOW`, or each would open a console window. ssh is left as it is: it runs on a pseudo-console, or, if that can't be had, in a console of its own where it can ask for a password, as OCaml's `fallback_session` allocates one.
+  - **Not handled:** if Slint can't start, its error goes to the standard error, which isn't there from the Start menu.
+  - **CI** checks the installed programs' PE subsystems: the window's (2) for `gemel-gui.exe`, the console's (3) for `gemel.exe`. Nothing here runs Windows. The console's behaviour from a shell is for 4b.
+- **Screen readers' focus,** found in Slint's AccessKit bridge (`focus_node` in i-slint-backend-winit 1.18.1):
+  - **What was wrong:** the bridge tells screen readers the focus is on the element with the keys, or, if that isn't accessible, its nearest accessible ancestor. The items' table, the keyed lists (the profiles, the editor's preferences and tree, a list's values) and the manual's tabs take their keys in a `FocusScope` with no role. So screen readers were told the focus was on the card or the window, whichever row the arrows chose.
+  - **The fix:** each scope is now the list, the tree or the tab list, with the label its `ListView` had. It delegates the focus (`accessible-delegate-focus`) to the cursor's row, the row selected or the tab chosen, as Slint's `StandardListView` does. The `ListView` inside is hidden (`accessible-role: none`).
+  - **The index:** the delegated index counts the scope's accessible descendants, and a `ListView` makes only the rows shown (from `floor(-content-y / row height)`, rows being of one height). So it is the row's number less the first shown. Slint's `StandardListView` uses the row's number itself, which is wrong once it has scrolled.
+  - **The manual's tabs** have a `FocusScope` of their own for their keys; the window's keeps Escape, which a rejected key reaches from the tabs or the Close button.
+  - **The window tests** work the focus out as the bridge does, through `i-slint-core`, since the testing backend can't: in the table after scrolling 100 rows, in the profile manager, the editor and the manual. Without the offset, the table's check fails.
+- **Labels:** the screenshot tests now check that whatever a screen reader finds in each card and window they draw has a label, but for text and images, in macOS's style and in Fluent. The progress bar was the only thing without one. It is Progress, and the text over it Time remaining.
+- **Cards** take the focus as they open: their first button, field or list. Whether a screen reader then reads the card's title and message is for 4b.
+- **For the person's pass (4b),** with VoiceOver (Cmd-F5) on macOS and Narrator (Ctrl-Win-Enter) on Windows, from the packages:
+  - **The items:**
+    - Up and Down read each row's summary (path, both replicas, the action);
+    - `>`, `<` and `/` read the row's new action;
+    - Shift-Down reads the selection growing;
+    - the details pane and the status line can be reached.
+  - **Each card** (warning, error, summary, the roots, the password): its title and message are read as it opens, and its buttons are reached with Tab.
+  - **The profile manager and the assistant:** each list, field and step.
+  - **The editor:**
+    - the tree's rows, expanded and collapsed with Right and Left;
+    - a preference's documentation;
+    - each kind of value: text, list, boolean, choice.
+  - **The manual:** the tabs as Up and Down choose them, and the page's text.
+  - **The other windows:** the statistics and a diff.
+  - **Progress:** the bar and Time remaining while a sync runs.
+  - **Windows only:**
+    - from the Start menu, no console opens;
+    - from `cmd`, `gemel-gui -version` prints there;
+    - the watcher (`-repeat watch`) opens no console window.
+  - **With the permission,** `scripts/macos-ax-dump.swift` on each of these, for what VoiceOver is given: from Terminal, say, once Terminal has Accessibility in System Settings › Privacy & Security.
 
 ## Verification
 
