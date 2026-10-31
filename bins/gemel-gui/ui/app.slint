@@ -211,7 +211,14 @@ component DocPane inherits VerticalLayout {
 // and Left and Right are for a tree. Its `ListView` binds its `content-y`
 // to `scroll`, and gives its `visible-height`, so that the row selected
 // is kept in view.
+//
+// Screen readers see the list here, where the keys go, as `label`, with
+// the focus on the row selected, as Slint's own list views delegate it;
+// the `ListView` inside is hidden from them (`accessible-role: none`).
+// The focus's index counts the rows the `ListView` has made, which start
+// at the first one shown.
 component KeyedList inherits FocusScope {
+    in property <string> label;
     in property <int> count;
     in property <int> selected: -1;
     in property <length> list-height: 220px;
@@ -262,6 +269,10 @@ component KeyedList inherits FocusScope {
             }
         }
     }
+    accessible-role: list;
+    accessible-label: root.label;
+    accessible-item-count: root.count;
+    accessible-delegate-focus: root.selected - floor(-root.scroll / 22px);
     // A FocusScope isn't a layout: its height is given here, and the
     // frame fills it.
     min-height: root.list-height;
@@ -303,6 +314,8 @@ export component AppWindow inherits Window {
     preferred-height: 640px;
 
     in property <[RowData]> rows;
+    // The keyboard cursor's row, -1 if there is none.
+    in property <int> cursor: -1;
     in property <string> replica1-heading: " ";
     in property <string> replica2-heading: " ";
     in property <string> profile-text: "No profile";
@@ -814,6 +827,16 @@ export component AppWindow inherits Window {
 
         table-scope := FocusScope {
             vertical-stretch: 1;
+            // Screen readers see the items' list here, where the keys go,
+            // with the focus on the cursor's row, as in a `KeyedList`; the
+            // `ListView` is hidden from them. `list` is AccessKit's ListBox,
+            // which VoiceOver treats as a container of selectable items;
+            // `table` would map to a Table, whose children VoiceOver doesn't
+            // treat as selectable rows.
+            accessible-role: AccessibleRole.list;
+            accessible-label: "Items";
+            accessible-item-count: root.rows.length;
+            accessible-delegate-focus: root.cursor - floor(-list.content-y / Theme.row-height);
             key-pressed(event) => {
                 if root.dialog != 0 {
                     return reject;
@@ -911,12 +934,7 @@ export component AppWindow inherits Window {
                 background: Palette.control-background;
             }
             list := ListView {
-                // ListView is already `list` (AccessKit ListBox, which
-                // VoiceOver treats as a container of selectable items);
-                // `table` would map to a Table, whose children VoiceOver
-                // doesn't treat as selectable rows.
-                accessible-label: "Items";
-                accessible-item-count: root.rows.length;
+                accessible-role: none;
 
                 for row[index] in root.rows: Rectangle {
                     height: Theme.row-height;
@@ -1195,6 +1213,7 @@ export component AppWindow inherits Window {
         HorizontalLayout {
             spacing: 12px;
             profile-list := KeyedList {
+                label: "Profiles";
                 count: root.profiles.length;
                 selected: root.profile-selected;
                 first-focus: true;
@@ -1202,7 +1221,7 @@ export component AppWindow inherits Window {
                 step(r) => { root.profile-clicked(r); }
                 activate(r) => { root.profile-open(); }
                 profile-view := ListView {
-                    accessible-label: "Profiles";
+                    accessible-role: none;
                     content-y <=> profile-list.scroll;
                     for p[i] in root.profiles: Rectangle {
                         height: 22px;
@@ -1608,6 +1627,7 @@ export component AppWindow inherits Window {
                     HeaderCell { label: "Value"; }
                 }
                 editor-list := KeyedList {
+                    label: "Preferences";
                     count: root.editor-rows.length;
                     selected: root.editor-selected;
                     first-focus: true;
@@ -1615,7 +1635,7 @@ export component AppWindow inherits Window {
                     step(r) => { root.editor-clicked(r); }
                     activate(r) => { root.editor-activated(r); }
                     editor-view := ListView {
-                        accessible-label: "Preferences";
+                        accessible-role: none;
                         content-y <=> editor-list.scroll;
                         for r[i] in root.editor-rows: ListRow {
                             selected: i == root.editor-selected;
@@ -1731,6 +1751,7 @@ export component AppWindow inherits Window {
                 if root.pe-kind == 2: HorizontalLayout {
                     spacing: 12px;
                     value-list := KeyedList {
+                        label: "Value";
                         count: root.pe-items.length;
                         selected: root.pe-item;
                         list-height: 160px;
@@ -1738,7 +1759,7 @@ export component AppWindow inherits Window {
                         view-height: value-view.visible-height;
                         step(r) => { root.pe-item-clicked(r); }
                         value-view := ListView {
-                            accessible-label: "Value";
+                            accessible-role: none;
                             content-y <=> value-list.scroll;
                             for v[i] in root.pe-items: ListRow {
                                 selected: i == root.pe-item;
@@ -1831,6 +1852,8 @@ export component AppWindow inherits Window {
             }
         }
         tree-list := KeyedList {
+            accessible-role: tree;
+            label: "Preferences";
             count: root.tree-rows.length;
             selected: root.tree-selected;
             list-height: 240px;
@@ -1842,8 +1865,7 @@ export component AppWindow inherits Window {
             left(r) => { root.tree-left(r); }
             right(r) => { root.tree-right(r); }
             tree-view := ListView {
-                accessible-role: tree;
-                accessible-label: "Preferences";
+                accessible-role: none;
                 content-y <=> tree-list.scroll;
                 for r[i] in root.tree-rows: ListRow {
                     selected: i == root.tree-selected;
@@ -2011,24 +2033,12 @@ export component DocWindow inherits Window {
     // Close, or Escape: hides the window (`close()` is Slint's own).
     callback close-window();
 
-    // The keys: Up and Down (or Ctrl+Page Up and Page Down) go to the
-    // tab before or after; Escape closes.
+    // The keys: Escape closes, wherever the focus is; the tabs' own take
+    // the rest.
     FocusScope {
-        init => { self.focus(); }
         key-pressed(event) => {
             if event.text == Key.Escape {
                 root.close-window();
-                return accept;
-            }
-            if event.modifiers.alt || event.modifiers.meta {
-                return reject;
-            }
-            if event.text == Key.UpArrow || (event.modifiers.control && event.text == Key.PageUp) {
-                root.select(max(0, root.current - 1));
-                return accept;
-            }
-            if event.text == Key.DownArrow || (event.modifiers.control && event.text == Key.PageDown) {
-                root.select(min(root.pages.length - 1, root.current + 1));
                 return accept;
             }
             reject
@@ -2038,33 +2048,55 @@ export component DocWindow inherits Window {
             spacing: 8px;
             HorizontalLayout {
                 spacing: 8px;
-                VerticalLayout {
+                // The tabs, which take the keys when the window opens: Up
+                // and Down (or Ctrl+Page Up and Page Down) go to the tab
+                // before or after. Screen readers see the tab list here,
+                // with the focus on the tab chosen.
+                tabs := FocusScope {
                     width: 170px;
-                    alignment: start;
+                    init => { self.focus(); }
                     accessible-role: tab-list;
                     accessible-label: "Sections";
-                    for name[i] in root.pages: Rectangle {
-                        height: tab-name.preferred-height + 8px;
-                        background: i == root.current ? Palette.accent-background : transparent;
-                        accessible-role: tab;
-                        accessible-label: name;
-                        accessible-item-selectable: true;
-                        accessible-item-selected: i == root.current;
-                        accessible-item-index: i;
-                        accessible-action-default => { root.select(i); }
-                        TouchArea {
-                            clicked => { root.select(i); }
+                    accessible-delegate-focus: root.current;
+                    key-pressed(event) => {
+                        if event.modifiers.alt || event.modifiers.meta {
+                            return reject;
                         }
-                        tab-name := Text {
-                            x: 4px;
-                            width: parent.width - 8px;
-                            text: name;
-                            wrap: word-wrap;
-                            font-weight: 700;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                            color: i == root.current ? Palette.accent-foreground : Palette.foreground;
-                            accessible-role: none;
+                        if event.text == Key.UpArrow || (event.modifiers.control && event.text == Key.PageUp) {
+                            root.select(max(0, root.current - 1));
+                            return accept;
+                        }
+                        if event.text == Key.DownArrow || (event.modifiers.control && event.text == Key.PageDown) {
+                            root.select(min(root.pages.length - 1, root.current + 1));
+                            return accept;
+                        }
+                        reject
+                    }
+                    VerticalLayout {
+                        alignment: start;
+                        for name[i] in root.pages: Rectangle {
+                            height: tab-name.preferred-height + 8px;
+                            background: i == root.current ? Palette.accent-background : transparent;
+                            accessible-role: tab;
+                            accessible-label: name;
+                            accessible-item-selectable: true;
+                            accessible-item-selected: i == root.current;
+                            accessible-item-index: i;
+                            accessible-action-default => { root.select(i); }
+                            TouchArea {
+                                clicked => { root.select(i); tabs.focus(); }
+                            }
+                            tab-name := Text {
+                                x: 4px;
+                                width: parent.width - 8px;
+                                text: name;
+                                wrap: word-wrap;
+                                font-weight: 700;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                color: i == root.current ? Palette.accent-foreground : Palette.foreground;
+                                accessible-role: none;
+                            }
                         }
                     }
                 }

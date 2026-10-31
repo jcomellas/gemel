@@ -730,6 +730,8 @@ impl App {
     fn update_details(&self) {
         {
             let t = self.model.table.borrow();
+            // Where screen readers are told the focus is.
+            self.ui.set_cursor(t.cursor().map_or(-1, |c| c as i32));
             match t.current().map(|i| t.row(i)) {
                 None => {
                     self.ui.set_details_path(SharedString::new());

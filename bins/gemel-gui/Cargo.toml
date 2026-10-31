@@ -40,7 +40,8 @@ gemel-oracle.workspace = true
 i-slint-backend-testing = { version = "=1.18.1", features = ["renderer-software"] }
 # The screenshots' PNGs.
 png = "0.18.1"
-# StyledText's text, to check the documentation reads as markdown.
+# StyledText's text, to check the documentation reads as markdown; and
+# the focus a screen reader is told of, which the testing backend hasn't.
 i-slint-core = "=1.18.1"
 
 [build-dependencies]
