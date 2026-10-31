@@ -74,6 +74,17 @@ jobs:
             $v = & (Join-Path $dir "$b.exe") -version
             if ($LASTEXITCODE -ne 0 -or $v -notmatch '^gemel version ') { "$b -version: $v"; exit 1 }
           }
+          # gemel-gui is a program for the window (its PE header's
+          # subsystem is 2), which opens no console; gemel is a console
+          # program (3).
+          function Subsystem($exe) {
+            $b = [IO.File]::ReadAllBytes($exe)
+            [BitConverter]::ToUInt16($b, [BitConverter]::ToInt32($b, 0x3C) + 0x5C)
+          }
+          foreach ($p in @(@('gemel-gui', 2), @('gemel', 3))) {
+            $s = Subsystem (Join-Path $dir "$($p[0]).exe")
+            if ($s -ne $p[1]) { "$($p[0]).exe's subsystem is $s, not $($p[1])"; exit 1 }
+          }
           foreach ($f in 'gemel-fsmonitor.exe', 'LICENSE.txt', 'NOTICE.txt', 'THIRD-PARTY-LICENSES.txt') {
             if (-not (Test-Path (Join-Path $dir $f))) { "missing $f"; exit 1 }
           }

@@ -17,6 +17,9 @@
 //! `gui`), that is the text interface, whatever `-ui` asks for, as with
 //! OCaml's text-only build; with one, as `gemel-gui` runs it, the
 //! graphical interface by default, as `uigtk3`'s `Body.start` chooses.
+//! `gemel-gui` is built without a console on Windows, so every run of it
+//! but its window's first gets one if it needs one
+//! ([`gemel_fs::terminal::init_console`]).
 
 mod infos;
 mod input;
@@ -45,17 +48,41 @@ pub fn main(args: Vec<String>, gui: Option<Gui>) -> std::process::ExitCode {
 
 /// `Main.init`, then the interface: the exit code.
 fn run(args: Vec<String>, gui: Option<Gui>) -> i32 {
+    // What writes to the standard output or error, reads the input or
+    // serves on them, rather than showing the window.
+    let console = || {
+        if gui.is_some() {
+            gemel_fs::terminal::init_console();
+        }
+    };
     let prefs = match gemel_ui_api::new_prefs() {
         Ok(p) => p,
         Err(e) => {
+            console();
             eprintln!("Error: {e}");
             return ExitCode::Fatal as i32;
         }
     };
     let argv = match prefs.scan_cmd_line(&args) {
         Ok(a) => a,
-        Err(e) => return usage_error(&prefs, &e),
+        Err(e) => {
+            console();
+            return usage_error(&prefs, &e);
+        }
     };
+    if [
+        cli::VERSION.name(),
+        cli::PREFS_DOCS.name(),
+        cli::PREFS_MAN.name(),
+        cli::DOC.name(),
+        cli::SERVER.name(),
+        cli::SOCKET.name(),
+    ]
+    .iter()
+    .any(|k| argv.contains_key(*k))
+    {
+        console();
+    }
     if argv.contains_key(cli::VERSION.name()) {
         println!("{MY_NAME} version {MY_VERSION}");
         return 0;
@@ -100,10 +127,14 @@ fn run(args: Vec<String>, gui: Option<Gui>) -> i32 {
         Some(s) if s == "text" => Interface::Text,
         Some(s) if s == "graphic" => Interface::Graphic,
         Some(_) => {
+            console();
             print_usage(&prefs);
             return 1;
         }
     };
+    if !(interface == Interface::Graphic && gui.is_some() && display_available()) {
+        console();
+    }
     match (interface, gui) {
         (Interface::Graphic, Some(gui)) if display_available() => gui(args),
         (Interface::Graphic, Some(_)) => {

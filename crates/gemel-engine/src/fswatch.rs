@@ -289,15 +289,15 @@ impl Slot {
         let Some(program) = program else {
             return Ok(false);
         };
-        let mut child = Command::new(&program)
-            .stdin(Stdio::piped())
+        let mut cmd = Command::new(&program);
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|e| {
-                SysError::new("create_process", program.to_string_lossy().as_bytes(), e)
-                    .to_fatal("starting filesystem watcher")
-            })?;
+            .stderr(Stdio::inherit());
+        gemel_fs::terminal::no_console_window(&mut cmd);
+        let mut child = cmd.spawn().map_err(|e| {
+            SysError::new("create_process", program.to_string_lossy().as_bytes(), e)
+                .to_fatal("starting filesystem watcher")
+        })?;
         let stdin = child.stdin.take().expect("piped");
         let out = child.stdout.take().expect("piped");
         let (line_tx, lines) = mpsc::channel();

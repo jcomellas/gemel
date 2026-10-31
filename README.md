@@ -75,7 +75,8 @@ draft release:
   silicon and Intel Macs. Drag it to Applications.
 - **Windows:** `Gemel-<version>-x64.msi`, which installs `gemel-gui`,
   `gemel` and `gemel-fsmonitor` in `Program Files\Gemel`, with a Start
-  menu entry.
+  menu entry. `gemel-gui` opens no console; for the command line and the
+  text interface, run `gemel`.
 - **Linux, as an AppImage:** `Gemel-<version>-x86_64.AppImage`, for
   systems with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36
   and later). Make it executable (`chmod +x`) and run it. Without FUSE,
