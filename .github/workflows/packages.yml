@@ -70,9 +70,12 @@ jobs:
           $p = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /l*v install.log" -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 80; exit 1 }
           $dir = Join-Path $env:ProgramFiles Gemel
+          # Start-Process waits for each, with its output in a file:
+          # PowerShell's `&` doesn't wait for a program for the window.
           foreach ($b in 'gemel-gui', 'gemel') {
-            $v = & (Join-Path $dir "$b.exe") -version
-            if ($LASTEXITCODE -ne 0 -or $v -notmatch '^gemel version ') { "$b -version: $v"; exit 1 }
+            $r = Start-Process (Join-Path $dir "$b.exe") -ArgumentList '-version' -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$b.out"
+            $v = Get-Content "$b.out" -Raw
+            if ($r.ExitCode -ne 0 -or $v -notmatch '^gemel version ') { "$b -version: $v"; exit 1 }
           }
           # gemel-gui is a program for the window (its PE header's
           # subsystem is 2), which opens no console; gemel is a console
