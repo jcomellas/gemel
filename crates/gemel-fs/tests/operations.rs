@@ -9,7 +9,7 @@ use gemel_fs::fileinfo::{self, FsConfig, Typ};
 use gemel_fs::fingerprint::Fingerprint;
 use gemel_fs::fspath::Fspath;
 use gemel_fs::os::{self, TempNames};
-use gemel_fs::props::{Props, PropsConfig, Time};
+use gemel_fs::props::{Props, PropsConfig, Time, XattrCtx};
 use gemel_fs::system;
 
 struct Dir(std::path::PathBuf, Fspath);
@@ -61,14 +61,32 @@ fn get_types_and_absent_paths() {
     d.write("f", b"abc");
     std::fs::create_dir(d.0.join("sub")).unwrap();
     let c = config();
-    let f = fileinfo::get(true, &d.1, &path("f"), NONE, &c).unwrap();
+    let f = fileinfo::get(
+        true,
+        &d.1,
+        &path("f"),
+        NONE,
+        &c,
+        &Props::dummy(),
+        &XattrCtx::standalone(),
+    )
+    .unwrap();
     assert_eq!((f.typ, f.desc.length), (Typ::File, 3));
     assert!(matches!(f.desc.time, Time::Synced(_)));
     assert_eq!(
         fileinfo::get_type(true, &d.1, &path("sub"), NONE, &c).unwrap(),
         Typ::Directory
     );
-    let missing = fileinfo::get(true, &d.1, &path("nope/x"), NONE, &c).unwrap();
+    let missing = fileinfo::get(
+        true,
+        &d.1,
+        &path("nope/x"),
+        NONE,
+        &c,
+        &Props::dummy(),
+        &XattrCtx::standalone(),
+    )
+    .unwrap();
     assert_eq!(missing.typ, Typ::Absent);
     assert_eq!(missing.desc, Props::dummy());
 }
@@ -126,7 +144,15 @@ fn set_and_check_props() {
         time: Time::Synced(1_600_000_123.0),
         ..Props::dummy()
     };
-    fileinfo::set(&d.1, &p, SetAction::Set(&Props::file_default()), &new, &c).unwrap();
+    fileinfo::set(
+        &d.1,
+        &p,
+        SetAction::Set(&Props::file_default()),
+        &new,
+        &c,
+        &XattrCtx::standalone(),
+    )
+    .unwrap();
     let m = std::fs::metadata(d.0.join("f")).unwrap();
     assert_eq!(m.permissions().mode() & 0o7777, 0o640);
     assert_eq!(
@@ -134,7 +160,17 @@ fn set_and_check_props() {
         UNIX_EPOCH + Duration::from_secs(1_600_000_123)
     );
     // Update changes only what differs.
-    let old = fileinfo::get(false, &d.1, &p, NONE, &c).unwrap().desc;
+    let old = fileinfo::get(
+        false,
+        &d.1,
+        &p,
+        NONE,
+        &c,
+        &Props::dummy(),
+        &XattrCtx::standalone(),
+    )
+    .unwrap()
+    .desc;
     let newer = Props {
         perm: Perm {
             bits: 0o600,
@@ -142,7 +178,15 @@ fn set_and_check_props() {
         },
         ..old.clone()
     };
-    fileinfo::set(&d.1, &p, SetAction::Update(&old), &newer, &c).unwrap();
+    fileinfo::set(
+        &d.1,
+        &p,
+        SetAction::Update(&old),
+        &newer,
+        &c,
+        &XattrCtx::standalone(),
+    )
+    .unwrap();
     assert_eq!(
         std::fs::metadata(d.0.join("f"))
             .unwrap()
@@ -161,7 +205,7 @@ fn set_and_check_props() {
         ..newer
     };
     let e = wrong
-        .check(&d.1, &p, &st, &c.props)
+        .check(&d.1, &p, &st, &c.props, &XattrCtx::standalone())
         .unwrap_err()
         .to_string();
     assert!(e.starts_with("Failed to set permissions of file "), "{e}");
@@ -265,7 +309,25 @@ fn fingerprints() {
         "{e}"
     );
     let c = config();
-    let info = fileinfo::get(true, &d.1, &path("hi"), NONE, &c).unwrap();
-    let (_, full) = os::safe_fingerprint(&d.1, &path("hi"), &info, None, NONE, &c).unwrap();
+    let info = fileinfo::get(
+        true,
+        &d.1,
+        &path("hi"),
+        NONE,
+        &c,
+        &Props::dummy(),
+        &XattrCtx::standalone(),
+    )
+    .unwrap();
+    let (_, full) = os::safe_fingerprint(
+        &d.1,
+        &path("hi"),
+        &info,
+        None,
+        NONE,
+        &c,
+        &XattrCtx::standalone(),
+    )
+    .unwrap();
     assert_eq!(full.data, fp);
 }

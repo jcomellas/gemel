@@ -1,0 +1,30 @@
+name: Release
+
+# On a version tag (v0.1.0 and so on): the packages, built and checked as
+# on every push, attached to a draft GitHub release for a person to look
+# over and publish.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  packages:
+    uses: ./.github/workflows/packages.yml
+
+  release:
+    needs: packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --draft --title "gemel $GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

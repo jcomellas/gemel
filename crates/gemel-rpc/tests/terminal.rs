@@ -195,6 +195,31 @@ fn what_ssh_said_last_is_kept_when_it_fails() {
     .unwrap();
 }
 
+/// The same, when the terminal may have ended before the failure is
+/// known: on macOS, it is revoked as ssh exits.
+#[test]
+fn what_ssh_said_last_is_kept_when_the_terminal_ends_first() {
+    runtime::run_here(async {
+        let (i, seen) = interact(&["wrong", "wrong"]);
+        let s = terminal::create_session(shim()).unwrap();
+        let term = s.term.expect("a terminal");
+        let requests = terminal::handle_password_requests(term.clone(), i);
+        tokio::time::timeout(Duration::from_secs(30), ended(s.child))
+            .await
+            .expect("ended");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let last = requests.remaining().await;
+        let seen = seen.borrow();
+        let all = format!("{}{last}", seen.shown.join(""));
+        assert!(
+            all.contains("Permission denied (publickey,password)."),
+            "{all:?}"
+        );
+        term.close();
+    })
+    .unwrap();
+}
+
 #[test]
 fn without_answers_nothing_is_written() {
     runtime::run_here(async {

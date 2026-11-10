@@ -1,0 +1,49 @@
+gemel
+Copyright 2026 Juan Jose Comellas
+
+gemel is a port to Rust of Unison, the file synchronizer
+(https://github.com/bcpierce00/unison), made from Unison's source at commit
+8772d26. It is derived from Unison, and is not an official Unison project.
+
+gemel is free software, distributed under the GNU General Public License,
+version 3 or (at your option) any later version; see LICENSE. The graphical
+program, gemel-gui, uses Slint under Slint's GPL-3.0-only option, so that
+program is distributed under version 3 of the License only.
+
+Source: the corresponding source of a released package is the tag of the
+same version at https://github.com/jcomellas/gemel.
+
+
+Unison
+------
+
+Unison is distributed under the GNU General Public License, version 3. The
+notices of the Unison sources gemel derives from:
+
+  Copyright 1999-2020, Benjamin C. Pierce
+  Copyright 2012, Benjamin C. Pierce
+  Copyright 2020-2022, 2021, 2021-2023 and 2021-2025, Tõivo Leedjärv
+  Copyright 2020, Stéphane Glondu
+  Copyright 1999-2002 and 1999-2008 (sources that name no holder)
+
+Unison's Unicode tables and manual, which gemel carries, come from the same
+sources.
+
+
+OCaml
+-----
+
+gemel's legacy hash (gemel-compat's ocaml_hash) derives from the copy of
+OCaml's runtime in Unison's src/hash_compat.c:
+
+  Copyright 1996 Institut National de Recherche en Informatique et en
+  Automatique. Distributed under the GNU Lesser General Public License,
+  version 2.1, with the special exception on linking described in OCaml's
+  LICENSE file.
+
+
+Other software
+--------------
+
+The packages also contain the Rust crates gemel is built with. Their
+licences are in THIRD-PARTY-LICENSES, beside this file in each package.

@@ -65,6 +65,48 @@ through an ssh tunnel.
 
 Design and rationale: [docs/unison-port-analysis.md](docs/unison-port-analysis.md).
 
+## Installing
+
+Each push builds packages of the graphical program, `gemel-gui`
+(`.github/workflows/packages.yml`), and a version tag attaches them to a
+draft release:
+
+- **macOS:** `Gemel-<version>-macos.dmg`, with `Gemel.app` for Apple
+  silicon and Intel Macs. Drag it to Applications.
+- **Windows:** `Gemel-<version>-x64.msi`, which installs `gemel-gui`,
+  `gemel` and `gemel-fsmonitor` in `Program Files\Gemel`, with a Start
+  menu entry. `gemel-gui` opens no console; for the command line and the
+  text interface, run `gemel`.
+- **Linux, as an AppImage:** `Gemel-<version>-x86_64.AppImage`, for
+  systems with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36
+  and later). Make it executable (`chmod +x`) and run it. Without FUSE,
+  run it with `--appimage-extract-and-run`.
+- **Linux, as a Flatpak:** `Gemel-<version>-x86_64.flatpak`. Install it
+  with `flatpak install --user Gemel-<version>-x86_64.flatpak`, which
+  fetches the Freedesktop runtime from Flathub, and start Gemel from the
+  desktop's menu, or with `flatpak run io.github.jcomellas.gemel`. The
+  command line is `flatpak run --command=gemel io.github.jcomellas.gemel`.
+  The Flatpak can read and write all your files, as a synchronizer must.
+  It runs its runtime's ssh, with your `~/.ssh` and ssh agent, but not
+  your system's `/etc/ssh` or the programs a `ProxyCommand` names.
+
+The packages aren't signed with a Developer ID or an Authenticode
+certificate, so each system asks before the first run:
+
+- **macOS:** Gatekeeper says it can't check the app for malicious
+  software. Control-click `Gemel.app` in Finder, choose Open, and confirm;
+  or, after the warning, choose Open Anyway in System Settings › Privacy &
+  Security. Later runs don't ask.
+- **Windows:** SmartScreen says it protected your PC. Choose More info,
+  then Run anyway.
+
+To build them yourself: `scripts/package-macos.sh` on macOS,
+`scripts/package-windows.sh` on Windows in Git Bash, with WiX 5, and
+`scripts/package-appimage.sh` and `scripts/package-flatpak.sh` on Linux
+(each script's header lists what it needs). Each package carries `LICENSE`,
+`NOTICE` (gemel's and Unison's notices, and where the source is) and
+`THIRD-PARTY-LICENSES` (the licences of the crates it is built with).
+
 ## Compatibility goal (Tier A)
 
 gemel aims to be wire- and archive-compatible with Unison 2.52 and later
@@ -128,7 +170,8 @@ its GPL-3.0-only licence, so that binary is distributed under GPLv3 only.
 The other binaries keep the "or any later version" option.
 
 Unison is Copyright Benjamin C. Pierce and other contributors; each ported
-module keeps the copyright lines of its source. gemel is an independent
+module keeps the copyright lines of its source, and [NOTICE](NOTICE)
+collects them. gemel is an independent
 project and is not affiliated with or endorsed by the Unison project.
 
 When porting a module, keep the copyright lines of the Unison source file

@@ -42,7 +42,7 @@ use gemel_rpc::root::Root;
 
 use crate::archive::{self, Archive};
 use crate::common::{Codec, ContentsChange, UpdateContent, UpdateItem};
-use crate::copy::{self, Ctx, Replacing, Source};
+use crate::copy::{self, Ctx, Replacing, Source, XPath};
 use crate::globals::Roots;
 use crate::region::Region;
 use crate::stasher::{self, Disposition};
@@ -401,10 +401,13 @@ async fn set_prop_local(
                 SetAction::Update(&old_desc),
                 &new_desc,
                 &ctx.fs,
+                &ctx.xattr.ctx(),
             )
         })
         .await?;
     }
+    // Without the xattrs' values again, as the archive keeps them.
+    let new_desc = new_desc.purge_ext_data();
     if file_updated(&ui) {
         stasher::stash_current_version(host, fspath, &local, None).await?;
     }
@@ -503,20 +506,22 @@ pub async fn set_prop(
     ui_from: &UpdateItem,
     ui_to: &UpdateItem,
 ) -> Result<(), Error> {
+    let (local_from, new_desc) =
+        copy::props_ext_data_on_root(rpc, root_from, XPath::Global(path_from.clone()), new_desc)
+            .await?;
     rpc.call_root(
         &SET_PROP,
         root_to,
-        (
-            path_to.clone(),
-            ui_to.clone(),
-            new_desc.clone(),
-            old_desc.clone(),
-        ),
+        (path_to.clone(), ui_to.clone(), new_desc, old_desc.clone()),
     )
     .await?;
-    let local_from = rpc
-        .call_root(&TRANSLATE_PATH, root_from, path_from.clone())
-        .await?;
+    let local_from = match local_from {
+        Some(p) => p,
+        None => {
+            rpc.call_root(&TRANSLATE_PATH, root_from, path_from.clone())
+                .await?
+        }
+    };
     update_props(rpc, root_from, &local_from, None, ui_from).await
 }
 
@@ -584,7 +589,14 @@ pub static SET_DIR_PROP: RootCmd<(Fspath, Path<Local>, Props, Props), ()> = Root
     |host, _, (working_dir, path, initial, new)| {
         Box::pin(async move {
             let ctx = Ctx::of(&host)?;
-            fileinfo::set(&working_dir, &path, SetAction::Set(&initial), &new, &ctx.fs)
+            fileinfo::set(
+                &working_dir,
+                &path,
+                SetAction::Set(&initial),
+                &new,
+                &ctx.fs,
+                &ctx.xattr.ctx(),
+            )
         })
     },
 );
@@ -920,7 +932,14 @@ fn create_directories(
         &fspath.concat(&parent),
         Props::dir_default().perm.bits as u32,
     ) {
-        Ok(()) => fileinfo::set(fspath, &parent, SetAction::Copy(&parent), desc, &ctx.fs),
+        Ok(()) => fileinfo::set(
+            fspath,
+            &parent,
+            SetAction::Copy(&parent),
+            desc,
+            &ctx.fs,
+            &ctx.xattr.ctx(),
+        ),
         // Created already, for another path with the same parent.
         Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e.to_transient("creating parent directories")),
@@ -1062,6 +1081,26 @@ pub static DELETE_SPURIOUS_CHILDREN: RootCmd<(Fspath, Path<Local>, Vec<Name>), (
         })
     },
 );
+
+/// `readParentsExtData`: each of `descs` (the props of `path_from`'s
+/// parents, the nearest first) with its xattrs' values.
+async fn read_parents_ext_data(
+    rpc: &Rpc,
+    root_from: &Root,
+    path_from: &Path<Local>,
+    descs: Vec<Props>,
+) -> Result<Vec<Props>, Error> {
+    let mut path = path_from.clone();
+    let mut out = Vec::with_capacity(descs.len());
+    for desc in descs {
+        let (_, parent) = path
+            .deconstruct_rev()
+            .ok_or_else(|| internal("a parent's props without a parent"))?;
+        out.push(copy::read_props_ext_data(rpc, root_from, &parent, &desc).await?);
+        path = parent;
+    }
+    Ok(out)
+}
 
 /// `normalizeProps`: the source's parents' props for the target's
 /// missing parents (dropping those the target has), reversed as OCaml
@@ -1286,6 +1325,8 @@ impl<'a> Copying<'a> {
                         )
                         .await?;
                 }
+                let desc_ext =
+                    copy::read_props_ext_data(self.rpc, self.root_from, p_from, desc).await?;
                 // The actual permissions, to keep inherited bits.
                 self.copy_reg
                     .run(
@@ -1297,7 +1338,7 @@ impl<'a> Copying<'a> {
                                 self.working_dir.clone(),
                                 p_to.clone(),
                                 initial_desc,
-                                desc.clone(),
+                                desc_ext,
                             ),
                         ),
                     )
@@ -1333,7 +1374,13 @@ pub async fn copy(
     let local_path_from = rpc
         .call_root(&TRANSLATE_PATH, root_from, path_from.clone())
         .await?;
-    let parent_props = normalize_props(props_from, props_to)?;
+    let parent_props = read_parents_ext_data(
+        rpc,
+        root_from,
+        &local_path_from,
+        normalize_props(props_from, props_to)?,
+    )
+    .await?;
     let (working_dir, real_path_to, temp_path_to, local_path_to) = rpc
         .call_root(
             &SETUP_TARGET_PATHS_AND_CREATE_PARENT_DIRECTORY,
@@ -1620,9 +1667,16 @@ pub async fn move_(
                 .to_owned(),
         ));
     }
-    rpc.call_root(&TRANSLATE_PATH, root_from, from.new_path.clone())
+    let local_path_from = rpc
+        .call_root(&TRANSLATE_PATH, root_from, from.new_path.clone())
         .await?;
-    let parent_props = normalize_props(from.new_props, to.new_props)?;
+    let parent_props = read_parents_ext_data(
+        rpc,
+        root_from,
+        &local_path_from,
+        normalize_props(from.new_props, to.new_props)?,
+    )
+    .await?;
     rpc.call_root(
         &MOVE,
         root_to,
@@ -1962,7 +2016,15 @@ impl MergeFiles {
     fn copy(&self, ctx: &Ctx, pairs: &[(&Path<Local>, &Path<Local>)]) -> Result<(), Error> {
         for (src, trg) in pairs {
             self.delete(ctx, trg)?;
-            let info = fileinfo::get(false, &self.working_dir, src, &|_| false, &ctx.fs)?;
+            let info = fileinfo::get(
+                false,
+                &self.working_dir,
+                src,
+                &|_| false,
+                &ctx.fs,
+                &Props::dummy(),
+                &ctx.xattr.ctx(),
+            )?;
             let mut progress = |n| {
                 if let Some(p) = &self.printer {
                     p(self.id, n, "l");
@@ -2279,7 +2341,15 @@ async fn merge_in(
     };
     // A copy of it, in case the merge program overwrites it and crashes.
     if let Some(f) = &arch {
-        let info = fileinfo::get(false, f, &Path::empty(), &|_| false, &ctx.fs)?;
+        let info = fileinfo::get(
+            false,
+            f,
+            &Path::empty(),
+            &|_| false,
+            &ctx.fs,
+            &Props::dummy(),
+            &ctx.xattr.ctx(),
+        )?;
         copy::Progress::none(|p| {
             copy::local_file(
                 ctx,

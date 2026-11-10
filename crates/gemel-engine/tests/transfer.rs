@@ -458,7 +458,16 @@ impl Hosts {
         let fs = FsConfig::from_prefs(&self.rpc.client_host().prefs().borrow());
         let root = self.root(side);
         let p = local(name);
-        let info = fileinfo::get(true, &root.fspath, &p, &|_| false, &fs).unwrap();
+        let info = fileinfo::get(
+            true,
+            &root.fspath,
+            &p,
+            &|_| false,
+            &fs,
+            &gemel_fs::props::Props::dummy(),
+            &gemel_fs::props::XattrCtx::standalone(),
+        )
+        .unwrap();
         let fp = os::fingerprint(&root.fspath, &p, info.typ.info_kind(), false).unwrap();
         Source {
             desc: info.desc.clone(),
@@ -918,7 +927,16 @@ fn resource_forks_transfer_between_hosts() {
         let source = {
             let fs = FsConfig::from_prefs(&h.rpc.client_host().prefs().borrow());
             let root = h.root(from);
-            let info = fileinfo::get(true, &root.fspath, &local(&name), &|_| false, &fs).unwrap();
+            let info = fileinfo::get(
+                true,
+                &root.fspath,
+                &local(&name),
+                &|_| false,
+                &fs,
+                &gemel_fs::props::Props::dummy(),
+                &gemel_fs::props::XattrCtx::standalone(),
+            )
+            .unwrap();
             let fp =
                 os::fingerprint(&root.fspath, &local(&name), info.typ.info_kind(), true).unwrap();
             Source {

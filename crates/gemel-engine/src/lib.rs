@@ -27,6 +27,7 @@ pub mod transport;
 pub mod tree;
 pub mod update;
 pub mod uutil;
+pub mod xattrs;
 pub mod xferhint;
 
 use gemel_base::features::Features;

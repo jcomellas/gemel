@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Gemel's AppStream metadata, which software centres show, for the
+     AppImage and the Flatpak. The id is the Flatpak's, the desktop
+     entry's and the window's. -->
+<component type="desktop-application">
+  <id>io.github.jcomellas.gemel</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <name>Gemel</name>
+  <summary>Synchronize files and directories, as Unison does</summary>
+  <description>
+    <p>
+      Gemel keeps two replicas of a collection of files and directories in
+      step, on one host or on two, over ssh or a socket. Changes on either
+      side are propagated to the other, and conflicting changes are shown
+      for you to resolve.
+    </p>
+    <p>
+      It is a Rust port of the Unison file synchronizer, compatible with
+      it: either end can be Unison, and the profiles and archives are the
+      same. Gemel is not an official Unison project.
+    </p>
+  </description>
+  <developer id="io.github.jcomellas">
+    <name>Juan Jose Comellas</name>
+  </developer>
+  <launchable type="desktop-id">io.github.jcomellas.gemel.desktop</launchable>
+  <url type="homepage">https://github.com/jcomellas/gemel</url>
+  <url type="bugtracker">https://github.com/jcomellas/gemel/issues</url>
+  <url type="vcs-browser">https://github.com/jcomellas/gemel</url>
+  <provides>
+    <binary>gemel-gui</binary>
+    <binary>gemel</binary>
+  </provides>
+  <content_rating type="oars-1.1" />
+</component>

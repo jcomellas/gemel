@@ -1547,6 +1547,9 @@ dependencies = [
 [[package]]
 name = "gemel-oracle"
 version = "0.1.0"
+dependencies = [
+ "gemel-fs",
+]
 
 [[package]]
 name = "gemel-rpc"

@@ -34,9 +34,9 @@ jobs:
           if-no-files-found: ignore
       - run: ./scripts/check-no-gui-deps.sh
         shell: bash
-      # There is no OCaml Unison on Windows, nor on the macOS runner: gemel
-      # replays the outcomes the oracle job checks are still the pinned
-      # reference's.
+      # There is no OCaml Unison on Windows, and the macOS runner's (below)
+      # isn't the pinned source: gemel replays the outcomes the oracle job
+      # checks are still the pinned reference's.
       - if: runner.os != 'Linux'
         shell: bash
         run: |
@@ -45,11 +45,30 @@ jobs:
           cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows.txt --candidate $gemel
           cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-socket.txt --candidate $gemel
           cargo run --locked -p gemel-oracle -- --replay tools/oracle/recorded/windows-ssh.txt --candidate $gemel
+      # On macOS, extended attributes and ACLs against Homebrew's OCaml
+      # Unison (whatever release it has): gemel-engine's tests of them, and
+      # the oracle with gemel as the client, the server and both.
+      - if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install unison
+          export GEMEL_REFERENCE_UNISON=$(brew --prefix)/bin/unison
+          cargo test --locked -p gemel-engine --test transport -- xattr acl
+          oracle() { cargo run --locked -q -p gemel-oracle -- --xattrs --acls "$@"; }
+          oracle --reference $GEMEL_REFERENCE_UNISON --candidate target/debug/gemel --count 20
+          for remote in ssh socket; do
+            oracle --remote $remote --reference $GEMEL_REFERENCE_UNISON --candidate-server target/debug/gemel --count 10
+            oracle --remote $remote --reference $GEMEL_REFERENCE_UNISON --candidate target/debug/gemel \
+              --candidate-server $GEMEL_REFERENCE_UNISON --count 10
+            oracle --remote $remote --reference $GEMEL_REFERENCE_UNISON --candidate target/debug/gemel --count 10
+          done
 
   oracle:
     # The differential harness (tools/oracle) against OCaml Unison built
-    # from the pinned source that the fixtures also come from.
-    runs-on: ubuntu-latest
+    # from the pinned source that the fixtures also come from. On a pinned
+    # Ubuntu for its OCaml: 2.52.1 needs `bigarray.cmxa`, which OCaml 5 hasn't,
+    # and ubuntu-latest (26.04) has OCaml 5.4.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -156,6 +175,31 @@ jobs:
           for v in 2.52.1 2.53.8; do
             oracle --remote ssh --old-server --reference unison-src/src/unison --reference-server releases/unison-$v \
               --candidate target/debug/gemel --candidate-server releases/unison-$v --count 20
+          done
+        shell: bash
+      # Extended attributes (milestone 5): scenarios that set and remove
+      # them, synchronised with -xattrs=true. Each pairing as above, checked
+      # against itself, then with gemel as the client, the server, or both,
+      # and with 2.53.8, which has them, at the other end. A 2.52.1 server
+      # has none: a client asking for them must be refused, as OCaml's is.
+      - run: |
+          oracle() { cargo run --locked -q -p gemel-oracle -- --xattrs "$@"; }
+          src=unison-src/src/unison
+          oracle --reference $src --count 10
+          oracle --reference $src --candidate target/debug/gemel --count 30
+          for remote in ssh socket; do
+            oracle --remote $remote --reference $src --count 10
+            oracle --remote $remote --reference $src --reference-server releases/unison-2.53.8 --count 10
+            oracle --remote $remote --reference releases/unison-2.53.8 --reference-server $src --count 10
+            oracle --remote $remote --reference $src --candidate-server target/debug/gemel --count 15
+            oracle --remote $remote --reference $src --candidate target/debug/gemel --candidate-server $src --count 15
+            oracle --remote $remote --reference $src --candidate target/debug/gemel --count 15
+            oracle --remote $remote --reference $src --reference-server releases/unison-2.53.8 \
+              --candidate target/debug/gemel --candidate-server releases/unison-2.53.8 --count 10
+            oracle --remote $remote --reference releases/unison-2.53.8 --reference-server $src \
+              --candidate releases/unison-2.53.8 --candidate-server target/debug/gemel --count 10
+            oracle --remote $remote --refused --reference $src --reference-server releases/unison-2.52.1 \
+              --candidate target/debug/gemel --candidate-server releases/unison-2.52.1 --count 3
           done
         shell: bash
       # The same over a real ssh and sshd, with keys of their own, on this

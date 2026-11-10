@@ -59,6 +59,34 @@ const NAMES: &[&str] = &[
     "日本",
 ];
 
+/// The extended attributes scenarios with them set and remove, as Unison
+/// shows their names (on Linux, `user.gemel.a` and so on). Replicas'
+/// snapshots show these and no others, since systems add their own.
+pub const XATTR_NAMES: &[&str] = &["gemel.a", "gemel.b", "gemel.c"];
+
+/// The prefix [`XATTR_NAMES`] share.
+pub const XATTR_PREFIX: &str = "gemel.";
+
+/// The ACL entries scenarios with ACLs add, as `chmod +a` takes them (on
+/// macOS). They only allow, so that the harness can still change and
+/// remove what they are on, and one is inherited by what a directory
+/// gets.
+pub const ACL_ENTRIES: &[&str] = &[
+    "group:staff allow read",
+    "group:everyone allow read,write",
+    "group:staff allow execute",
+    "group:everyone allow read,file_inherit,directory_inherit",
+];
+
+/// What scenarios change besides files, links and permissions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Extras {
+    /// Set and remove extended attributes (Linux and macOS).
+    pub xattrs: bool,
+    /// Add ACL entries and remove ACLs (macOS).
+    pub acls: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
     Dir,
@@ -86,6 +114,20 @@ pub enum Op {
     Chmod { path: String, mode: u32 },
     /// Makes a symbolic link; Unix only.
     Symlink { path: String, target: String },
+    /// Sets an extended attribute of a file or directory; only in
+    /// scenarios with them.
+    SetXattr {
+        path: String,
+        name: String,
+        value: Vec<u8>,
+    },
+    /// Removes an extended attribute, if it is there.
+    RemoveXattr { path: String, name: String },
+    /// Adds an entry to the ACL of a file or directory; only in scenarios
+    /// with ACLs.
+    AddAcl { path: String, entry: String },
+    /// Removes the extended ACL.
+    ClearAcl(String),
 }
 
 impl fmt::Display for Op {
@@ -103,6 +145,12 @@ impl fmt::Display for Op {
             Op::Rename { from, to } => write!(f, "rename {from:?} -> {to:?}"),
             Op::Chmod { path, mode } => write!(f, "chmod {mode:o} {path:?}"),
             Op::Symlink { path, target } => write!(f, "symlink {path:?} -> {target:?}"),
+            Op::SetXattr { path, name, value } => {
+                write!(f, "setxattr {path:?} {name} ({} bytes)", value.len())
+            }
+            Op::RemoveXattr { path, name } => write!(f, "rmxattr {path:?} {name}"),
+            Op::AddAcl { path, entry } => write!(f, "chmod +a {entry:?} {path:?}"),
+            Op::ClearAcl(p) => write!(f, "chmod -N {p:?}"),
         }
     }
 }
@@ -168,7 +216,11 @@ impl Tree {
                 self.remove(from);
                 self.0.insert(to.clone(), kind);
             }
-            Op::Chmod { .. } => {}
+            Op::Chmod { .. }
+            | Op::SetXattr { .. }
+            | Op::RemoveXattr { .. }
+            | Op::AddAcl { .. }
+            | Op::ClearAcl(_) => {}
             Op::Symlink { path, .. } => {
                 self.0.insert(path.clone(), Kind::Link);
             }
@@ -219,6 +271,8 @@ struct Gen<'a> {
     rng: &'a mut Rng,
     clock: &'a mut u64,
     flavour: Flavour,
+    /// What else to change.
+    extras: Extras,
 }
 
 impl Gen<'_> {
@@ -240,6 +294,61 @@ impl Gen<'_> {
         }
     }
 
+    /// Sets an attribute of `path`, to a value that is kept in the props
+    /// (32 bytes or less), by its digest, or too long to cache (1024 bytes
+    /// or more).
+    fn set_xattr(&mut self, path: String) -> Op {
+        let len = *self.rng.pick(&[0, 3, 32, 33, 100, 1500]);
+        let c = b"xyz"[self.rng.below(3)];
+        Op::SetXattr {
+            path,
+            name: (*self.rng.pick(XATTR_NAMES)).to_owned(),
+            value: vec![c; len],
+        }
+    }
+
+    /// Adds an ACL entry to `path`.
+    fn add_acl(&mut self, path: String) -> Op {
+        Op::AddAcl {
+            path,
+            entry: (*self.rng.pick(ACL_ENTRIES)).to_owned(),
+        }
+    }
+
+    /// A file or directory of `tree`, if it has one.
+    fn target(&mut self, tree: &Tree) -> Option<String> {
+        let targets: Vec<String> = tree
+            .0
+            .iter()
+            .filter(|(_, k)| **k != Kind::Link)
+            .map(|(p, _)| p.clone())
+            .collect();
+        (!targets.is_empty()).then(|| self.rng.pick(&targets).clone())
+    }
+
+    /// An ACL op on a file or directory of `tree`, if it has one.
+    fn acl_op(&mut self, tree: &Tree) -> Option<Op> {
+        let path = self.target(tree)?;
+        Some(if self.rng.chance(75) {
+            self.add_acl(path)
+        } else {
+            Op::ClearAcl(path)
+        })
+    }
+
+    /// An attribute op on a file or directory of `tree`, if it has one.
+    fn xattr_op(&mut self, tree: &Tree) -> Option<Op> {
+        let path = self.target(tree)?;
+        Some(if self.rng.chance(70) {
+            self.set_xattr(path)
+        } else {
+            Op::RemoveXattr {
+                path,
+                name: (*self.rng.pick(XATTR_NAMES)).to_owned(),
+            }
+        })
+    }
+
     /// Builds a random tree from nothing.
     fn initial(&mut self, tree: &mut Tree) -> Vec<Op> {
         let mut ops = Vec::new();
@@ -253,12 +362,18 @@ impl Gen<'_> {
                 continue;
             };
             let op = if self.rng.chance(30) {
-                Op::Mkdir(path)
+                Op::Mkdir(path.clone())
             } else {
-                self.write(path)
+                self.write(path.clone())
             };
             tree.apply(&op);
             ops.push(op);
+            if self.extras.xattrs && self.rng.chance(50) {
+                ops.push(self.set_xattr(path.clone()));
+            }
+            if self.extras.acls && self.rng.chance(40) {
+                ops.push(self.add_acl(path));
+            }
         }
         ops
     }
@@ -268,9 +383,16 @@ impl Gen<'_> {
         let files = tree.of_kind(Kind::File);
         let dirs = tree.dirs();
         let any: Vec<String> = tree.0.keys().cloned().collect();
-        let roll = self
-            .rng
-            .below(if self.flavour == Flavour::Unix { 8 } else { 6 });
+        let kinds = if self.flavour == Flavour::Unix { 8 } else { 6 };
+        let xattrs = if self.extras.xattrs { 3 } else { 0 };
+        let acls = if self.extras.acls { 3 } else { 0 };
+        let roll = self.rng.below(kinds + xattrs + acls);
+        if roll >= kinds + xattrs {
+            return self.acl_op(tree);
+        }
+        if roll >= kinds {
+            return self.xattr_op(tree);
+        }
         Some(match roll {
             0 | 1 => {
                 let dir = self.rng.pick(&dirs).clone();
@@ -367,6 +489,12 @@ pub struct Scenario {
 impl Scenario {
     /// The scenario for `seed`, for a filesystem of `flavour`.
     pub fn generate(seed: u64, flavour: Flavour) -> Scenario {
+        Self::generate_with(seed, flavour, Extras::default())
+    }
+
+    /// [`Scenario::generate`], with the changes `extras` asks for too
+    /// (Unix only).
+    pub fn generate_with(seed: u64, flavour: Flavour, extras: Extras) -> Scenario {
         let mut rng = Rng::new(seed);
         // Start well in the past, so no time is within a second of the syncs.
         let mut clock = 1_600_000_000;
@@ -374,6 +502,7 @@ impl Scenario {
             rng: &mut rng,
             clock: &mut clock,
             flavour,
+            extras,
         };
         let mut a = Tree::default();
         let initial_a = g.initial(&mut a);
@@ -479,7 +608,44 @@ fn apply_one(root: &Path, op: &Op) -> io::Result<()> {
         Op::Symlink { path, target } => std::os::unix::fs::symlink(target, native(root, path)),
         #[cfg(not(unix))]
         Op::Chmod { .. } | Op::Symlink { .. } => Ok(()),
+        Op::SetXattr { path, name, value } => {
+            gemel_fs::xattr::set(&fspath(root, path)?, name.as_bytes(), value).map_err(xattr_error)
+        }
+        Op::RemoveXattr { path, name } => {
+            gemel_fs::xattr::remove(&fspath(root, path)?, name.as_bytes()).map_err(xattr_error)
+        }
+        Op::AddAcl { path, entry } => chmod(&["+a", entry], &native(root, path)),
+        Op::ClearAcl(p) => chmod(&["-N"], &native(root, p)),
     }
+}
+
+/// Runs macOS's `chmod` with `args` on `p`.
+fn chmod(args: &[&str], p: &Path) -> io::Result<()> {
+    let status = std::process::Command::new("chmod")
+        .args(args)
+        .arg(p)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("chmod {args:?} failed")))
+    }
+}
+
+/// `rel` under `root`, as gemel-fs takes it.
+fn fspath(root: &Path, rel: &str) -> io::Result<gemel_fs::fspath::Fspath> {
+    fspath_of(&native(root, rel))
+}
+
+/// `p`, as gemel-fs takes it.
+pub fn fspath_of(p: &Path) -> io::Result<gemel_fs::fspath::Fspath> {
+    let bytes = gemel_fs::system::name_bytes(p.as_os_str());
+    gemel_fs::fspath::Fspath::canonize(Some(&bytes)).map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// An attribute operation's error, as an I/O error.
+pub fn xattr_error(e: gemel_fs::xattr::Error) -> io::Error {
+    io::Error::other(format!("{e:?}"))
 }
 
 /// Seconds since the epoch, for messages.
@@ -507,6 +673,59 @@ mod tests {
                 assert!(!matches!(op, Op::Chmod { .. } | Op::Symlink { .. }), "{op}");
             }
         }
+    }
+
+    #[test]
+    fn xattrs_change_only_scenarios_with_them() {
+        let ops = |s: &Scenario| {
+            s.initial_a
+                .iter()
+                .chain(&s.initial_b)
+                .chain(&s.changes_a)
+                .chain(&s.changes_b)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let is_xattr = |op: &Op| matches!(op, Op::SetXattr { .. } | Op::RemoveXattr { .. });
+        let mut with = 0;
+        for seed in 0..100 {
+            let plain = Scenario::generate(seed, Flavour::Unix);
+            assert!(!ops(&plain).iter().any(is_xattr));
+            let s = Scenario::generate_with(
+                seed,
+                Flavour::Unix,
+                Extras {
+                    xattrs: true,
+                    acls: false,
+                },
+            );
+            with += ops(&s).iter().filter(|op| is_xattr(op)).count();
+        }
+        assert!(with > 100, "{with}");
+    }
+
+    #[test]
+    fn acls_change_only_scenarios_with_them() {
+        let acl_ops = |s: &Scenario| {
+            s.initial_a
+                .iter()
+                .chain(&s.initial_b)
+                .chain(&s.changes_a)
+                .chain(&s.changes_b)
+                .filter(|op| matches!(op, Op::AddAcl { .. } | Op::ClearAcl(_)))
+                .count()
+        };
+        let both = Extras {
+            xattrs: true,
+            acls: true,
+        };
+        let (mut plain, mut with) = (0, 0);
+        for seed in 0..100 {
+            plain += acl_ops(&Scenario::generate(seed, Flavour::Unix));
+            with += acl_ops(&Scenario::generate_with(seed, Flavour::Unix, both));
+        }
+        assert_eq!(plain, 0);
+        assert!(with > 100, "{with}");
     }
 
     #[test]

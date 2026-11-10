@@ -442,7 +442,8 @@ impl PasswordRequests {
 /// `interact` (50 ms after it comes, unless the connection is up by
 /// then), and the answers written back, until [`PasswordRequests::ready`]
 /// or [`PasswordRequests::remaining`]. After `ready`, what ssh prints
-/// goes to standard error (`forwardShellStderr`).
+/// goes to standard error (`forwardShellStderr`). If the terminal ends
+/// before either, what wasn't shown is kept for them.
 pub fn handle_password_requests(term: Rc<Terminal>, interact: Interact) -> PasswordRequests {
     let r = Rc::new(Requests {
         term: term.clone(),
@@ -475,7 +476,10 @@ pub fn handle_password_requests(term: Rc<Terminal>, interact: Interact) -> Passw
         }
         r.done.set(true);
         r.done_notify.notify_waiters();
-        if r.failed.get() {
+        // The terminal may end before either is known (on macOS, it is
+        // revoked as ssh exits): what is left waits for `ready` or
+        // `remaining`. OCaml sends it to standard error.
+        if !r.ended.get() || r.failed.get() {
             return;
         }
         // `forwardShellStderr`: from now on, the client's standard error.

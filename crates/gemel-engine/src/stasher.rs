@@ -624,7 +624,15 @@ impl Backups {
         }
         let source = source_path.unwrap_or(path);
         let follow = |p: &Path<Local>| self.ctx.follow.test(p.as_bytes());
-        let stat = fileinfo::get(true, fspath, source, &follow, &self.ctx.fs)?;
+        let stat = fileinfo::get(
+            true,
+            fspath,
+            source,
+            &follow,
+            &self.ctx.fs,
+            &Props::dummy(),
+            &self.ctx.xattr.ctx(),
+        )?;
         match stat.typ {
             Typ::Absent => Ok(()),
             Typ::Directory => {

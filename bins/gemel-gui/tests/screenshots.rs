@@ -4,8 +4,9 @@
 //! without running it (CI keeps them). The menu bar is Slint's own, drawn
 //! in the window, as on Linux and Windows; macOS's native one and `rfd`'s
 //! pickers aren't drawn. Each test checks that what it drew isn't
-//! blank, and that a card's controls lie within it, in the system's
-//! fonts.
+//! blank, that a card's controls lie within it, in the system's fonts,
+//! and that what a screen reader finds in it, but for text and images,
+//! has a label to say.
 
 mod support;
 
@@ -35,8 +36,22 @@ fn shots() -> PathBuf {
 }
 
 /// Draws `w` as `name.png`, at its size, or `size` if it has none yet,
-/// once what moves has stopped.
+/// once what moves has stopped, and checks that what a screen reader
+/// finds there, but for text (whose label is what it shows) and images,
+/// has a label.
 fn shoot(w: &impl ComponentHandle, name: &str, size: (f32, f32)) {
+    for e in ElementQuery::from_root(w).match_descendants().find_all() {
+        let role = e.accessible_role();
+        if !matches!(
+            role,
+            None | Some(AccessibleRole::None | AccessibleRole::Text | AccessibleRole::Image)
+        ) {
+            assert!(
+                !e.accessible_label().unwrap_or_default().trim().is_empty(),
+                "{name}: a {role:?} without a label"
+            );
+        }
+    }
     let window = w.window();
     if window.size().width == 0 {
         window.set_size(LogicalSize::new(size.0, size.1));
